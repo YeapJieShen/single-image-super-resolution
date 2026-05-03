@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "single-image-super-resolution"
+version = "0.1.0"
+description = "A package for reimplementation of single image super-resolution"
+authors = [
+    { name = "Jie Shen Yeap", email = "yeapjieshen@hotmail.com" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "torch"
+]
+
+[project.urls]
+homepage = "https://github.com/YeapJieShen/single-image-super-resolution"
+repository = "https://github.com/YeapJieShen/single-image-super-resolution"
+
+[tool.setuptools.packages.find]
+include = ["sisr*"]
