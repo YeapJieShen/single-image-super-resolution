@@ -1,0 +1,122 @@
+# SRCNN x3 experiment template. One self-contained YAML — no layering.
+#   python -m sisr.cli fit --config templates/config.srcnn.template.yaml
+#
+# Fill in placeholders flagged with TODO before running. Per-run tweaks can
+# also be applied on the CLI:
+#   --trainer.max_steps=500000  --model.lr=1e-3  --data.train_dataset.subimg_size=33
+
+seed_everything: 42
+
+model:
+  model:
+    class_path: sisr.models.srcnn.SRCNN
+    init_args:
+      num_channels: 3
+      num_filters: [64, 32]
+      kernel_sizes: [9, 1, 5]
+      padding: 0
+      custom_init: true
+  example_input_shape: [3, 224, 224]   # (channels, H, W) — used for TensorBoard model graph
+  model_colorspace: RGB                # RGB | Y | YCbCr — dataset must serve RGB for Y/YCbCr
+  psnr_channels: [RGB]                 # colorspaces to evaluate: RGB, YCbCr
+  separate_psnr: false                 # true → also log per-channel PSNRs (R,G,B / Y,Cb,Cr)
+  lr: 1.0e-4
+  optimizer_class: torch.optim.SGD
+  optimizer_init_args:
+    momentum: 0.9
+  layer_optim_params:
+    - lr: 1.0e-4
+    - lr: 1.0e-4
+    - lr: 1.0e-5
+  crop_border: 3
+  # scheduler_class: torch.optim.lr_scheduler.ReduceLROnPlateau
+  # scheduler_init_args:
+  #   factor: 0.5
+  #   patience: 5
+  # scheduler_monitor: val_psnr(RGB)   # defaults to val_psnr({psnr_channels[0]})
+
+data:
+  train_dataset_class: sisr.datasets.srcnn.TrainDataset
+  val_dataset_class: sisr.datasets.srcnn.ValidationDataset
+  train_dataset:
+    img_dir: data/DIV2K_train_HR
+    subimg_size: 33
+    stride: 14
+    scale: 3
+    channels: RGB
+    blur_sigma: 1.0
+    use_tqdm: true
+    cache_dir: ./cache/DIV2K_train_HR    # TODO: set or accept default
+  val_dataset:
+    img_dir: data/DIV2K_valid_HR
+    scale: 3
+    channels: RGB
+  benchmark_datasets:
+    Set5:
+      img_dir: data/Set5_HR
+      scale: 3
+      channels: RGB
+    Set14:
+      img_dir: data/Set14_HR
+      scale: 3
+      channels: RGB
+  train_dataloader_kwargs:
+    batch_size: 64
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+  benchmark_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  max_steps: 1000000
+  val_check_interval: 20000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 500
+  deterministic: false
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        log_every_n_val_runs: 1
+        crop_border: 3
+        # dataloader_mapping is auto-discovered from data.benchmark_datasets
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_psnr(RGB)
+        save_top_k: 3
+        dirpath: ./experiments/SRCNN/baseline   # TODO
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_ssim
+        save_top_k: 3
+        dirpath: ./experiments/SRCNN/baseline   # TODO
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        log_every_n_steps: 2000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRCNN
+        version: baseline
+        log_graph: true
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRCNN
+        version: baseline
