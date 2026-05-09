@@ -3,9 +3,28 @@
 #
 # Fill in placeholders flagged with TODO before running. Per-run tweaks can
 # also be applied on the CLI:
-#   --trainer.max_steps=500000  --model.lr=1e-3  --data.train_dataset.subimg_size=33
+#   --trainer.max_steps=500000
+#   --optimizer.init_args.lr=1e-3
+#   --data.train_dataset.subimg_size=33
 
 seed_everything: 42
+
+# Top-level optimizer / lr_scheduler — linked into model.init_args by
+# SRLightningCLI. SRLightning builds the actual optimizer in
+# configure_optimizers, optionally with per-Conv2d param groups when
+# model.training_config.layer_lrs is set (SRCNNTrainingConfig default:
+# [1e-4, 1e-4, 1e-5] — paper-faithful).
+optimizer:
+  class_path: torch.optim.SGD
+  init_args:
+    lr: 1.0e-4         # base LR; ignored per-group when layer_lrs is set
+    momentum: 0.9
+
+# lr_scheduler:
+#   class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+#   init_args:
+#     factor: 0.5
+#     patience: 5
 
 model:
   model:
@@ -16,24 +35,18 @@ model:
       kernel_sizes: [9, 1, 5]
       padding: 0
       custom_init: true
-  example_input_shape: [3, 224, 224]   # (channels, H, W) — used for TensorBoard model graph
-  model_colorspace: RGB                # RGB | Y | YCbCr — dataset must serve RGB for Y/YCbCr
-  psnr_channels: [RGB]                 # colorspaces to evaluate: RGB, YCbCr
-  separate_psnr: false                 # true → also log per-channel PSNRs (R,G,B / Y,Cb,Cr)
-  lr: 1.0e-4
-  optimizer_class: torch.optim.SGD
-  optimizer_init_args:
-    momentum: 0.9
-  layer_optim_params:
-    - lr: 1.0e-4
-    - lr: 1.0e-4
-    - lr: 1.0e-5
-  crop_border: 3
-  # scheduler_class: torch.optim.lr_scheduler.ReduceLROnPlateau
-  # scheduler_init_args:
-  #   factor: 0.5
-  #   patience: 5
-  # scheduler_monitor: val_psnr(RGB)   # defaults to val_psnr({psnr_channels[0]})
+  training_config:
+    class_path: sisr.models.srcnn.SRCNNTrainingConfig
+    # Defaults match the SRCNN paper:
+    #   model_colorspace=Y, layer_lrs=[1e-4, 1e-4, 1e-5]
+    init_args:
+      example_input_shape: [3, 224, 224]   # for TensorBoard model graph
+      # Override per experiment, e.g.:
+      # model_colorspace: RGB              # train on RGB instead of Y
+      # layer_lrs: null                    # uniform LR from optimizer.init_args.lr
+  eval_config:
+    class_path: sisr.models.srcnn.SRCNNEvalConfig
+    # Defaults: crop_border=3, psnr_channels=[RGB, YCbCr], separate_psnr=false
 
 data:
   train_dataset_class: sisr.datasets.srcnn.TrainDataset

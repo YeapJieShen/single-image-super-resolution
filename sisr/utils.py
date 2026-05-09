@@ -1,10 +1,97 @@
 import shutil
 import lmdb
+import torch
+import torchvision
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from tqdm.auto import tqdm
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Literal
+
+
+# ----------------------------------------------------------------------------
+# BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
+#
+# Both colorspaces are normalised to [0, 1].  Cb and Cr have a +0.5 offset on
+# their stored representation so that signed chroma values in [-0.5, +0.5]
+# map onto unsigned [0, 1].  This is the *full-range* (a.k.a. "JPEG") variant
+# of BT.601 — distinct from the studio-range variant which scales Y to
+# [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
+# ----------------------------------------------------------------------------
+
+_RGB_TO_Y  = (0.299, 0.587, 0.114)
+_RGB_TO_CB = (-0.169, -0.331, 0.500)   # output offset +0.5
+_RGB_TO_CR = (0.500, -0.419, -0.081)   # output offset +0.5
+_YCBCR_TO_R = 1.402                     # cr coefficient
+_YCBCR_TO_G_CB = -0.344                 # cb coefficient
+_YCBCR_TO_G_CR = -0.714                 # cr coefficient
+_YCBCR_TO_B = 1.772                     # cb coefficient
+
+
+def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
+    """Convert a normalised RGB tensor ``(B, 3, H, W)`` to YCbCr (BT.601 full-range)."""
+    r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
+    y  = _RGB_TO_Y[0]  * r + _RGB_TO_Y[1]  * g + _RGB_TO_Y[2]  * b
+    cb = _RGB_TO_CB[0] * r + _RGB_TO_CB[1] * g + _RGB_TO_CB[2] * b + 0.5
+    cr = _RGB_TO_CR[0] * r + _RGB_TO_CR[1] * g + _RGB_TO_CR[2] * b + 0.5
+    return torch.cat([y, cb, cr], dim=1)
+
+
+def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
+    """Convert a YCbCr tensor ``(B, 3, H, W)`` to RGB (BT.601 full-range, clamped to [0, 1])."""
+    y, cb, cr = img[:, 0:1], img[:, 1:2] - 0.5, img[:, 2:3] - 0.5
+    r = y + _YCBCR_TO_R * cr
+    g = y + _YCBCR_TO_G_CB * cb + _YCBCR_TO_G_CR * cr
+    b = y + _YCBCR_TO_B * cb
+    return torch.cat([r, g, b], dim=1).clamp(0.0, 1.0)
+
+
+def extract_model_input(
+    lr_img: torch.Tensor,
+    model_colorspace: Literal['RGB', 'Y', 'YCbCr'],
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Prepare the model input from a full-RGB LR tensor.
+
+    Returns ``(model_input, lr_ycbcr)`` where ``lr_ycbcr`` is the full LR
+    YCbCr tensor retained for chroma reconstruction (only when
+    ``model_colorspace='Y'``); ``None`` otherwise.
+    """
+    if model_colorspace == 'RGB':
+        return lr_img, None
+    lr_ycbcr = rgb_to_ycbcr(lr_img)
+    if model_colorspace == 'Y':
+        return lr_ycbcr[:, 0:1], lr_ycbcr
+    if model_colorspace == 'YCbCr':
+        return lr_ycbcr, None
+    raise ValueError(
+        f"Unknown model_colorspace {model_colorspace!r}. Expected 'RGB', 'Y', or 'YCbCr'."
+    )
+
+
+def reconstruct_sr_rgb(
+    sr_model: torch.Tensor,
+    lr_ycbcr: torch.Tensor | None,
+    model_colorspace: Literal['RGB', 'Y', 'YCbCr'],
+) -> torch.Tensor:
+    """Reconstruct a full-RGB SR image from the model output.
+
+    For ``model_colorspace='Y'``, stitches SR-Y with bicubic Cb/Cr from the
+    LR YCbCr tensor (centre-cropped to match the SR spatial size) and
+    converts to RGB.
+    """
+    if model_colorspace == 'RGB':
+        return sr_model
+    if model_colorspace == 'Y':
+        if lr_ycbcr is None:
+            raise ValueError("model_colorspace='Y' requires lr_ycbcr to reconstruct chroma.")
+        cb = torchvision.transforms.functional.center_crop(lr_ycbcr[:, 1:2], sr_model.shape[-2:])
+        cr = torchvision.transforms.functional.center_crop(lr_ycbcr[:, 2:3], sr_model.shape[-2:])
+        return ycbcr_to_rgb(torch.cat([sr_model, cb, cr], dim=1))
+    if model_colorspace == 'YCbCr':
+        return ycbcr_to_rgb(sr_model)
+    raise ValueError(
+        f"Unknown model_colorspace {model_colorspace!r}. Expected 'RGB', 'Y', or 'YCbCr'."
+    )
 
 
 class LMDBCacheBuildContext:
