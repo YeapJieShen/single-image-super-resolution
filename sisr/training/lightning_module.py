@@ -372,6 +372,22 @@ class SRLightning(lightning.LightningModule):
             )
         self.log('val_ssim', ssim, prog_bar=True, on_step=False, add_dataloader_idx=False)
 
+    def test_step(
+        self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
+    ) -> None:
+        """
+        Test step for `cli test --ckpt_path <path>` final evaluation.
+
+        All metric computation, per-image scalar logging, and image-strip
+        emission for the test sets is handled by
+        :class:`~sisr.training.callbacks.BenchmarkImageLogger` in its
+        ``on_test_batch_end`` / ``on_test_epoch_end`` hooks.  This method
+        exists so Lightning iterates ``trainer.test_dataloaders`` and the
+        callback hooks fire — it deliberately does no work itself to avoid
+        a redundant forward pass.
+        """
+        return None
+
     def configure_optimizers(self):
         """
         Configure the optimizer and (optionally) the LR scheduler.

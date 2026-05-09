@@ -10,49 +10,64 @@ from typing import Any, Dict, List, Optional
 
 class BenchmarkImageLogger(Callback):
     """
-    Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard
-    for one or more benchmark validation dataloaders.
+    Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
+    one or more held-out test/benchmark dataloaders (Set5, Set14, …).
 
-    When using multiple validation dataloaders with
-    ``trainer.fit(val_dataloaders=[main_dl, set5_dl, set14_dl])``, this
-    callback selectively captures outputs from the benchmark dataloaders
-    (identified by their index) and logs each image individually.
+    Fires during *both* validation and test stages:
 
-    Each image is logged as a horizontal **LR | SR | HR** strip.  When the
-    model uses ``padding='valid'`` the SR output is zero-padded (black
-    border) so that all three panels share the same spatial size.
+    * **During `cli fit` / `cli validate`** — `SRDataModule.val_dataloader()`
+      returns ``[primary_val] + [test_loaders...]``; this callback ignores
+      ``dataloader_idx == 0`` (handled by `SRLightning.validation_step`) and
+      processes indices ``1..N`` against ``dataset_names``.  Images are
+      logged every *n*-th val run (controlled by ``log_every_n_val_runs``)
+      so TensorBoard storage stays bounded over long training schedules.
+    * **During `cli test`** — `SRDataModule.test_dataloader()` returns the
+      test loaders only (no primary), so indices ``0..N-1`` map straight to
+      ``dataset_names``.  Images are logged every test run (no throttle —
+      ``cli test`` is typically a one-shot final-eval invocation).
 
-    Per-image PSNR and SSIM scalars are logged under
-    ``"{name}_psnr/{idx}"`` and ``"{name}_ssim/{idx}"``.
+    Each image lands as a horizontal **LR | SR | HR** strip; when the model
+    uses ``padding='valid'`` the SR output is zero-padded so all three panels
+    share the same spatial size.
 
-    Logging frequency is controlled by ``log_every_n_val_runs`` which
-    counts how many times validation has been triggered (works correctly
-    with both epoch-based and step-based validation schedules).
+    Per-image PSNR/SSIM scalars go under ``"{name}_psnr/{filename}"`` and
+    ``"{name}_ssim/{filename}"``; per-set means under
+    ``"{name}_psnr({key})"`` and ``"{name}_ssim"``.
 
     Args:
-        dataloader_mapping (Dict[int, str]): Mapping from validation
-            dataloader index to a human-readable dataset name used as
-            the TensorBoard tag prefix (e.g. ``{1: "Set5", 2: "Set14"}``).
-        log_every_n_val_runs (int): Only log images every *n*-th
-            validation run.  Defaults to ``5``.  With step-based training
-            (e.g. ``val_check_interval=1000``, ``max_steps=100_000``)
-            validation fires ~100 times, so logging every 5 runs gives
-            ~20 image snapshots — enough to track visual progress without
-            flooding TensorBoard storage.
+        dataset_names: Ordered list of test set names (e.g.
+            ``["Set5", "Set14"]``) matching the order of
+            ``SRDataModule.test_dataloader()`` / the trailing entries of
+            ``val_dataloader()``.  When ``None`` the callback auto-discovers
+            from ``trainer.datamodule.test_names``.
+        log_every_n_val_runs: Image-strip throttle for the val stage.  With
+            step-based training (e.g. ``val_check_interval=1000``,
+            ``max_steps=100_000``) val fires ~100 times, so logging every 5
+            runs gives ~20 image snapshots — enough to track visual
+            progress without flooding TensorBoard storage.  Default ``5``.
+        crop_border: Pixels to crop on each border before metric
+            computation; matches the standard SR-evaluation convention of
+            ignoring the outer ``scale`` pixels.
     """
 
     def __init__(
         self,
-        dataloader_mapping: Optional[Dict[int, str]] = None,
+        dataset_names: Optional[List[str]] = None,
         log_every_n_val_runs: int = 5,
         crop_border: int = 0,
     ):
         super().__init__()
-        self.dataloader_mapping = dataloader_mapping
+        self.dataset_names = list(dataset_names) if dataset_names else None
         self.log_every_n_val_runs = log_every_n_val_runs
         self.crop_border = crop_border
 
-        # Internal counter for validation runs
+        # Set in setup() — both mappings derived from dataset_names.
+        # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
+        # Test: only test sets present, at idx 0..N-1     → {0: 'Set5', ...}
+        self._val_mapping: Dict[int, str] = {}
+        self._test_mapping: Dict[int, str] = {}
+
+        # Internal counter for validation runs (drives image-throttle)
         self._val_run_count = 0
 
         # Buffer: {dataset_name: [(filename, lr|None, sr|None, hr|None, psnr_dict, ssim), ...]}
@@ -64,34 +79,26 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ):
-        """Auto-discover ``dataloader_mapping`` from the attached datamodule.
-
-        If ``dataloader_mapping`` was not supplied at construction time, this
-        callback inspects ``trainer.datamodule.benchmark_names`` (a list of
-        benchmark dataset names exposed by :class:`SRDataModule`) and builds
-        the mapping ``{i + 1: name}`` — index 0 is reserved for the primary
-        validation loader, benchmarks start at 1.
+        """Resolve ``dataset_names`` (auto-discover from the datamodule when
+        not supplied) and build both stage-specific dataloader_idx mappings.
         """
-        if self.dataloader_mapping is not None:
-            return
-        dm = getattr(trainer, "datamodule", None)
-        names = getattr(dm, "benchmark_names", None) if dm is not None else None
-        self.dataloader_mapping = {
-            i + 1: name for i, name in enumerate(names or [])
-        }
+        if self.dataset_names is None:
+            dm = getattr(trainer, "datamodule", None)
+            names = getattr(dm, "test_names", None) if dm is not None else None
+            self.dataset_names = list(names or [])
+        self._val_mapping = {i + 1: name for i, name in enumerate(self.dataset_names)}
+        self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
+
+    # ------------------------------------------------------------------
+    # Validation-stage hooks (during `cli fit` / `cli validate`)
+    # ------------------------------------------------------------------
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """
-        Clear the buffers and bump the validation-run counter.
-
-        Args:
-            trainer (lightning.Trainer): The trainer instance.
-            pl_module (lightning.LightningModule): The model being trained.
-        """
+        """Clear buffers and bump the val-run counter."""
         self._val_run_count += 1
-        self._buffer = {name: [] for name in self.dataloader_mapping.values()}
+        self._buffer = {name: [] for name in self.dataset_names}
 
     def on_validation_batch_end(
         self,
@@ -102,26 +109,99 @@ class BenchmarkImageLogger(Callback):
         batch_idx: int,
         dataloader_idx: int = 0,
     ):
-        """
-        Collect LR/SR/HR tensors from benchmark dataloaders.
+        """Collect LR/SR/HR + per-image metrics for one test loader's batch.
 
-        Metrics (PSNR/SSIM) are always computed and accumulated so that
-        per-dataset means are available every validation epoch.  Image
-        tensors are only stored when this run falls on the logging interval.
-
-        Args:
-            trainer (lightning.Trainer): The trainer instance.
-            pl_module (lightning.LightningModule): The model being trained.
-            outputs: The outputs from the validation step (ignored).
-            batch: The input batch, expected to be a tuple of (LR, HR) tensors.
-            batch_idx: Index of the batch within the current dataloader.
-            dataloader_idx: Index of the dataloader (0-based).  Only batches
-                from dataloaders in *dataloader_mapping* are collected.
+        Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test sets,
+        not the primary val loader at idx 0).
         """
-        if dataloader_idx not in self.dataloader_mapping:
+        if dataloader_idx not in self._val_mapping:
             return
+        self._collect_batch(
+            trainer=trainer,
+            pl_module=pl_module,
+            batch=batch,
+            batch_idx=batch_idx,
+            dataset_name=self._val_mapping[dataloader_idx],
+            source_dataloaders=trainer.val_dataloaders,
+            dataloader_idx=dataloader_idx,
+            should_log_images=self._on_image_log_interval(),
+        )
 
-        dataset_name = self.dataloader_mapping[dataloader_idx]
+    def on_validation_epoch_end(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ):
+        """Log per-set means every val epoch; image strips every N val runs."""
+        self._flush_buffer(
+            trainer=trainer,
+            pl_module=pl_module,
+            should_log_images=self._on_image_log_interval(),
+        )
+
+    # ------------------------------------------------------------------
+    # Test-stage hooks (during `cli test`)
+    # ------------------------------------------------------------------
+
+    def on_test_epoch_start(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ):
+        """Clear buffers ahead of a test run."""
+        self._buffer = {name: [] for name in self.dataset_names}
+
+    def on_test_batch_end(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ):
+        """Collect LR/SR/HR + per-image metrics for one test loader's batch.
+
+        ``cli test`` runs the test loaders only, so all dataloader indices
+        are test sets (no primary loader at idx 0).
+        """
+        if dataloader_idx not in self._test_mapping:
+            return
+        self._collect_batch(
+            trainer=trainer,
+            pl_module=pl_module,
+            batch=batch,
+            batch_idx=batch_idx,
+            dataset_name=self._test_mapping[dataloader_idx],
+            source_dataloaders=trainer.test_dataloaders,
+            dataloader_idx=dataloader_idx,
+            should_log_images=True,
+        )
+
+    def on_test_epoch_end(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ):
+        """Log per-set means and image strips at the end of `cli test`."""
+        self._flush_buffer(
+            trainer=trainer,
+            pl_module=pl_module,
+            should_log_images=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers shared by val and test paths
+    # ------------------------------------------------------------------
+
+    def _on_image_log_interval(self) -> bool:
+        return self._val_run_count % self.log_every_n_val_runs == 0
+
+    def _collect_batch(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        batch: Any,
+        batch_idx: int,
+        dataset_name: str,
+        source_dataloaders,
+        dataloader_idx: int,
+        should_log_images: bool,
+    ):
         lr_img, hr_img = batch
 
         with torch.no_grad():
@@ -130,11 +210,8 @@ class BenchmarkImageLogger(Callback):
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr.shape[-2:])
 
         # Resolve filenames from the underlying dataset for use as TB tags.
-        dataset = trainer.val_dataloaders[dataloader_idx].dataset
+        dataset = source_dataloaders[dataloader_idx].dataset
         batch_size = lr_img.size(0)
-
-        # Only store image tensors when this run falls on the image-logging interval
-        should_log_images = (self._val_run_count % self.log_every_n_val_runs == 0)
 
         for i in range(batch_size):
             global_idx = batch_idx * batch_size + i
@@ -165,22 +242,13 @@ class BenchmarkImageLogger(Callback):
                 ssim.item(),
             ))
 
-    def on_validation_epoch_end(
-        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    def _flush_buffer(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        should_log_images: bool,
     ):
-        """
-        Log benchmark metrics and (on interval) image strips to TensorBoard.
-
-        Mean PSNR/SSIM are logged every validation epoch via ``pl_module.log``.
-        Per-image scalars and LR|SR|HR image strips are only written when this
-        run falls on the logging interval.
-
-        Args:
-            trainer (lightning.Trainer): The trainer instance.
-            pl_module (lightning.LightningModule): The model being trained.
-        """
         step = trainer.global_step
-        should_log_images = (self._val_run_count % self.log_every_n_val_runs == 0)
 
         for dataset_name, samples in self._buffer.items():
             if not samples:
@@ -268,7 +336,7 @@ class GradNormLogger(Callback):
     ):
         """
         Compute and log gradient norm if on the right step cadence.
-        
+
         Args:
             trainer (lightning.Trainer): The trainer instance.
             pl_module (lightning.LightningModule): The model being trained.
