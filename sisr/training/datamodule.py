@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any
 
 import lightning
 from torch.utils.data import DataLoader, Dataset
@@ -51,15 +51,15 @@ class SRDataModule(lightning.LightningDataModule):
 
     def __init__(
         self,
-        train_dataset: Dict[str, Any],
-        val_dataset: Dict[str, Any],
-        test_datasets: Optional[Dict[str, Dict[str, Any]]] = None,
-        train_dataloader_kwargs: Optional[Dict[str, Any]] = None,
-        val_dataloader_kwargs: Optional[Dict[str, Any]] = None,
-        test_dataloader_kwargs: Optional[Dict[str, Any]] = None,
+        train_dataset: dict[str, Any],
+        val_dataset: dict[str, Any],
+        test_datasets: dict[str, dict[str, Any]] | None = None,
+        train_dataloader_kwargs: dict[str, Any] | None = None,
+        val_dataloader_kwargs: dict[str, Any] | None = None,
+        test_dataloader_kwargs: dict[str, Any] | None = None,
         train_dataset_class: type = TrainDataset,
         val_dataset_class: type = ValidationDataset,
-        test_dataset_class: Optional[type] = None,
+        test_dataset_class: type | None = None,
     ):
         super().__init__()
         self._train_kwargs = train_dataset
@@ -72,16 +72,16 @@ class SRDataModule(lightning.LightningDataModule):
         self._val_cls = val_dataset_class
         self._test_cls = test_dataset_class or val_dataset_class
 
-        self._train_ds: Optional[Dataset] = None
-        self._val_ds: Optional[Dataset] = None
-        self._test_ds: Dict[str, Dataset] = {}
+        self._train_ds: Dataset | None = None
+        self._val_ds: Dataset | None = None
+        self._test_ds: dict[str, Dataset] = {}
 
     @property
     def test_names(self) -> list:
         """Ordered list of test dataset names — drives BenchmarkImageLogger auto-discovery."""
         return list(self._test_kwargs.keys())
 
-    def setup(self, stage: Optional[str] = None) -> None:
+    def setup(self, stage: str | None = None) -> None:
         """Instantiate datasets lazily based on the trainer stage."""
         if stage in ('fit', None) and self._train_ds is None:
             self._train_ds = self._train_cls(**self._train_kwargs)

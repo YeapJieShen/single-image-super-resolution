@@ -3,7 +3,8 @@ import lmdb
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from tqdm.auto import tqdm
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Callable, Sequence
+from typing import Any
 
 
 class LMDBCacheBuildContext:
@@ -21,12 +22,12 @@ class LMDBCacheBuildContext:
         self.env = env
         self.use_tqdm = use_tqdm
 
-    def write_batch(self, pairs: Sequence[Tuple[str, bytes]]) -> None:
+    def write_batch(self, pairs: Sequence[tuple[str, bytes]]) -> None:
         """
         Writes a batch of key-value pairs in a single transaction.
 
         Args:
-            pairs (Sequence[Tuple[str, bytes]]): Sequence of ``(key, value)`` tuples to write.
+            pairs (Sequence[tuple[str, bytes]]): Sequence of ``(key, value)`` tuples to write.
         """
         txn = self.env.begin(write=True)
         for key, value in pairs:
@@ -36,8 +37,8 @@ class LMDBCacheBuildContext:
     def parallel_build(
         self,
         items: Sequence[Any],
-        process_fn: Callable[..., List[Tuple[str, bytes]]],
-        process_args: Optional[Sequence[Sequence[Any]]] = None,
+        process_fn: Callable[..., list[tuple[str, bytes]]],
+        process_args: Sequence[Sequence[Any]] | None = None,
         num_workers: int = 8,
         desc: str = "Building LMDB cache",
     ):
@@ -53,7 +54,7 @@ class LMDBCacheBuildContext:
 
         Args:
             items (Sequence[Any]): One item per job (e.g. a list of image paths).
-            process_fn (Callable[..., List[Tuple[str, bytes]]]): Top-level callable invoked per item.  Receives
+            process_fn (Callable[..., list[tuple[str, bytes]]]): Top-level callable invoked per item.  Receives
                 ``(item, *extra_args)`` and returns keyed pairs.
             process_args (Sequence[Sequence[Any]], optional): Per-item extra arguments for *process_fn*.
                 If ``None``, each job calls ``process_fn(item)``.
@@ -70,7 +71,7 @@ class LMDBCacheBuildContext:
             pbar = tqdm(total=len(items), desc=desc, unit="item")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            pending: Dict[Any, int] = {}
+            pending: dict[Any, int] = {}
 
             def _submit():
                 nonlocal next_submit
@@ -115,16 +116,16 @@ class LMDBCache:
     access.
 
     Args:
-        cache_dir (Union[str, Path]): Parent directory for the LMDB database.
+        cache_dir (str | Path): Parent directory for the LMDB database.
         name (str): Prefix used in the LMDB folder name
             (e.g. ``'srcnn_patches'``).
         checksum (str): Hex digest that uniquely identifies the current
             configuration.  A mismatch triggers a rebuild.
         length (int): Total number of entries that will be stored.
         map_size (int): Maximum size of the LMDB database in bytes.
-        metadata (Optional[Dict[str, str]]): Extra key-value pairs to persist alongside the data
+        metadata (dict[str, str] | None): Extra key-value pairs to persist alongside the data
             (e.g. ``{'channels': '3', 'subimg_size': '33'}``).
-        build_fn (Optional[Callable[[LMDBCacheBuildContext], None]]): A callable that populates the database.  It receives
+        build_fn (Callable[[LMDBCacheBuildContext], None] | None): A callable that populates the database.  It receives
             a single :class:`LMDBCacheBuildContext` argument exposing
             a ``write_batch`` helper and an ``env`` handle.  If
             ``None`` and no valid cache is found, a ``RuntimeError``
@@ -134,13 +135,13 @@ class LMDBCache:
 
     def __init__(
         self,
-        cache_dir: Union[str, Path],
+        cache_dir: str | Path,
         name: str,
         checksum: str,
         length: int,
         map_size: int,
-        metadata: Optional[Dict[str, str]] = None,
-        build_fn: Optional[Callable[[LMDBCacheBuildContext], None]] = None,
+        metadata: dict[str, str] | None = None,
+        build_fn: Callable[[LMDBCacheBuildContext], None] | None = None,
         use_tqdm: bool = False,
     ):
         self._cache_dir = Path(cache_dir)
@@ -148,7 +149,7 @@ class LMDBCache:
         self._lmdb_path = self._cache_dir / f'{name}_{checksum[:16]}'
         self._length = length
         self._metadata = metadata or {}
-        self._env: Optional[lmdb.Environment] = None
+        self._env: lmdb.Environment | None = None
 
         if not self._try_load(checksum):
             if build_fn is None:
@@ -194,7 +195,7 @@ class LMDBCache:
                 str(self._lmdb_path), readonly=True, lock=False)
         return self._env
 
-    def get(self, key: str) -> Optional[bytes]:
+    def get(self, key: str) -> bytes | None:
         """
         Reads a single value from the cache.
 
@@ -211,7 +212,7 @@ class LMDBCache:
                 return None
             return bytes(buf)
 
-    def get_batch(self, keys: Sequence[str]) -> List[Optional[bytes]]:
+    def get_batch(self, keys: Sequence[str]) -> list[bytes | None]:
         """
         Reads multiple values from the cache in a single transaction.
 

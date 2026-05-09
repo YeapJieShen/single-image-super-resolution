@@ -5,7 +5,7 @@ import torchmetrics.functional
 import torchvision
 import lightning
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class BenchmarkImageLogger(Callback):
@@ -52,7 +52,7 @@ class BenchmarkImageLogger(Callback):
 
     def __init__(
         self,
-        dataset_names: Optional[List[str]] = None,
+        dataset_names: list[str] | None = None,
         log_every_n_val_runs: int = 5,
         crop_border: int = 0,
     ):
@@ -64,14 +64,14 @@ class BenchmarkImageLogger(Callback):
         # Set in setup() — both mappings derived from dataset_names.
         # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
         # Test: only test sets present, at idx 0..N-1     → {0: 'Set5', ...}
-        self._val_mapping: Dict[int, str] = {}
-        self._test_mapping: Dict[int, str] = {}
+        self._val_mapping: dict[int, str] = {}
+        self._test_mapping: dict[int, str] = {}
 
         # Internal counter for validation runs (drives image-throttle)
         self._val_run_count = 0
 
         # Buffer: {dataset_name: [(filename, lr|None, sr|None, hr|None, psnr_dict, ssim), ...]}
-        self._buffer: Dict[str, List[tuple]] = {}
+        self._buffer: dict[str, list[tuple]] = {}
 
     def setup(
         self,
@@ -415,7 +415,7 @@ class SRCheckpoint(ModelCheckpoint):
             ``"val_psnr(YCbCr)"``) or ``"val_ssim"``.
         save_top_k (int): Number of best checkpoints to keep.
             Defaults to ``3``.
-        dirpath (Optional[str]): Directory to save checkpoints.
+        dirpath (str | None): Directory to save checkpoints.
         filename_prefix (str): Prefix for checkpoint filenames.
             Defaults to ``"srcnn"``.
         **kwargs: Extra keyword arguments forwarded to
@@ -426,7 +426,7 @@ class SRCheckpoint(ModelCheckpoint):
         self,
         monitor_metric: str = 'val_psnr(RGB)',
         save_top_k: int = 3,
-        dirpath: Optional[str] = None,
+        dirpath: str | None = None,
         filename_prefix: str = 'srcnn',
         mode: str = 'max',
         **kwargs: Any,

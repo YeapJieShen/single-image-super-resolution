@@ -1,5 +1,4 @@
 import torch
-from typing import Tuple, Union
 
 
 class SRCNN(torch.nn.Module):
@@ -12,11 +11,11 @@ class SRCNN(torch.nn.Module):
 
     Args:
         num_channels (int): The number of channels in the input and output images (e.g., 3 for RGB, 1 for Y channel).
-        num_filters (Tuple[int]): A tuple containing the number of filters for each convolutional layer
+        num_filters (tuple[int, ...]): A tuple containing the number of filters for each convolutional layer
             (e.g., (64, 32, 1) for the original SRCNN architecture).
-        kernel_sizes (Tuple[int]): A tuple containing the kernel sizes for each convolutional layer 
+        kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each convolutional layer
             (e.g., (9, 1, 5) for the original SRCNN architecture).
-        padding (Union[str, int]): The padding type or size for the convolutional layers.
+        padding (str | int): The padding type or size for the convolutional layers.
             Can be 'valid', 'same', or an integer specifying the number of pixels to pad. Default is 'valid'.
         custom_init (bool): Whether to use custom weight initialization for the convolutional layers. Default
             is False, which uses the default initialization method in PyTorch.
@@ -24,7 +23,7 @@ class SRCNN(torch.nn.Module):
         init_std (float): The standard deviation of the normal distribution for custom weight initialization. Default is 0.01. Only used if custom_init is True.
     """
 
-    def __init__(self, num_channels: int, num_filters: Tuple[int, ...], kernel_sizes: Tuple[int, ...], padding: Union[str, int] = 'valid', custom_init: bool = False, init_mean: float = 0.0, init_std: float = 0.01):
+    def __init__(self, num_channels: int, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...], padding: str | int = 'valid', custom_init: bool = False, init_mean: float = 0.0, init_std: float = 0.01):
         super().__init__()
 
         self._check_architecture(num_filters, kernel_sizes)
@@ -64,14 +63,14 @@ class SRCNN(torch.nn.Module):
         if custom_init:
             self.reset_parameters(mean=init_mean, std=init_std)
 
-    def _check_architecture(self, num_filters: Tuple[int], kernel_sizes: Tuple[int]):
+    def _check_architecture(self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]):
         """
         Validates the architecture parameters for the SRCNN model.
 
         Args:
-            num_filters (Tuple[int]): A tuple containing the number of filters for each convolutional layer
-            kernel_sizes (Tuple[int]): A tuple containing the kernel sizes for each convolutional layer
-            padding (Union[str, int]): The padding type or size for the convolutional layers
+            num_filters (tuple[int, ...]): A tuple containing the number of filters for each convolutional layer
+            kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each convolutional layer
+            padding (str | int): The padding type or size for the convolutional layers
 
         Raises:
             ValueError: If num_filters or kernel_sizes are not tuples, if they have different lengths, or if any of their elements are not positive integers.
@@ -115,14 +114,14 @@ class SRCNN(torch.nn.Module):
                 torch.nn.init.normal_(module.weight, mean=mean, std=std)
                 torch.nn.init.constant_(module.bias, 0.0)
 
-    def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: Tuple[float] = (0.0, 1.0)) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
         """
         Forward pass of the SRCNN model.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, num_channels, height, width)
             clamp_output (bool): Whether to clamp the output values to a specified range. Default is False.
-            clamp_minmax (Tuple[float]): The minimum and maximum values for clamping the output. Default is (0.0, 1.0).
+            clamp_minmax (tuple[float, float]): The minimum and maximum values for clamping the output. Default is (0.0, 1.0).
 
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, num_channels, height, width)

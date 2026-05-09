@@ -2,7 +2,7 @@ import torch
 import torchvision
 import torchmetrics
 import lightning
-from typing import Optional, List, Dict, Any, Tuple, Literal
+from typing import Any, Literal
 
 
 class SRLightning(lightning.LightningModule):
@@ -27,12 +27,12 @@ class SRLightning(lightning.LightningModule):
             model exposes an ``hparams`` mapping (as :class:`~sisr.models.srcnn.SRCNN`
             does), those values are merged into the Lightning hparams so model
             specs appear alongside training params in TensorBoard HParams.
-        example_input_shape (Optional[Tuple[int, ...]]): Shape of a single input
+        example_input_shape (tuple[int, ...] | None): Shape of a single input
             sample *excluding* the batch dimension (e.g. ``(3, 33, 33)`` for a
             33×33 RGB patch).  When provided, sets ``self.example_input_array``
             which Lightning uses to log the model graph to TensorBoard when
             ``TensorBoardLogger(log_graph=True)`` is configured.
-        psnr_channels (List[str]): Colorspaces to compute PSNR in.  Supported
+        psnr_channels (list[str]): Colorspaces to compute PSNR in.  Supported
             values are ``'RGB'`` and ``'YCbCr'``.  Metrics are logged as
             ``val_psnr_RGB``, ``val_psnr_YCbCr``, etc.  Defaults to ``['RGB']``.
         separate_psnr (bool): When ``True``, also computes PSNR for each
@@ -40,19 +40,19 @@ class SRLightning(lightning.LightningModule):
             yields ``val_psnr_R``, ``val_psnr_G``, ``val_psnr_B``, and
             ``val_psnr_RGB``).  Defaults to ``False``.
         lr (float): Base learning rate used when ``layer_optim_params`` is None.
-        layer_optim_params (Optional[List[Dict[str, Any]]]): Per-Conv2d-layer
+        layer_optim_params (list[dict[str, Any]] | None): Per-Conv2d-layer
             optimizer overrides (e.g. individual learning rates).  Must have
             the same length as the number of Conv2d layers in ``model``.
             If ``None``, every layer uses the base ``lr``.
-        criterion (Optional[torch.nn.Module]): Loss instance.  Defaults to
+        criterion (torch.nn.Module | None): Loss instance.  Defaults to
             :class:`torch.nn.MSELoss` when ``None``.
         optimizer_class (type[torch.optim.Optimizer]): Optimizer class.
             Defaults to :class:`torch.optim.SGD`.
-        optimizer_init_args (Optional[Dict[str, Any]]): Extra keyword arguments
+        optimizer_init_args (dict[str, Any] | None): Extra keyword arguments
             forwarded to the optimizer constructor (e.g. ``momentum``).
-        scheduler_class (Optional[type]): LR-scheduler class, or ``None`` to
+        scheduler_class (type | None): LR-scheduler class, or ``None`` to
             disable scheduling.
-        scheduler_init_args (Optional[Dict[str, Any]]): Keyword arguments
+        scheduler_init_args (dict[str, Any] | None): Keyword arguments
             forwarded to the scheduler constructor.
         scheduler_interval (Literal['epoch', 'step']): Whether the scheduler
             steps every epoch or every training step.  Defaults to ``'epoch'``.
@@ -67,12 +67,12 @@ class SRLightning(lightning.LightningModule):
             * ``'YCbCr'`` — model receives and outputs full YCbCr; output is
               converted back to RGB for metrics.  Dataset must serve RGB.
 
-        scheduler_monitor (Optional[str]): Metric to monitor for
+        scheduler_monitor (str | None): Metric to monitor for
             plateau-based schedulers (e.g. ``ReduceLROnPlateau``).
             Defaults to ``None``, which auto-selects ``val_psnr({psnr_channels[0]})``.
     """
 
-    _CS_CHANNEL_NAMES: Dict[str, Tuple[str, ...]] = {
+    _CS_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
         'RGB':   ('R', 'G', 'B'),
         'YCbCr': ('Y', 'Cb', 'Cr'),
     }
@@ -80,19 +80,19 @@ class SRLightning(lightning.LightningModule):
     def __init__(
         self,
         model: torch.nn.Module,
-        example_input_shape: Optional[Tuple[int, ...]] = None,
+        example_input_shape: tuple[int, ...] | None = None,
         model_colorspace: str = 'RGB',
-        psnr_channels: List[str] = ['RGB'],
+        psnr_channels: list[str] = ['RGB'],
         separate_psnr: bool = False,
         lr: float = 1e-4,
-        layer_optim_params: Optional[List[Dict[str, Any]]] = None,
-        criterion: Optional[torch.nn.Module] = None,
+        layer_optim_params: list[dict[str, Any]] | None = None,
+        criterion: torch.nn.Module | None = None,
         optimizer_class: type = torch.optim.SGD,
-        optimizer_init_args: Optional[Dict[str, Any]] = None,
-        scheduler_class: Optional[type] = None,
-        scheduler_init_args: Optional[Dict[str, Any]] = None,
+        optimizer_init_args: dict[str, Any] | None = None,
+        scheduler_class: type | None = None,
+        scheduler_init_args: dict[str, Any] | None = None,
         scheduler_interval: Literal['epoch', 'step'] = 'epoch',
-        scheduler_monitor: Optional[str] = None,
+        scheduler_monitor: str | None = None,
         crop_border: int = 0,
     ):
         super().__init__()
@@ -125,7 +125,7 @@ class SRLightning(lightning.LightningModule):
         self.criterion = criterion if criterion is not None else torch.nn.MSELoss()
 
         # Validation PSNR metrics — one torchmetrics instance per tracked key
-        metric_keys: List[str] = []
+        metric_keys: list[str] = []
         for cs in psnr_channels:
             if separate_psnr:
                 metric_keys.extend(self._CS_CHANNEL_NAMES[cs])
@@ -137,7 +137,7 @@ class SRLightning(lightning.LightningModule):
         self.val_ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1.0)
 
     @staticmethod
-    def _flatten_hparams(hparams: Dict[str, Any], sep: str = '/') -> dict:
+    def _flatten_hparams(hparams: dict[str, Any], sep: str = '/') -> dict:
         """Recursively flatten nested hparams dicts/lists for clean TensorBoard HParams columns.
 
         None values are dropped (they add noise without aiding comparison).
@@ -186,7 +186,7 @@ class SRLightning(lightning.LightningModule):
 
     def _extract_model_input(
         self, lr_img: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Prepare model input from a full RGB LR tensor.
 
         Returns ``(model_input, lr_ycbcr)`` where ``lr_ycbcr`` is the full
@@ -203,7 +203,7 @@ class SRLightning(lightning.LightningModule):
         raise ValueError(f"Unknown model_colorspace '{self.model_colorspace}'. Expected 'RGB', 'Y', or 'YCbCr'.")
 
     def _reconstruct_sr_rgb(
-        self, sr_model: torch.Tensor, lr_ycbcr: Optional[torch.Tensor]
+        self, sr_model: torch.Tensor, lr_ycbcr: torch.Tensor | None
     ) -> torch.Tensor:
         """Reconstruct a full RGB SR image from the model output.
 
@@ -223,13 +223,13 @@ class SRLightning(lightning.LightningModule):
 
     def _build_psnr_tensors(
         self, sr: torch.Tensor, hr: torch.Tensor
-    ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """Pre-compute (sr, hr) tensor pairs for every tracked PSNR key.
 
         Colorspace conversions are performed at most once per call.
         """
         keys = set(self.val_psnr_metrics.keys())
-        tensors: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         if keys & {'RGB', 'R', 'G', 'B'}:
             tensors['RGB'] = (sr, hr)
@@ -259,7 +259,7 @@ class SRLightning(lightning.LightningModule):
         """
         return self.model(x)
 
-    def _step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[
+    def _step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         """
@@ -270,11 +270,11 @@ class SRLightning(lightning.LightningModule):
         when the model uses ``padding='valid'``), and computes the loss.
 
         Args:
-            batch (Tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
+            batch (tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
                 of image tensors with shape ``(B, C, H, W)``.
 
         Returns:
-            Tuple containing:
+            A tuple containing:
                 - **loss** — scalar loss tensor (computed in ``model_colorspace``).
                 - **lr_img** — the low-resolution input (full RGB).
                 - **hr_img** — the original high-resolution target (full RGB).
@@ -305,7 +305,7 @@ class SRLightning(lightning.LightningModule):
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """
         Perform a single training step.
 
@@ -313,7 +313,7 @@ class SRLightning(lightning.LightningModule):
         step and the epoch aggregate.
 
         Args:
-            batch (Tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
+            batch (tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
                 of image tensors.
             batch_idx (int): Index of the current batch.
 
@@ -328,7 +328,7 @@ class SRLightning(lightning.LightningModule):
         return loss
 
     def validation_step(
-        self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> None:
         """
         Perform a single validation step.
@@ -340,7 +340,7 @@ class SRLightning(lightning.LightningModule):
         :class:`~sisr.callbacks.BenchmarkImageLogger`.
 
         Args:
-            batch (Tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
+            batch (tuple[torch.Tensor, torch.Tensor]): A ``(lr, hr)`` pair
                 of image tensors.
             batch_idx (int): Index of the current batch.
             dataloader_idx (int): Index of the current dataloader when
@@ -373,7 +373,7 @@ class SRLightning(lightning.LightningModule):
         self.log('val_ssim', ssim, prog_bar=True, on_step=False, add_dataloader_idx=False)
 
     def test_step(
-        self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> None:
         """
         Test step for `cli test --ckpt_path <path>` final evaluation.

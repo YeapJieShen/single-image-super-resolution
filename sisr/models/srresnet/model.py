@@ -1,6 +1,5 @@
 import torch
 import math
-from typing import Tuple, Union
 
 
 class SRResidualBlock(torch.nn.Module):
@@ -12,10 +11,10 @@ class SRResidualBlock(torch.nn.Module):
     Args:
         channels (int): Number of input and output channels.
         kernel_size (int): Kernel size for both convolutional layers.
-        padding (Union[str, int]): Padding for the convolutional layers. Default is 'same'.
+        padding (str | int): Padding for the convolutional layers. Default is 'same'.
     """
 
-    def __init__(self, channels: int, kernel_size: int, padding: Union[str, int] = 'same'):
+    def __init__(self, channels: int, kernel_size: int, padding: str | int = 'same'):
         super().__init__()
 
         self.block1 = torch.nn.Sequential(
@@ -90,12 +89,12 @@ class SRResNet(torch.nn.Module):
         scale (int): The upscaling factor. Must be a power of 2.
         in_out_channels (int): Number of channels in the input and output images (e.g., 3 for RGB). Default is 3.
         hidden_channel (int): Number of feature channels used in the residual and upsample blocks. Default is 64.
-        kernel_sizes (Tuple[int]): Kernel sizes for the head, residual, and tail convolutional layers. Default is (9, 3, 9).
+        kernel_sizes (tuple[int, ...]): Kernel sizes for the head, residual, and tail convolutional layers. Default is (9, 3, 9).
         num_residual_blocks (int): Number of residual blocks in the network. Default is 16.
-        padding (Union[str, int]): Padding for the convolutional layers. Default is 'same'.
+        padding (str | int): Padding for the convolutional layers. Default is 'same'.
     """
 
-    def __init__(self, scale: int, in_out_channels: int = 3, hidden_channel: int = 64, kernel_sizes: Tuple[int] = (9, 3, 9), num_residual_blocks: int = 16, padding: Union[str, int] = 'same'):
+    def __init__(self, scale: int, in_out_channels: int = 3, hidden_channel: int = 64, kernel_sizes: tuple[int, ...] = (9, 3, 9), num_residual_blocks: int = 16, padding: str | int = 'same'):
         super().__init__()
 
         self._check_scale(scale)
@@ -135,14 +134,14 @@ class SRResNet(torch.nn.Module):
         if scale == 0 or (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
 
-    def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: Tuple[float] = (0.0, 1.0)) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
         """
         Forward pass of the SRResNet model.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, in_out_channels, height, width).
             clamp_output (bool): Whether to clamp the output values to a specified range. Default is False.
-            clamp_minmax (Tuple[float]): The minimum and maximum values for clamping the output. Default is (0.0, 1.0).
+            clamp_minmax (tuple[float, float]): The minimum and maximum values for clamping the output. Default is (0.0, 1.0).
 
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, in_out_channels, height * scale, width * scale).

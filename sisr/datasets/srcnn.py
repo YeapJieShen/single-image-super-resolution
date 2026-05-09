@@ -4,8 +4,6 @@ import hashlib
 import numpy as np
 from PIL import Image, ImageFilter
 from pathlib import Path
-from typing import Tuple, Union, List
-
 from ..utils import LMDBCache, LMDBCacheBuildContext
 
 
@@ -17,7 +15,7 @@ def _process_subimages(
     channels: str,
     blur_sigma: float,
     base_idx: int,
-) -> List[Tuple[str, bytes]]:
+) -> list[tuple[str, bytes]]:
     """
     Extracts all LR/HR sub-image pairs from a single image and returns
     them as keyed pairs ready for LMDB insertion.
@@ -106,7 +104,7 @@ class TrainDataset(torch.utils.data.Dataset):
         https://arxiv.org/pdf/1501.00092
 
     Args:
-        img_dir (Union[str, Path]): Directory containing the high-resolution
+        img_dir (str | Path): Directory containing the high-resolution
             images.
         subimg_size (int): Spatial size of the square sub-images to extract.
         stride (int): Step size of the sliding window used for sub-image
@@ -119,7 +117,7 @@ class TrainDataset(torch.utils.data.Dataset):
             downsampling.  Defaults to ``1.0``.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build.  Defaults to ``False``.
-        cache_dir (Union[str, Path, None]): Directory in which to store the
+        cache_dir (str | Path | None): Directory in which to store the
             LMDB cache.  Defaults to ``img_dir / '.lmdb_cache'``.
 
     Raises:
@@ -128,14 +126,14 @@ class TrainDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        img_dir: Union[str, Path],
+        img_dir: str | Path,
         subimg_size: int,
         stride: int,
         scale: int,
         channels: str = 'RGB',
         blur_sigma: float = 1.0,
         use_tqdm: bool = False,
-        cache_dir: Union[str, Path, None] = None,
+        cache_dir: str | Path | None = None,
     ):
         super().__init__()
 
@@ -200,7 +198,7 @@ class TrainDataset(torch.utils.data.Dataset):
         ])
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
-    def _compute_offsets(self) -> Tuple[List[int], int]:
+    def _compute_offsets(self) -> tuple[list[int], int]:
         """
         Reads image dimensions (without decoding pixels) to compute
         per-image cumulative sub-image offsets.
@@ -254,7 +252,7 @@ class TrainDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self._cache.length
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Retrieves the LR/HR sub-image pair at the given index.
 
@@ -297,7 +295,7 @@ class ValidationDataset(torch.utils.data.Dataset):
     upsampling back to the original size.
 
     Args:
-        img_dir (Union[str, Path]): Directory containing the high-resolution
+        img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
         channels (str): Colour mode (``'RGB'`` or ``'L'``).  Defaults to
@@ -307,7 +305,7 @@ class ValidationDataset(torch.utils.data.Dataset):
         ValueError: If no image files are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: Union[str, Path], scale: int, channels: str = 'RGB'):
+    def __init__(self, img_dir: str | Path, scale: int, channels: str = 'RGB'):
         super().__init__()
 
         self.img_dir = Path(img_dir)
@@ -322,7 +320,7 @@ class ValidationDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.img_paths)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Retrieves the LR/HR image pair at the given index.
 
