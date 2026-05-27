@@ -307,6 +307,26 @@ def test_benchmark_validation_epoch_end_logs_image_strips_when_on_interval(tmp_p
     tb_logger.finalize("success")  # flush
 
 
+def test_benchmark_image_strips_handle_upscaling_sizes(tmp_path: Path):
+    """For an upscaling model (SRResNet) the LR is smaller than SR/HR; the
+    strip must pad LR up to the HR size rather than crash make_grid on a size
+    mismatch."""
+    import lightning.pytorch.loggers as pl_loggers
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    # LR 4x4, SR and HR 16x16 (x4 model).
+    cb._buffer["Set5"] = [
+        ("img_0", torch.rand(3, 4, 4), torch.rand(3, 16, 16), torch.rand(3, 16, 16),
+         {"RGB": 30.0}, 0.9),
+    ]
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
+    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)  # must not raise
+    tb_logger.finalize("success")
+
+
 def test_benchmark_test_batch_end_collects_with_zero_indexed_mapping():
     """During cli test, dataloader_idx 0..N-1 are all test loaders."""
     cb = BenchmarkImageLogger(dataset_names=["Set5", "Set14"])

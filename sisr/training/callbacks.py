@@ -277,9 +277,16 @@ class BenchmarkImageLogger(Callback):
                         experiment.add_scalar(f"{dataset_name}_psnr({key})/{filename}", psnr_val, global_step=step)
                     experiment.add_scalar(f"{dataset_name}_ssim/{filename}", ssim, global_step=step)
 
-                    sr_padded = self._pad_to_match(sr, lr.shape[-2:])
+                    # Pad LR and SR up to the HR size so all three tile cleanly.
+                    # For SRCNN (lr/sr/hr already equal) this is a no-op; for
+                    # upscaling models (SRResNet) the small LR is zero-padded up
+                    # to the HR size rather than crashing make_grid on a size
+                    # mismatch.
+                    target_hw = hr.shape[-2:]
+                    lr_padded = self._pad_to_match(lr, target_hw)
+                    sr_padded = self._pad_to_match(sr, target_hw)
                     strip = torchvision.utils.make_grid(
-                        [lr, sr_padded, hr], nrow=3, padding=2, pad_value=0.5
+                        [lr_padded, sr_padded, hr], nrow=3, padding=2, pad_value=0.5
                     )
                     experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
