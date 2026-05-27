@@ -4,6 +4,32 @@ import torch
 from sisr.models.srresnet.model import SRResidualBlock, SRResNet, SRUpsampleBlock
 
 
+def test_package_reexports_public_symbols():
+    """SRResNet et al. are importable from the package, not just .model."""
+    from sisr.models.srresnet import SRResNet as PkgSRResNet
+    from sisr.models.srresnet import SRResidualBlock as PkgBlock
+    from sisr.models.srresnet import SRUpsampleBlock as PkgUpsample
+    assert PkgSRResNet is SRResNet
+    assert PkgBlock is SRResidualBlock
+    assert PkgUpsample is SRUpsampleBlock
+
+
+def test_hparams_exposes_architecture():
+    model = SRResNet(scale=4, hidden_channel=32, num_residual_blocks=2)
+    h = model.hparams
+    assert h["scale"] == 4
+    assert h["hidden_channel"] == 32
+    assert h["num_residual_blocks"] == 2
+    assert h["in_out_channels"] == 3
+
+
+def test_check_scale_one_is_valid():
+    """scale=1 is a power of 2 (2**0) — log2(1)=0 upsample blocks, identity size."""
+    model = SRResNet(scale=1, num_residual_blocks=1)
+    out = model(torch.zeros(1, 3, 8, 8))
+    assert out.shape == (1, 3, 8, 8)
+
+
 def test_forward_x2():
     model = SRResNet(scale=2, num_residual_blocks=2)
     x = torch.zeros(2, 3, 16, 16)

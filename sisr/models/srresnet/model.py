@@ -99,6 +99,15 @@ class SRResNet(torch.nn.Module):
 
         self._check_scale(scale)
 
+        self._hparams = {
+            'scale': scale,
+            'in_out_channels': in_out_channels,
+            'hidden_channel': hidden_channel,
+            'kernel_sizes': kernel_sizes,
+            'num_residual_blocks': num_residual_blocks,
+            'padding': padding,
+        }
+
         self.head = torch.nn.Sequential(
             torch.nn.Conv2d(in_out_channels, hidden_channel, kernel_size=kernel_sizes[0], padding=padding),
             torch.nn.PReLU()
@@ -131,8 +140,17 @@ class SRResNet(torch.nn.Module):
         """
         if not isinstance(scale, int) or scale < 1:
             raise ValueError(f"scale must be a positive integer. Got {scale}.")
-        if scale == 0 or (scale & (scale - 1)) != 0:
+        if (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
+
+    @property
+    def hparams(self) -> dict:
+        """Returns the model architecture hyperparameters as a dict.
+
+        Merged into Lightning's HParams by :class:`~sisr.training.SRLightning`
+        so the architecture spec appears alongside training params in TensorBoard.
+        """
+        return self._hparams
 
     def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
         """
