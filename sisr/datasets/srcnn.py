@@ -260,10 +260,18 @@ class TrainDataset(torch.utils.data.Dataset):
         C = self._num_channels
         H = W = self.sub_img_size
 
+        lr_key = f'lr_{idx:08d}'
+        hr_key = f'hr_{idx:08d}'
         env = self._cache.get_env()
         with env.begin(write=False, buffers=True) as txn:
-            lr_buf = txn.get(f'lr_{idx:08d}'.encode())
-            hr_buf = txn.get(f'hr_{idx:08d}'.encode())
+            lr_buf = txn.get(lr_key.encode())
+            hr_buf = txn.get(hr_key.encode())
+            # A missing key means a corrupt/incomplete cache; surface the key
+            # rather than letting None flow into np.frombuffer (cryptic TypeError).
+            if lr_buf is None:
+                raise KeyError(lr_key)
+            if hr_buf is None:
+                raise KeyError(hr_key)
             lr_arr = np.frombuffer(
                 lr_buf, dtype=np.uint8).reshape(C, H, W).copy()
             hr_arr = np.frombuffer(

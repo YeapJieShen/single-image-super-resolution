@@ -43,6 +43,14 @@ def test_train_dataset_getitem_shape_dtype_range(tiny_rgb_image_dir: Path):
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
 
+def test_train_dataset_missing_key_raises_keyerror(tiny_rgb_image_dir: Path):
+    """A missing LMDB key (here, an out-of-range index) surfaces as a KeyError
+    naming the key, not a cryptic numpy TypeError from np.frombuffer(None)."""
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
+    with pytest.raises(KeyError, match=r"lr_\d{8}"):
+        ds[len(ds) + 100]
+
+
 def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
     """Second instantiation with same params must not call _process_subimages."""
     _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
