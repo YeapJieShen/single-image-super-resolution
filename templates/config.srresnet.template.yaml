@@ -1,0 +1,125 @@
+# SRResNet x4 experiment template. One self-contained YAML — no layering.
+#   python -m sisr.cli fit --config templates/config.srresnet.template.yaml
+#
+# Fill in placeholders flagged with TODO before running. Per-run tweaks can
+# also be applied on the CLI:
+#   --trainer.max_steps=1000000
+#   --optimizer.init_args.lr=1e-4
+#   --data.train_dataset.hr_crop_size=96
+
+seed_everything: 42
+
+# Top-level optimizer / lr_scheduler — linked into model.init_args by
+# SRLightningCLI. SRResNet trains on RGB with a uniform LR (layer_lrs is left
+# null: it has BatchNorm/PReLU params, so the per-Conv2d LR path doesn't apply).
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 1.0e-4
+
+# lr_scheduler:
+#   class_path: torch.optim.lr_scheduler.StepLR
+#   init_args:
+#     step_size: 200000
+#     gamma: 0.1
+
+model:
+  model:
+    class_path: sisr.models.srresnet.SRResNet
+    init_args:
+      scale: 4                  # must be a power of 2
+      in_out_channels: 3
+      hidden_channel: 64
+      kernel_sizes: [9, 3, 9]
+      num_residual_blocks: 16
+      padding: same
+  training_config:
+    class_path: sisr.training.SRTrainingConfig
+    init_args:
+      model_colorspace: RGB     # SRResNet trains on RGB (SRGAN convention)
+      # layer_lrs stays null (default) — required for models with non-Conv params.
+      example_input_shape: [3, 24, 24]   # LR patch (96 / 4) for the TensorBoard graph
+  eval_config:
+    class_path: sisr.training.SREvalConfig
+    init_args:
+      crop_border: 4            # exclude the outer `scale` pixels (x4)
+      psnr_channels: [RGB, YCbCr]
+
+data:
+  train_dataset_class: sisr.datasets.srresnet.TrainDataset
+  val_dataset_class: sisr.datasets.srresnet.ValidationDataset
+  train_dataset:
+    img_dir: data/DIV2K_train_HR
+    scale: 4
+    hr_crop_size: 96            # LR crop is 96 / 4 = 24; must be divisible by scale
+    crops_per_image: 1          # raise to draw more random crops per image per epoch
+  val_dataset:
+    img_dir: data/DIV2K_valid_HR
+    scale: 4
+  test_datasets:                # surface as both val_dataloader (monitor during fit)
+    Set5:                       # and test_dataloader (final eval via `cli test`)
+      img_dir: data/Set5_HR
+      scale: 4
+    Set14:
+      img_dir: data/Set14_HR
+      scale: 4
+  train_dataloader_kwargs:
+    batch_size: 16
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+  test_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  max_steps: 1000000
+  val_check_interval: 20000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 500
+  deterministic: false
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        log_every_n_val_runs: 1
+        crop_border: 4
+        # dataset_names is auto-discovered from data.test_datasets
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_psnr(RGB)
+        save_top_k: 3
+        dirpath: ./experiments/SRResNet/baseline   # TODO
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_ssim
+        save_top_k: 3
+        dirpath: ./experiments/SRResNet/baseline   # TODO
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        log_every_n_steps: 2000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRResNet
+        version: baseline
+        log_graph: true
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRResNet
+        version: baseline

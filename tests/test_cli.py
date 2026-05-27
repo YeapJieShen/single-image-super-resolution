@@ -7,6 +7,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
+SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 
 
 def _cli(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -34,6 +35,20 @@ def test_cli_print_config_resolves():
     assert "model_colorspace: Y" in out
     # Top-level optimizer block linked from YAML.
     assert "optimizer:" in out
+
+
+def test_cli_srresnet_print_config_resolves():
+    """`cli fit --print_config` exits 0 and resolves the SRResNet template
+    (model + base configs + random-crop dataset classes)."""
+    proc = _cli("fit", "--config", str(SRRESNET_TEMPLATE), "--print_config")
+    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
+    out = proc.stdout
+    assert "class_path: sisr.models.srresnet.SRResNet" in out
+    assert "train_dataset_class: sisr.datasets.srresnet.TrainDataset" in out
+    assert "val_dataset_class: sisr.datasets.srresnet.ValidationDataset" in out
+    assert "model_colorspace: RGB" in out
+    assert "hr_crop_size: 96" in out
+    assert "crop_border: 4" in out
 
 
 def test_cli_test_subcommand_exposes_ckpt_path():
