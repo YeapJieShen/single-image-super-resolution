@@ -13,13 +13,12 @@ def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
         "subimg_size": 33,
         "stride": 14,
         "scale": 2,
-        "channels": "RGB",
         "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": str(image_dir / ".lmdb_cache_train"),
     }
-    val_kwargs = {"img_dir": str(image_dir), "scale": 2, "channels": "RGB"}
-    test_kwargs = {"img_dir": str(image_dir), "scale": 2, "channels": "RGB"}
+    val_kwargs = {"img_dir": str(image_dir), "scale": 2}
+    test_kwargs = {"img_dir": str(image_dir), "scale": 2}
     return SRDataModule(
         train_dataset=train_kwargs,
         val_dataset=val_kwargs,
@@ -97,12 +96,11 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
         "subimg_size": 33,
         "stride": 14,
         "scale": 2,
-        "channels": "RGB",
         "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_fb"),
     }
-    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2, "channels": "RGB"}
+    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2}
     dm = SRDataModule(
         train_dataset=train_kwargs,
         val_dataset=val_kwargs,
@@ -121,12 +119,11 @@ def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir
         "subimg_size": 33,
         "stride": 14,
         "scale": 2,
-        "channels": "RGB",
         "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_only_primary"),
     }
-    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2, "channels": "RGB"}
+    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2}
     dm = SRDataModule(
         train_dataset=train_kwargs,
         val_dataset=val_kwargs,

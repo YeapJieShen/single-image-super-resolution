@@ -19,7 +19,6 @@ def _make_train(image_dir: Path, **overrides) -> TrainDataset:
         "subimg_size": 33,
         "stride": 14,
         "scale": 2,
-        "channels": "RGB",
         "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": image_dir / ".lmdb_cache_train",
@@ -72,20 +71,17 @@ def test_train_dataset_no_images_raises(tmp_path: Path):
             subimg_size=20,
             stride=8,
             scale=2,
-            channels="RGB",
             blur_sigma=1.0,
             use_tqdm=False,
             cache_dir=tmp_path / ".lmdb",
         )
 
 
-@pytest.mark.xfail(reason="triage P1.1: _num_channels=3 hardcoded; channels='L' breaks")
-def test_train_dataset_grayscale_channels_works(tiny_rgb_image_dir: Path):
-    """channels='L' should produce 1-channel patches end-to-end."""
-    ds = _make_train(tiny_rgb_image_dir, channels="L", subimg_size=20, stride=8)
-    lr, hr = ds[0]
-    assert lr.shape == (1, 20, 20)
-    assert hr.shape == (1, 20, 20)
+def test_train_dataset_rejects_channels_param(tiny_rgb_image_dir: Path):
+    """The `channels` parameter was removed (HR is always RGB; Y/YCbCr
+    selection happens in SRLightning), so passing it is a TypeError."""
+    with pytest.raises(TypeError):
+        _make_train(tiny_rgb_image_dir, channels="L", subimg_size=20, stride=8)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +89,7 @@ def test_train_dataset_grayscale_channels_works(tiny_rgb_image_dir: Path):
 # ---------------------------------------------------------------------------
 
 def test_validation_dataset_serves_full_image_pairs(tiny_rgb_image_dir: Path):
-    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, channels="RGB")
+    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert len(ds) == 3  # tiny_rgb_image_dir creates 3 images
     lr, hr = ds[0]
     assert lr.shape == hr.shape
@@ -104,14 +100,14 @@ def test_validation_dataset_serves_full_image_pairs(tiny_rgb_image_dir: Path):
 
 def test_validation_dataset_no_images_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="No images"):
-        ValidationDataset(img_dir=tmp_path, scale=2, channels="RGB")
+        ValidationDataset(img_dir=tmp_path, scale=2)
 
 
 def test_validation_dataset_blur_sigma_propagates(tiny_rgb_image_dir: Path):
     """ValidationDataset accepts and uses blur_sigma, so two datasets with
     different sigmas produce different LR outputs."""
-    ds_a = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, channels="RGB", blur_sigma=0.1)
-    ds_b = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, channels="RGB", blur_sigma=3.0)
+    ds_a = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, blur_sigma=0.1)
+    ds_b = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, blur_sigma=3.0)
     lr_a, _ = ds_a[0]
     lr_b, _ = ds_b[0]
     assert not torch.allclose(lr_a, lr_b), "different blur_sigma must produce different LR"

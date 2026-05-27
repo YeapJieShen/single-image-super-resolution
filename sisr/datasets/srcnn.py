@@ -12,7 +12,6 @@ def _process_subimages(
     sub_img_size: int,
     stride: int,
     scale: int,
-    channels: str,
     blur_sigma: float,
     base_idx: int,
 ) -> list[tuple[str, bytes]]:
@@ -27,8 +26,9 @@ def _process_subimages(
       1. Crops the HR sub-image.
       2. Applies Gaussian blur, downsamples, then upsamples to create
          the LR sub-image.
-      3. Converts both sub-images to the target channel mode and
-         ``(C, H, W)`` uint8 layout.
+      3. Converts both sub-images to ``(C, H, W)`` uint8 layout. HR is
+         always served as RGB; Y/YCbCr selection happens downstream in
+         ``SRLightning`` per ``model_colorspace``.
       4. Assigns LMDB keys using ``base_idx`` as the starting offset.
 
     Args:
@@ -37,7 +37,6 @@ def _process_subimages(
             extract.
         stride (int): Step size of the sliding window.
         scale (int): Downscaling factor for LR generation.
-        channels (str): Colour mode (``'RGB'`` or ``'L'``).
         blur_sigma (float): Radius for the Gaussian blur applied
             before downsampling.
         base_idx (int): Starting LMDB key index for this image's
@@ -70,16 +69,12 @@ def _process_subimages(
             lr_patch = lr_patch.resize(
                 (sub_img_size, sub_img_size), resample=Image.BICUBIC)
 
-            hr_arr = np.array(hr_subimg.convert(channels))
-            lr_arr = np.array(lr_patch.convert(channels))
+            hr_arr = np.array(hr_subimg)
+            lr_arr = np.array(lr_patch)
 
-            # (H, W, C) -> (C, H, W) for RGB; (H, W) -> (1, H, W) for grayscale
-            if hr_arr.ndim == 3:
-                hr_arr = hr_arr.transpose(2, 0, 1)
-                lr_arr = lr_arr.transpose(2, 0, 1)
-            else:
-                hr_arr = hr_arr[np.newaxis, :, :]
-                lr_arr = lr_arr[np.newaxis, :, :]
+            # (H, W, C) -> (C, H, W)
+            hr_arr = hr_arr.transpose(2, 0, 1)
+            lr_arr = lr_arr.transpose(2, 0, 1)
 
             keyed_pairs.append((f'lr_{idx:08d}', lr_arr.tobytes()))
             keyed_pairs.append((f'hr_{idx:08d}', hr_arr.tobytes()))
@@ -111,8 +106,6 @@ class TrainDataset(torch.utils.data.Dataset):
             extraction.
         scale (int): Downscaling factor for generating low-resolution
             sub-images.
-        channels (str): Colour mode for the sub-images (``'RGB'`` or
-            ``'L'``).  Defaults to ``'RGB'``.
         blur_sigma (float): Radius for the Gaussian blur applied before
             downsampling.  Defaults to ``1.0``.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
@@ -130,7 +123,6 @@ class TrainDataset(torch.utils.data.Dataset):
         subimg_size: int,
         stride: int,
         scale: int,
-        channels: str = 'RGB',
         blur_sigma: float = 1.0,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
@@ -141,7 +133,6 @@ class TrainDataset(torch.utils.data.Dataset):
         self.sub_img_size = subimg_size
         self.stride = stride
         self.scale = scale
-        self.channels = channels
         self.blur_sigma = blur_sigma
         self._num_channels = 3
 
@@ -193,7 +184,6 @@ class TrainDataset(torch.utils.data.Dataset):
             str(self.sub_img_size),
             str(self.stride),
             str(self.scale),
-            self.channels,
             str(self.blur_sigma),
         ])
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
@@ -234,10 +224,10 @@ class TrainDataset(torch.utils.data.Dataset):
             ctx (LMDBCacheBuildContext): Build context provided by
                 :class:`LMDBCache`.
         """
-        # Build per-item args: each worker gets (path, subimg_size, stride, scale, channels, blur_sigma, base_idx)
+        # Build per-item args: each worker gets (path, subimg_size, stride, scale, blur_sigma, base_idx)
         process_args = [
             (self.sub_img_size, self.stride, self.scale,
-             self.channels, self.blur_sigma, self._img_offsets[i])
+             self.blur_sigma, self._img_offsets[i])
             for i in range(len(self.img_paths))
         ]
 
@@ -298,8 +288,6 @@ class ValidationDataset(torch.utils.data.Dataset):
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
-        channels (str): Colour mode (``'RGB'`` or ``'L'``).  Defaults to
-            ``'RGB'``.
         blur_sigma (float): Radius for the Gaussian blur applied before
             downsampling.  Must match :class:`TrainDataset` to keep train/val
             LR generation consistent.  Defaults to ``1.0``.
@@ -312,14 +300,12 @@ class ValidationDataset(torch.utils.data.Dataset):
         self,
         img_dir: str | Path,
         scale: int,
-        channels: str = 'RGB',
         blur_sigma: float = 1.0,
     ):
         super().__init__()
 
         self.img_dir = Path(img_dir)
         self.scale = scale
-        self.channels = channels
         self.blur_sigma = blur_sigma
 
         self.img_paths = sorted(
@@ -351,9 +337,9 @@ class ValidationDataset(torch.utils.data.Dataset):
         lr_img = lr_img.resize(lr_size, resample=Image.BICUBIC)
         lr_img = lr_img.resize(hr_img.size, resample=Image.BICUBIC)
 
-        hr_tensor = torchvision.transforms.functional.to_tensor(
-            hr_img.convert(self.channels))
-        lr_tensor = torchvision.transforms.functional.to_tensor(
-            lr_img.convert(self.channels))
+        # HR is always served as RGB; Y/YCbCr selection happens downstream in
+        # SRLightning per model_colorspace.
+        hr_tensor = torchvision.transforms.functional.to_tensor(hr_img)
+        lr_tensor = torchvision.transforms.functional.to_tensor(lr_img)
 
         return lr_tensor, hr_tensor

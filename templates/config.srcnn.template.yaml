@@ -56,25 +56,21 @@ data:
     subimg_size: 33
     stride: 14
     scale: 3
-    channels: RGB
     blur_sigma: 1.0
     use_tqdm: true
     cache_dir: ./cache/DIV2K_train_HR    # TODO: set or accept default
   val_dataset:
     img_dir: data/DIV2K_valid_HR
     scale: 3
-    channels: RGB
     blur_sigma: 1.0                       # keep in sync with train_dataset.blur_sigma
   test_datasets:                         # surface as both val_dataloader (monitor during fit)
     Set5:                                # and test_dataloader (final eval via `cli test`)
       img_dir: data/Set5_HR
       scale: 3
-      channels: RGB
       blur_sigma: 1.0
     Set14:
       img_dir: data/Set14_HR
       scale: 3
-      channels: RGB
       blur_sigma: 1.0
   train_dataloader_kwargs:
     batch_size: 64
