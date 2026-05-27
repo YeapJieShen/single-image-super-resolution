@@ -13,8 +13,22 @@ license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12"
 
+# Abstract runtime dependencies with compatible lower bounds — enough for
+# `pip install .` to produce a working (CPU/default) environment. For an exact,
+# CUDA-pinned environment use requirements.txt (the GPU install-of-record).
+# Note: the CUDA torch/torchvision wheels (e.g. +cu130) are not on PyPI, so the
+# specific build lives in requirements.txt, not here.
 dependencies = [
-    "torch"
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "lightning>=2.4",
+    "torchmetrics>=1.4",
+    "jsonargparse[signatures]>=4.27",  # required by lightning's LightningCLI
+    "lmdb>=1.4",
+    "pillow>=10",
+    "numpy>=1.26",
+    "tqdm>=4.66",
+    "tensorboard>=2.16",  # default logger in the experiment templates
 ]
 
 [project.optional-dependencies]
