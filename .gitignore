@@ -1,6 +1,7 @@
 # Extra files to ignore
 data
 cache/
+.lmdb_cache/
 lightning_logs/
 checkpoints/
 experiments/
