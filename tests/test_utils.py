@@ -1,5 +1,7 @@
 from pathlib import Path
+from unittest.mock import patch
 
+import lmdb
 import pytest
 import torch
 
@@ -266,3 +268,36 @@ def test_lmdb_missing_dir_with_no_build_fn_raises(tmp_path: Path):
             map_size=_MAP_SIZE,
             build_fn=None,
         )
+
+
+def test_lmdb_try_load_swallows_lmdb_error_and_drops_cache(tmp_path: Path):
+    """An unreadable cache (lmdb.Error) is treated as stale: _try_load returns
+    False and removes the directory so it can be rebuilt."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    assert cache.path.exists()
+    with patch("sisr.utils.lmdb.open", side_effect=lmdb.Error("corrupt")):
+        assert cache._try_load("abc") is False
+    assert not cache.path.exists()
+
+
+def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
+    """A non-LMDB/OS error must propagate rather than be misreported as a
+    stale cache."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with patch("sisr.utils.lmdb.open", side_effect=ValueError("unexpected")):
+        with pytest.raises(ValueError, match="unexpected"):
+            cache._try_load("abc")

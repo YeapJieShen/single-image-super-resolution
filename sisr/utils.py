@@ -344,7 +344,11 @@ class LMDBCache:
                 self._length = int(txn.get(b'__length__').decode())
             env.close()
             return True
-        except (lmdb.Error, Exception):
+        except (lmdb.Error, OSError):
+            # Only a genuinely unreadable cache (LMDB corruption, disk/OS
+            # error) counts as "stale" — drop it and rebuild. Anything else
+            # (KeyboardInterrupt, data-shape bugs, ...) must propagate so a
+            # broken system isn't silently mistaken for a stale cache.
             if self._lmdb_path.exists():
                 shutil.rmtree(self._lmdb_path)
             return False
