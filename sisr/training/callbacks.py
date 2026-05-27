@@ -306,7 +306,7 @@ class BenchmarkImageLogger(Callback):
         pad_ud = (target_h - h) // 2
         img = torch.nn.functional.pad(img, (pad_lr, pad_lr, pad_ud, pad_ud), value=0.0)
 
-        if img.shape[1] != target_h and img.shape[2] != target_w:
+        if img.shape[1] != target_h or img.shape[2] != target_w:
             # If target size is odd and img is even (or vice versa), add one more pixel of padding to the right/bottom
             pad_right = target_w - img.shape[2]
             pad_bottom = target_h - img.shape[1]

@@ -76,17 +76,15 @@ def test_pad_to_match_symmetric_pad():
     assert (out[:, :, 0] == 0).all()
 
 
-@pytest.mark.xfail(reason="triage P1.2: _pad_to_match uses 'and' where 'or' is needed")
 def test_pad_to_match_off_by_one_height_only():
     """target=(9, 8), input=(8, 8): only height is off by 1.  After symmetric
-    pad: shape stays (8, 8). Current `and` condition skips the corrective
-    branch — so output remains (8, 8) instead of (9, 8)."""
+    pad the shape stays (8, 8); the corrective branch must fire to add the
+    final row, giving (9, 8)."""
     img = torch.zeros(3, 8, 8)
     out = BenchmarkImageLogger._pad_to_match(img, (9, 8))
     assert out.shape == (3, 9, 8)
 
 
-@pytest.mark.xfail(reason="triage P1.2: _pad_to_match uses 'and' where 'or' is needed")
 def test_pad_to_match_off_by_one_width_only():
     img = torch.zeros(3, 8, 8)
     out = BenchmarkImageLogger._pad_to_match(img, (8, 9))
@@ -94,7 +92,6 @@ def test_pad_to_match_off_by_one_width_only():
 
 
 def test_pad_to_match_off_by_one_both_dims():
-    """When both dims are off by 1, the AND branch DOES fire — so this works."""
     img = torch.zeros(3, 8, 8)
     out = BenchmarkImageLogger._pad_to_match(img, (9, 9))
     assert out.shape == (3, 9, 9)
