@@ -7,6 +7,12 @@ experiments/
 templates/*
 !templates/*template*
 
+# Old notebook-era artifacts (root-anchored so they don't match the
+# sisr/models package): trained checkpoints, prototype notebooks, TB logs
+/models/
+/notebooks/
+/runs/
+
 # Claude's local working notes (codebase index, triage, session history)
 .claude/
 
