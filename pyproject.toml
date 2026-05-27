@@ -17,9 +17,28 @@ dependencies = [
     "torch"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+
 [project.urls]
 homepage = "https://github.com/YeapJieShen/single-image-super-resolution"
 repository = "https://github.com/YeapJieShen/single-image-super-resolution"
 
 [tool.setuptools.packages.find]
 include = ["sisr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --import-mode=importlib avoids duplicate-basename collisions across test
+# subdirs (e.g. tests/models/srcnn/test_model.py vs
+# tests/models/srresnet/test_model.py) without requiring __init__.py files.
+addopts = "-ra --strict-markers --import-mode=importlib"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:lightning.*",
+    "ignore::DeprecationWarning:lightning_utilities.*",
+    "ignore::PendingDeprecationWarning",
+]
