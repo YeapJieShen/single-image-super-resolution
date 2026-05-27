@@ -300,17 +300,27 @@ class ValidationDataset(torch.utils.data.Dataset):
         scale (int): Downscaling factor for generating low-resolution images.
         channels (str): Colour mode (``'RGB'`` or ``'L'``).  Defaults to
             ``'RGB'``.
+        blur_sigma (float): Radius for the Gaussian blur applied before
+            downsampling.  Must match :class:`TrainDataset` to keep train/val
+            LR generation consistent.  Defaults to ``1.0``.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int, channels: str = 'RGB'):
+    def __init__(
+        self,
+        img_dir: str | Path,
+        scale: int,
+        channels: str = 'RGB',
+        blur_sigma: float = 1.0,
+    ):
         super().__init__()
 
         self.img_dir = Path(img_dir)
         self.scale = scale
         self.channels = channels
+        self.blur_sigma = blur_sigma
 
         self.img_paths = sorted(
             [p for p in self.img_dir.glob('*.*') if p.is_file()])
@@ -336,7 +346,7 @@ class ValidationDataset(torch.utils.data.Dataset):
         hr_img = Image.open(path).convert('RGB')
 
         # Generate LR image: blur -> downsample -> upsample
-        lr_img = hr_img.filter(ImageFilter.GaussianBlur(radius=1.0))
+        lr_img = hr_img.filter(ImageFilter.GaussianBlur(radius=self.blur_sigma))
         lr_size = (hr_img.width // self.scale, hr_img.height // self.scale)
         lr_img = lr_img.resize(lr_size, resample=Image.BICUBIC)
         lr_img = lr_img.resize(hr_img.size, resample=Image.BICUBIC)

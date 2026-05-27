@@ -107,11 +107,9 @@ def test_validation_dataset_no_images_raises(tmp_path: Path):
         ValidationDataset(img_dir=tmp_path, scale=2, channels="RGB")
 
 
-@pytest.mark.xfail(reason="triage P1.3: ValidationDataset hardcodes blur_sigma=1.0")
 def test_validation_dataset_blur_sigma_propagates(tiny_rgb_image_dir: Path):
-    """ValidationDataset should accept and use blur_sigma; currently hardcoded
-    to 1.0.  When fixed, two datasets with different sigmas should produce
-    different LR outputs."""
+    """ValidationDataset accepts and uses blur_sigma, so two datasets with
+    different sigmas produce different LR outputs."""
     ds_a = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, channels="RGB", blur_sigma=0.1)
     ds_b = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, channels="RGB", blur_sigma=3.0)
     lr_a, _ = ds_a[0]
