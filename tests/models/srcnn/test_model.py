@@ -62,10 +62,9 @@ def test_check_architecture_zero_filter_raises_for_long_tuple():
         SRCNN(num_channels=3, num_filters=(64, 32, 0), kernel_sizes=(9, 1, 5, 5))
 
 
-@pytest.mark.xfail(reason="validation gap: any(f<1) check is gated by len>=3 so (64, 0) slips through")
 def test_check_architecture_zero_filter_raises_for_short_tuple():
-    """Ideally a zero filter is rejected at any length, but `_check_architecture`
-    only validates element values when `len(num_filters) >= 3`."""
+    """A zero filter is rejected at any length — the positive-value check runs
+    independently of the length gate."""
     with pytest.raises(ValueError):
         SRCNN(num_channels=3, num_filters=(64, 0), kernel_sizes=(9, 1, 5))
 

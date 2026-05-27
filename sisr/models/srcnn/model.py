@@ -87,7 +87,7 @@ class SRCNN(torch.nn.Module):
                 elif name == "kernel_sizes":
                     raise ValueError(
                         f"{name} must have at least 3 elements for the feature extraction, mapping, and reconstruction layers. Got {i}.")
-            elif any(f < 1 for f in i):
+            if any(f < 1 for f in i):
                 raise ValueError(
                     f"All elements in {name} must be positive integers. Got {i}.")
 
