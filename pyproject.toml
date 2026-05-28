@@ -5,13 +5,34 @@ build-backend = "hatchling.build"
 [project]
 name = "single-image-super-resolution"
 version = "0.1.0"
-description = "A package for reimplementation of single image super-resolution"
+description = "PyTorch Lightning framework for single-image super-resolution: SRCNN, SRResNet, and a generic LightningCLI training stack."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
 authors = [
     { name = "Jie Shen Yeap", email = "yeapjieshen@hotmail.com" }
 ]
-license = { text = "MIT" }
-readme = "README.md"
-requires-python = ">=3.12"
+keywords = [
+    "super-resolution",
+    "single-image-super-resolution",
+    "sisr",
+    "srcnn",
+    "srresnet",
+    "pytorch",
+    "pytorch-lightning",
+    "deep-learning",
+    "image-processing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 
 # Abstract runtime dependencies with compatible lower bounds — enough for
 # `pip install .` to produce a working (CPU/default) environment. For an exact,
@@ -40,6 +61,7 @@ dev = [
 [project.urls]
 homepage = "https://github.com/YeapJieShen/single-image-super-resolution"
 repository = "https://github.com/YeapJieShen/single-image-super-resolution"
+issues = "https://github.com/YeapJieShen/single-image-super-resolution/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sisr"]
