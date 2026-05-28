@@ -1,0 +1,29 @@
+{
+    // Test discovery uses the pyproject.toml `[tool.pytest.ini_options]`
+    // testpaths, so we don't need pytestArgs here.
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+
+    // Skip the OS file watcher for heavy generated / data dirs. Patterns are
+    // root-anchored (no leading "**/") so they only match the top-level dirs
+    // and NOT the in-package `sisr/models/`.
+    "files.watcherExclude": {
+        "data/**": true,
+        ".lmdb_cache/**": true,
+        "experiments/**": true,
+        "lightning_logs/**": true,
+        "runs/**": true,
+        "models/**": true
+    },
+
+    // Keep project-wide search + Quick Open fast and free of binary noise
+    // (LMDB pages, .pt checkpoints, tfevents). Same root-anchored intent.
+    "search.exclude": {
+        "data": true,
+        ".lmdb_cache": true,
+        "experiments": true,
+        "lightning_logs": true,
+        "runs": true,
+        "models": true
+    }
+}
