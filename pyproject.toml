@@ -58,6 +58,9 @@ dev = [
     "pytest-cov>=5",
 ]
 
+[project.scripts]
+sisr = "sisr.cli:main"
+
 [project.urls]
 homepage = "https://github.com/YeapJieShen/single-image-super-resolution"
 repository = "https://github.com/YeapJieShen/single-image-super-resolution"

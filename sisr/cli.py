@@ -38,6 +38,12 @@ class SRLightningCLI(LightningCLI):
 
 
 def main() -> None:
+    # `freeze_support` lives inside `main` (not the __main__ block) so it
+    # also runs when invoked via the `sisr` console script declared in
+    # pyproject.toml — that entry point bypasses __main__.
+    if sys.platform == 'win32':
+        from multiprocessing import freeze_support
+        freeze_support()
     SRLightningCLI(
         model_class=SRLightning,
         datamodule_class=SRDataModule,
@@ -47,7 +53,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    if sys.platform == 'win32':
-        from multiprocessing import freeze_support
-        freeze_support()
     main()
