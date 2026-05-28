@@ -1,5 +1,7 @@
 # single-image-super-resolution
 
+[![coverage](https://codecov.io/gh/YeapJieShen/single-image-super-resolution/branch/main/graph/badge.svg)](https://app.codecov.io/gh/YeapJieShen/single-image-super-resolution)
+
 A PyTorch Lightning framework for reproducing single image super-resolution (SISR) papers. Training, validation, and test evaluation are all driven through a single `LightningCLI` entrypoint — switching architectures is just a matter of pointing the config at a different model and dataset.
 
 ## Models
