@@ -17,6 +17,10 @@ templates/*
 # Claude's local working notes (codebase index, triage, session history)
 .claude/
 
+# LLM agentic coding artifacts (brainstorming specs, implementation plans).
+# Same rationale as .claude/ — kept off the codebase's git tracking.
+docs/superpowers/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
