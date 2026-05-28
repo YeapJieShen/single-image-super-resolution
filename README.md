@@ -14,17 +14,21 @@ The generic [`SRLightning`](sisr/training/lightning_module.py) module wraps any 
 Requires Python ≥ 3.12.
 
 ```bash
-# CPU / default install (resolves torch from PyPI):
+# CPU / default install:
 pip install .
 
-# GPU install — same deps, but torch / torchvision come from the PyTorch CUDA index:
-pip install -r requirements.txt
+# GPU install — install the CUDA torch/torchvision wheels from PyTorch's
+# own index first (pick the cu### matching your CUDA toolkit), then the
+# project. The second command sees torch already satisfied and resolves
+# the remaining deps from PyPI.
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install .
 
 # Editable + tests:
 pip install -e ".[dev]"
 ```
 
-All version constraints live in `pyproject.toml`. `requirements.txt` is intentionally minimal — it just adds `--extra-index-url https://download.pytorch.org/whl/cu130` (the CUDA wheels aren't on PyPI) and points pip at the project so the same abstract deps install against the GPU wheel index instead.
+`pyproject.toml` is the single source of truth for dependencies. The CUDA-built torch / torchvision wheels aren't on PyPI, so GPU users install them from PyTorch's index first — same convention as PyTorch's own [Get Started](https://pytorch.org/get-started/locally/) selector.
 
 ## Usage
 

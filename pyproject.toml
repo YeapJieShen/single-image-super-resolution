@@ -34,11 +34,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-# Abstract runtime dependencies with compatible lower bounds — enough for
-# `pip install .` to produce a working (CPU/default) environment. For an exact,
-# CUDA-pinned environment use requirements.txt (the GPU install-of-record).
-# Note: the CUDA torch/torchvision wheels (e.g. +cu130) are not on PyPI, so the
-# specific build lives in requirements.txt, not here.
+# Abstract runtime dependencies with compatible lower bounds. The CUDA-built
+# torch / torchvision wheels live on PyTorch's own index (not PyPI), so users
+# who need GPU support install them from that index first; `pip install .`
+# then sees torch already satisfied and resolves everything else from PyPI.
 dependencies = [
     "torch>=2.4",
     "torchvision>=0.19",
