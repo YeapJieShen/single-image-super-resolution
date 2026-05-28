@@ -1,20 +1,12 @@
-# Exact, CUDA-pinned environment for the GPU install-of-record:
+# GPU install-of-record:
 #   pip install -r requirements.txt
 #
-# Direct runtime deps only (mirrors pyproject.toml [project] dependencies);
-# pip resolves transitives. The unique value vs pyproject is the CUDA-specific
-# torch / torchvision wheels (+cu130), which live on PyTorch's own index, not
-# PyPI -- hence the --extra-index-url below. For an abstract / CPU-default
-# install use `pip install .` straight from pyproject.
+# This file's sole job is to install the project via the PyTorch CUDA wheel
+# index (where torch / torchvision +cuXXX wheels live; they aren't on PyPI).
+# Version constraints live in pyproject.toml -- this file just adds the index
+# URL and points pip at the project directory. Pip resolves every other dep
+# (lightning, torchmetrics, etc.) against pyproject's abstract floors.
+#
+# For a CPU/default install use `pip install .` straight from pyproject.toml.
 --extra-index-url https://download.pytorch.org/whl/cu130
-
-torch==2.10.0+cu130
-torchvision==0.25.0+cu130
-lightning==2.6.1
-torchmetrics==1.9.0
-jsonargparse[signatures]==4.48.0
-lmdb==1.8.1
-pillow==12.0.0
-numpy==2.3.5
-tqdm==4.67.3
-tensorboard==2.20.0
+.
