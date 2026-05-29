@@ -170,7 +170,6 @@ class LMDBCacheBuildContext:
                     pending[f] = next_submit
                     next_submit += 1
 
-            # Seed the pipeline
             for _ in range(min(num_workers, len(items))):
                 _submit()
 
@@ -317,10 +316,6 @@ class LMDBCache:
                 buf = txn.get(key.encode())
                 results.append(bytes(buf) if buf is not None else None)
         return results
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _try_load(self, checksum: str) -> bool:
         """
