@@ -87,7 +87,6 @@ class SRLightning(lightning.LightningModule):
         if self.training_config.example_input_shape is not None:
             self.example_input_array = torch.zeros(1, *self.training_config.example_input_shape)
 
-        # Validation PSNR metrics — one torchmetrics instance per tracked key.
         metric_keys: list[str] = []
         for cs in self.eval_config.psnr_channels:
             if self.eval_config.separate_psnr:
@@ -156,7 +155,6 @@ class SRLightning(lightning.LightningModule):
         return tensors
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass — delegates to the wrapped SR model."""
         return self.model(x)
 
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[
