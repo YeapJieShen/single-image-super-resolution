@@ -61,16 +61,13 @@ class BenchmarkImageLogger(Callback):
         self.log_every_n_val_runs = log_every_n_val_runs
         self.crop_border = crop_border
 
-        # Set in setup() — both mappings derived from dataset_names.
         # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
         # Test: only test sets present, at idx 0..N-1     → {0: 'Set5', ...}
         self._val_mapping: dict[int, str] = {}
         self._test_mapping: dict[int, str] = {}
 
-        # Internal counter for validation runs (drives image-throttle)
         self._val_run_count = 0
 
-        # Buffer: {dataset_name: [(filename, lr|None, sr|None, hr|None, psnr_dict, ssim), ...]}
         self._buffer: dict[str, list[tuple]] = {}
 
     def setup(
@@ -88,10 +85,6 @@ class BenchmarkImageLogger(Callback):
             self.dataset_names = list(names or [])
         self._val_mapping = {i + 1: name for i, name in enumerate(self.dataset_names)}
         self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
-
-    # ------------------------------------------------------------------
-    # Validation-stage hooks (during `cli fit` / `cli validate`)
-    # ------------------------------------------------------------------
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
@@ -137,10 +130,6 @@ class BenchmarkImageLogger(Callback):
             should_log_images=self._on_image_log_interval(),
         )
 
-    # ------------------------------------------------------------------
-    # Test-stage hooks (during `cli test`)
-    # ------------------------------------------------------------------
-
     def on_test_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
@@ -183,10 +172,6 @@ class BenchmarkImageLogger(Callback):
             pl_module=pl_module,
             should_log_images=True,
         )
-
-    # ------------------------------------------------------------------
-    # Internal helpers shared by val and test paths
-    # ------------------------------------------------------------------
 
     def _on_image_log_interval(self) -> bool:
         return self._val_run_count % self.log_every_n_val_runs == 0
@@ -308,7 +293,6 @@ class BenchmarkImageLogger(Callback):
         target_h, target_w = target_hw
         _, h, w = img.shape
 
-        # Add symmetric padding to left/right & top/bottom
         pad_lr = (target_w - w) // 2
         pad_ud = (target_h - h) // 2
         img = torch.nn.functional.pad(img, (pad_lr, pad_lr, pad_ud, pad_ud), value=0.0)
