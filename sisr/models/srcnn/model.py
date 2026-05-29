@@ -97,7 +97,6 @@ class SRCNN(torch.nn.Module):
 
     @property
     def hparams(self) -> dict:
-        """Returns the model architecture hyperparameters as a dict."""
         return self._hparams
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
