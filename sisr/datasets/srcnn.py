@@ -132,7 +132,6 @@ class TrainDataset(torch.utils.data.Dataset):
         self.stride = stride
         self.scale = scale
         self.blur_sigma = blur_sigma
-        self._num_channels = 3
 
         self.img_paths = sorted(
             [p for p in self.img_dir.glob('*.*') if p.is_file()])
@@ -144,7 +143,7 @@ class TrainDataset(torch.utils.data.Dataset):
 
         self._img_offsets, total_patches = self._compute_offsets()
 
-        patch_bytes = self._num_channels * self.sub_img_size * self.sub_img_size
+        patch_bytes = 3 * self.sub_img_size * self.sub_img_size
         map_size = max(total_patches * 2 * patch_bytes * 2, 512 * 1024 * 1024)
 
         self._cache = LMDBCache(
@@ -154,7 +153,7 @@ class TrainDataset(torch.utils.data.Dataset):
             length=total_patches,
             map_size=map_size,
             metadata={
-                'channels': str(self._num_channels),
+                'channels': '3',
                 'subimg_size': str(self.sub_img_size),
             },
             build_fn=self._build,
@@ -253,7 +252,7 @@ class TrainDataset(torch.utils.data.Dataset):
             A ``(lr_tensor, hr_tensor)`` tuple of ``float32`` tensors
             with shape ``(C, H, W)`` and values in ``[0, 1]``.
         """
-        C = self._num_channels
+        C = 3
         H = W = self.sub_img_size
 
         lr_key = f'lr_{idx:08d}'
