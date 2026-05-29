@@ -61,7 +61,6 @@ def _process_subimages(
             hr_subimg = img.crop(
                 (left, top, left + sub_img_size, top + sub_img_size))
 
-            # Generate LR sub-image: blur -> downsample -> upsample
             lr_patch = hr_subimg.filter(
                 ImageFilter.GaussianBlur(radius=blur_sigma))
             lr_patch = lr_patch.resize(
@@ -72,7 +71,6 @@ def _process_subimages(
             hr_arr = np.array(hr_subimg)
             lr_arr = np.array(lr_patch)
 
-            # (H, W, C) -> (C, H, W)
             hr_arr = hr_arr.transpose(2, 0, 1)
             lr_arr = lr_arr.transpose(2, 0, 1)
 
@@ -144,7 +142,6 @@ class TrainDataset(torch.utils.data.Dataset):
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / '.lmdb_cache'
         checksum = self._compute_checksum()
 
-        # Precompute per-image offsets and total patch count
         self._img_offsets, total_patches = self._compute_offsets()
 
         patch_bytes = self._num_channels * self.sub_img_size * self.sub_img_size
@@ -224,7 +221,6 @@ class TrainDataset(torch.utils.data.Dataset):
             ctx (LMDBCacheBuildContext): Build context provided by
                 :class:`LMDBCache`.
         """
-        # Build per-item args: each worker gets (path, subimg_size, stride, scale, blur_sigma, base_idx)
         process_args = [
             (self.sub_img_size, self.stride, self.scale,
              self.blur_sigma, self._img_offsets[i])
@@ -339,7 +335,6 @@ class ValidationDataset(torch.utils.data.Dataset):
 
         hr_img = Image.open(path).convert('RGB')
 
-        # Generate LR image: blur -> downsample -> upsample
         lr_img = hr_img.filter(ImageFilter.GaussianBlur(radius=self.blur_sigma))
         lr_size = (hr_img.width // self.scale, hr_img.height // self.scale)
         lr_img = lr_img.resize(lr_size, resample=Image.BICUBIC)
