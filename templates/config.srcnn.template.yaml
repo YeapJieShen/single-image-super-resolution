@@ -1,0 +1,134 @@
+# SRCNN x3 experiment template. One self-contained YAML — no layering.
+#   python -m sisr.cli fit --config templates/config.srcnn.template.yaml
+#
+# Fill in placeholders flagged with TODO before running. Per-run tweaks can
+# also be applied on the CLI:
+#   --trainer.max_steps=500000
+#   --optimizer.init_args.lr=1e-3
+#   --data.train_dataset.subimg_size=33
+
+seed_everything: 42
+
+# Top-level optimizer / lr_scheduler — linked into model.init_args by
+# SRLightningCLI. SRLightning builds the actual optimizer in
+# configure_optimizers, optionally with per-Conv2d param groups when
+# model.training_config.layer_lrs is set (SRCNNTrainingConfig default:
+# [1e-4, 1e-4, 1e-5] — paper-faithful).
+optimizer:
+  class_path: torch.optim.SGD
+  init_args:
+    lr: 1.0e-4         # base LR; ignored per-group when layer_lrs is set
+    momentum: 0.9
+
+# lr_scheduler:
+#   class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+#   init_args:
+#     factor: 0.5
+#     patience: 5
+
+model:
+  model:
+    class_path: sisr.models.srcnn.SRCNN
+    init_args:
+      num_channels: 3
+      num_filters: [64, 32]
+      kernel_sizes: [9, 1, 5]
+      padding: 0
+      custom_init: true
+  training_config:
+    class_path: sisr.models.srcnn.SRCNNTrainingConfig
+    # Defaults match the SRCNN paper:
+    #   model_colorspace=Y, layer_lrs=[1e-4, 1e-4, 1e-5]
+    init_args:
+      example_input_shape: [3, 224, 224]   # for TensorBoard model graph
+      # Override per experiment, e.g.:
+      # model_colorspace: RGB              # train on RGB instead of Y
+      # layer_lrs: null                    # uniform LR from optimizer.init_args.lr
+  eval_config:
+    class_path: sisr.models.srcnn.SRCNNEvalConfig
+    # Defaults: crop_border=3, psnr_channels=[RGB, YCbCr], separate_psnr=false
+
+data:
+  train_dataset_class: sisr.datasets.srcnn.TrainDataset
+  val_dataset_class: sisr.datasets.srcnn.ValidationDataset
+  train_dataset:
+    img_dir: data/DIV2K_train_HR
+    subimg_size: 33
+    stride: 14
+    scale: 3
+    blur_sigma: 1.0
+    use_tqdm: true
+    cache_dir: ./.lmdb_cache/DIV2K_train_HR   # TODO: set or accept default
+  val_dataset:
+    img_dir: data/DIV2K_valid_HR
+    scale: 3
+    blur_sigma: 1.0                       # keep in sync with train_dataset.blur_sigma
+  test_datasets:                         # surface as both val_dataloader (monitor during fit)
+    Set5:                                # and test_dataloader (final eval via `cli test`)
+      img_dir: data/Set5_HR
+      scale: 3
+      blur_sigma: 1.0
+    Set14:
+      img_dir: data/Set14_HR
+      scale: 3
+      blur_sigma: 1.0
+  train_dataloader_kwargs:
+    batch_size: 64
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+  test_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  max_steps: 1000000
+  val_check_interval: 20000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 500
+  deterministic: false
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        log_every_n_val_runs: 1
+        crop_border: 3
+        # dataset_names is auto-discovered from data.test_datasets
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_psnr(RGB)
+        save_top_k: 3
+        dirpath: ./experiments/SRCNN/baseline   # TODO
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: val_ssim
+        save_top_k: 3
+        dirpath: ./experiments/SRCNN/baseline   # TODO
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        log_every_n_steps: 2000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRCNN
+        version: baseline
+        log_graph: true
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        save_dir: ./experiments         # TODO
+        name: SRCNN
+        version: baseline

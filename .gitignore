@@ -1,5 +1,25 @@
 # Extra files to ignore
 data
+cache/
+.lmdb_cache/
+lightning_logs/
+checkpoints/
+experiments/
+templates/*
+!templates/*template*
+
+# Old notebook-era artifacts (root-anchored so they don't match the
+# sisr/models package): trained checkpoints, prototype notebooks, TB logs
+/models/
+/notebooks/
+/runs/
+
+# Claude's local working notes (codebase index, triage, session history)
+.claude/
+
+# LLM agentic coding artifacts (brainstorming specs, implementation plans).
+# Same rationale as .claude/ — kept off the codebase's git tracking.
+docs/superpowers/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -181,7 +201,10 @@ cython_debug/
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 #  and can be added to the global gitignore or merged into this file. However, if you prefer, 
 #  you could uncomment the following to ignore the enitre vscode folder
-# .vscode/
+# Share a curated subset (settings.json, extensions.json); ignore everything else.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 
 # Ruff stuff:
 .ruff_cache/
