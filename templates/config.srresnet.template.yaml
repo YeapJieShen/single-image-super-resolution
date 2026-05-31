@@ -1,18 +1,9 @@
 seed_everything: 42
 
-# Top-level optimizer / lr_scheduler — linked into model.init_args by
-# SRLightningCLI. SRResNet trains on RGB with a uniform LR (layer_lrs is left
-# null: it has BatchNorm/PReLU params, so the per-Conv2d LR path doesn't apply).
 optimizer:
   class_path: torch.optim.Adam
   init_args:
     lr: 1.0e-4
-
-# lr_scheduler:
-#   class_path: torch.optim.lr_scheduler.StepLR
-#   init_args:
-#     step_size: 200000
-#     gamma: 0.1
 
 model:
   model:
@@ -28,7 +19,6 @@ model:
     class_path: sisr.training.SRTrainingConfig
     init_args:
       model_colorspace: RGB     # SRResNet trains on RGB (SRGAN convention)
-      # layer_lrs stays null (default) — required for models with non-Conv params.
       example_input_shape: [3, 24, 24]   # LR patch (96 / 4) for the TensorBoard graph
   eval_config:
     class_path: sisr.training.SREvalConfig
@@ -96,12 +86,12 @@ trainer:
       init_args:
         monitor_metric: val_psnr(RGB)
         save_top_k: 3
-        dirpath: ./experiments/SRResNet/baseline   # TODO
+        dirpath: ./experiments/SRResNet/baseline
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_ssim
         save_top_k: 3
-        dirpath: ./experiments/SRResNet/baseline   # TODO
+        dirpath: ./experiments/SRResNet/baseline
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
@@ -111,12 +101,12 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: ./experiments         # TODO
+        save_dir: ./experiments
         name: SRResNet
         version: baseline
         log_graph: true
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: ./experiments         # TODO
+        save_dir: ./experiments
         name: SRResNet
         version: baseline
