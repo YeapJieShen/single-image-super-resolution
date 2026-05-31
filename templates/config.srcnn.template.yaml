@@ -25,16 +25,17 @@ model:
       num_filters: [64, 32]
       kernel_sizes: [9, 1, 5]
       padding: 0
-      custom_init: true
   training_config:
     class_path: sisr.models.srcnn.SRCNNTrainingConfig
     # Defaults match the SRCNN paper:
-    #   model_colorspace=Y, layer_lrs=[1e-4, 1e-4, 1e-5]
+    #   model_colorspace=Y, layer_lrs=[1e-4, 1e-4, 1e-5],
+    #   init_strategy=paper, init_mean=0.0, init_std=0.01
     init_args:
       example_input_shape: [3, 224, 224]   # for TensorBoard model graph
       # Override per experiment, e.g.:
       # model_colorspace: RGB              # train on RGB instead of Y
       # layer_lrs: null                    # uniform LR from optimizer.init_args.lr
+      # init_strategy: default             # skip paper-faithful weight init
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
     # Defaults: crop_border=3, psnr_channels=[RGB, YCbCr], separate_psnr=false

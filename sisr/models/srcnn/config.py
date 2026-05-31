@@ -21,15 +21,19 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     The paper trains on the Y channel of YCbCr only and uses a per-layer
     learning rate of ``1e-4`` for the feature-extraction and non-linear-
     mapping layers and ``1e-5`` for the reconstruction layer — i.e. the
-    last layer learns 10× slower.  Override any field in YAML to deviate
-    (e.g. ``layer_lrs: null`` for uniform LR, or ``model_colorspace: RGB``
-    for full-RGB training).
+    last layer learns 10× slower.  Weight initialization follows the
+    paper's Gaussian schedule (``N(0, 0.01)`` with zero biases); set
+    ``init_strategy='default'`` to fall back to PyTorch's built-in init.
+    Override any field in YAML to deviate.
     """
 
     model_colorspace: Literal['RGB', 'Y', 'YCbCr'] = 'Y'
     layer_lrs: list[float] | None = field(
         default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5]
     )
+    init_strategy: Literal['default', 'paper'] = 'paper'
+    init_mean: float = 0.0
+    init_std: float = 0.01
 
 
 @dataclass

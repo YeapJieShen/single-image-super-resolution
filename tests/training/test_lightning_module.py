@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from sisr.models.srcnn import SRCNN
+from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
 
@@ -254,3 +254,47 @@ def test_flatten_hparams_handles_nested():
         "b/y/1": 4,
         "d": "SRCNN",
     }
+
+
+# ---------------------------------------------------------------------------
+# init strategy
+# ---------------------------------------------------------------------------
+
+
+def test_paper_init_calls_reset_parameters():
+    """init_strategy='paper' → SRLightning calls model.reset_parameters(...)."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    model.reset_parameters = MagicMock()
+    SRLightning(
+        model=model,
+        training_config=SRCNNTrainingConfig(init_strategy="paper", init_mean=0.5, init_std=0.02),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    model.reset_parameters.assert_called_once_with(mean=0.5, std=0.02)
+
+
+def test_default_init_skips_reset_parameters():
+    """init_strategy='default' → SRLightning does NOT call model.reset_parameters(...)."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    model.reset_parameters = MagicMock()
+    SRLightning(
+        model=model,
+        training_config=SRCNNTrainingConfig(init_strategy="default"),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    model.reset_parameters.assert_not_called()
+
+
+def test_base_training_config_skips_reset_parameters():
+    """Plain SRTrainingConfig (no init_strategy attr) → no call, no crash."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    model.reset_parameters = MagicMock()
+    SRLightning(
+        model=model,
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    model.reset_parameters.assert_not_called()
