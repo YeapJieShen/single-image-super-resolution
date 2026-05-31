@@ -76,6 +76,12 @@ class SRLightning(lightning.LightningModule):
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
+        strategy = getattr(self.training_config, 'init_strategy', 'default')
+        if strategy == 'paper' and hasattr(model, 'reset_parameters'):
+            mean = getattr(self.training_config, 'init_mean', 0.0)
+            std = getattr(self.training_config, 'init_std', 0.01)
+            model.reset_parameters(mean=mean, std=std)
+
         # Merge model.hparams into Lightning hparams for TensorBoard HParams.
         model_hparams = getattr(model, 'hparams', {})
         self._hparams = self._flatten_hparams({

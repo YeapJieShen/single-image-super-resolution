@@ -17,13 +17,9 @@ class SRCNN(torch.nn.Module):
             (e.g., (9, 1, 5) for the original SRCNN architecture).
         padding (str | int): The padding type or size for the convolutional layers.
             Can be 'valid', 'same', or an integer specifying the number of pixels to pad. Default is 'valid'.
-        custom_init (bool): Whether to use custom weight initialization for the convolutional layers. Default
-            is False, which uses the default initialization method in PyTorch.
-        init_mean (float): The mean of the normal distribution for custom weight initialization. Default is 0.0. Only used if custom_init is True.
-        init_std (float): The standard deviation of the normal distribution for custom weight initialization. Default is 0.01. Only used if custom_init is True.
     """
 
-    def __init__(self, num_channels: int, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...], padding: str | int = 'valid', custom_init: bool = False, init_mean: float = 0.0, init_std: float = 0.01):
+    def __init__(self, num_channels: int, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...], padding: str | int = 'valid'):
         super().__init__()
 
         self._check_architecture(num_filters, kernel_sizes)
@@ -33,9 +29,6 @@ class SRCNN(torch.nn.Module):
             'num_filters': num_filters,
             'kernel_sizes': kernel_sizes,
             'padding': padding,
-            'custom_init': custom_init,
-            'init_mean': init_mean,
-            'init_std': init_std,
         }
 
         self.feat = torch.nn.Sequential(
@@ -47,7 +40,6 @@ class SRCNN(torch.nn.Module):
         self.mapping = torch.nn.Sequential(
             *[
                 layer
-                # Skip 1st and last layer, defined separately
                 for i in range(len(num_filters) - 1)
                 for layer in (
                     torch.nn.Conv2d(
@@ -59,9 +51,6 @@ class SRCNN(torch.nn.Module):
 
         self.recon = torch.nn.Conv2d(
             num_filters[-1], num_channels, kernel_size=kernel_sizes[-1], padding=padding)
-
-        if custom_init:
-            self.reset_parameters(mean=init_mean, std=init_std)
 
     def _check_architecture(self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]):
         """

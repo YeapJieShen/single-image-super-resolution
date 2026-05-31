@@ -85,34 +85,49 @@ def test_hparams_property_round_trips():
         num_filters=(64, 32),
         kernel_sizes=(9, 1, 5),
         padding=0,
-        custom_init=True,
-        init_mean=0.1,
-        init_std=0.05,
     )
     h = model.hparams
     assert h["num_channels"] == 3
     assert h["num_filters"] == (64, 32)
     assert h["kernel_sizes"] == (9, 1, 5)
     assert h["padding"] == 0
-    assert h["custom_init"] is True
-    assert h["init_mean"] == 0.1
-    assert h["init_std"] == 0.05
 
 
 def test_reset_parameters_zeroes_bias_and_sets_weight_std():
-    """Verifies the SRCNN-paper init: weights ~ N(mean, std), biases = 0."""
+    """Verifies the SRCNN-paper init: weights ~ N(mean, std), biases = 0.
+    After the init-args migration, reset_parameters is invoked explicitly."""
     torch.manual_seed(0)
     model = SRCNN(
         num_channels=3,
         num_filters=(64, 32),
         kernel_sizes=(9, 1, 5),
         padding=0,
-        custom_init=True,
-        init_mean=0.0,
-        init_std=0.01,
     )
+    model.reset_parameters(mean=0.0, std=0.01)
     for m in model.modules():
         if isinstance(m, torch.nn.Conv2d):
             assert torch.allclose(m.bias, torch.zeros_like(m.bias))
-            # Weight std is approximately 0.01; loose bound for finite-sample variance.
             assert 0.005 < m.weight.std().item() < 0.02
+
+
+def test_init_only_args_rejected():
+    """custom_init / init_mean / init_std were moved to SRCNNTrainingConfig."""
+    with pytest.raises(TypeError):
+        SRCNN(
+            num_channels=3,
+            num_filters=(64, 32),
+            kernel_sizes=(9, 1, 5),
+            padding=0,
+            custom_init=True,
+        )
+
+
+def test_hparams_architectural_only():
+    """After the init-args migration, SRCNN.hparams holds only architectural keys."""
+    model = SRCNN(
+        num_channels=3,
+        num_filters=(64, 32),
+        kernel_sizes=(9, 1, 5),
+        padding=0,
+    )
+    assert set(model.hparams.keys()) == {"num_channels", "num_filters", "kernel_sizes", "padding"}

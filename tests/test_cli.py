@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
@@ -44,8 +45,8 @@ def test_cli_srresnet_print_config_resolves():
     assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
     out = proc.stdout
     assert "class_path: sisr.models.srresnet.SRResNet" in out
-    assert "train_dataset_class: sisr.datasets.srresnet.TrainDataset" in out
-    assert "val_dataset_class: sisr.datasets.srresnet.ValidationDataset" in out
+    assert "class_path: sisr.datasets.srresnet.TrainDataset" in out
+    assert "class_path: sisr.datasets.srresnet.ValidationDataset" in out
     assert "model_colorspace: RGB" in out
     assert "hr_crop_size: 96" in out
     assert "crop_border: 4" in out
@@ -75,3 +76,16 @@ def test_cli_help_lists_subcommands():
     assert proc.returncode == 0
     for sub in ("fit", "validate", "test", "predict"):
         assert sub in proc.stdout
+
+
+TEMPLATE_PATHS = sorted((REPO_ROOT / "templates").glob("config.*.template.yaml"))
+assert TEMPLATE_PATHS, "No templates found — check REPO_ROOT"
+
+
+@pytest.mark.parametrize("template_path", TEMPLATE_PATHS, ids=[p.name for p in TEMPLATE_PATHS])
+def test_template_yaml_parses(template_path: Path):
+    """Every template YAML file must be valid YAML and have required keys."""
+    with template_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    assert isinstance(data, dict), f"{template_path} did not parse as a mapping"
+    assert "trainer" in data and "model" in data and "data" in data

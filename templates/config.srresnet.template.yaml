@@ -1,12 +1,3 @@
-# SRResNet x4 experiment template. One self-contained YAML — no layering.
-#   python -m sisr.cli fit --config templates/config.srresnet.template.yaml
-#
-# Fill in placeholders flagged with TODO before running. Per-run tweaks can
-# also be applied on the CLI:
-#   --trainer.max_steps=1000000
-#   --optimizer.init_args.lr=1e-4
-#   --data.train_dataset.hr_crop_size=96
-
 seed_everything: 42
 
 # Top-level optimizer / lr_scheduler — linked into model.init_args by
@@ -46,23 +37,29 @@ model:
       psnr_channels: [RGB, YCbCr]
 
 data:
-  train_dataset_class: sisr.datasets.srresnet.TrainDataset
-  val_dataset_class: sisr.datasets.srresnet.ValidationDataset
   train_dataset:
-    img_dir: data/DIV2K_train_HR
-    scale: 4
-    hr_crop_size: 96            # LR crop is 96 / 4 = 24; must be divisible by scale
-    crops_per_image: 1          # raise to draw more random crops per image per epoch
+    class_path: sisr.datasets.srresnet.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      scale: 4
+      hr_crop_size: 96            # LR crop is 96 / 4 = 24; must be divisible by scale
+      crops_per_image: 1          # raise to draw more random crops per image per epoch
   val_dataset:
-    img_dir: data/DIV2K_valid_HR
-    scale: 4
-  test_datasets:                # surface as both val_dataloader (monitor during fit)
-    Set5:                       # and test_dataloader (final eval via `cli test`)
-      img_dir: data/Set5_HR
+    class_path: sisr.datasets.srresnet.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
       scale: 4
+  test_datasets:                  # surface as both val_dataloader (monitor during fit)
+    Set5:                         # and test_dataloader (final eval via `cli test`)
+      class_path: sisr.datasets.srresnet.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: 4
     Set14:
-      img_dir: data/Set14_HR
-      scale: 4
+      class_path: sisr.datasets.srresnet.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: 4
   train_dataloader_kwargs:
     batch_size: 16
     num_workers: 16
@@ -93,8 +90,8 @@ trainer:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
         log_every_n_val_runs: 1
-        crop_border: 4
         # dataset_names is auto-discovered from data.test_datasets
+        # crop_border is sourced from model.eval_config.crop_border
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_psnr(RGB)

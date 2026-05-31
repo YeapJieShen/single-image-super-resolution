@@ -376,3 +376,43 @@ def test_weight_histogram_logger_emits_on_cadence(tmp_path: Path):
     trainer = SimpleNamespace(global_step=1, loggers=[tb_logger])
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
     tb_logger.finalize("success")
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkImageLogger crop_border migration to eval_config
+# ---------------------------------------------------------------------------
+
+def test_crop_border_init_arg_rejected():
+    """crop_border was dropped from BenchmarkImageLogger; now lives on eval_config."""
+    with pytest.raises(TypeError):
+        BenchmarkImageLogger(crop_border=3)
+
+
+def test_benchmark_collect_batch_crops_per_eval_config():
+    """When eval_config.crop_border=3, _collect_batch crops 3 pixels per edge
+    before computing per-image PSNR/SSIM."""
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    # Real SRLightning with crop_border=3 in eval_config.
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        training_config=SRTrainingConfig(model_colorspace="RGB"),
+        eval_config=SREvalConfig(crop_border=3),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(
+        val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],
+    )
+    # 16x16 input; after crop_border=3 sides, the inner 10x10 region drives PSNR/SSIM.
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer, pl_module=pl_module, outputs=None,
+        batch=batch, batch_idx=0, dataloader_idx=1,
+    )
+    assert len(cb._buffer["Set5"]) == 1
+    _, _, _, _, psnr_dict, ssim = cb._buffer["Set5"][0]
+    assert "RGB" in psnr_dict
+    assert isinstance(ssim, float)
