@@ -1,21 +1,10 @@
 seed_everything: 42
 
-# Top-level optimizer / lr_scheduler — linked into model.init_args by
-# SRLightningCLI. SRLightning builds the actual optimizer in
-# configure_optimizers, optionally with per-Conv2d param groups when
-# model.training_config.layer_lrs is set (SRCNNTrainingConfig default:
-# [1e-4, 1e-4, 1e-5] — paper-faithful).
 optimizer:
   class_path: torch.optim.SGD
   init_args:
     lr: 1.0e-4         # base LR; ignored per-group when layer_lrs is set
     momentum: 0.9
-
-# lr_scheduler:
-#   class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
-#   init_args:
-#     factor: 0.5
-#     patience: 5
 
 model:
   model:
@@ -27,18 +16,10 @@ model:
       padding: 0
   training_config:
     class_path: sisr.models.srcnn.SRCNNTrainingConfig
-    # Defaults match the SRCNN paper:
-    #   model_colorspace=Y, layer_lrs=[1e-4, 1e-4, 1e-5],
-    #   init_strategy=paper, init_mean=0.0, init_std=0.01
     init_args:
       example_input_shape: [3, 224, 224]   # for TensorBoard model graph
-      # Override per experiment, e.g.:
-      # model_colorspace: RGB              # train on RGB instead of Y
-      # layer_lrs: null                    # uniform LR from optimizer.init_args.lr
-      # init_strategy: default             # skip paper-faithful weight init
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
-    # Defaults: crop_border=3, psnr_channels=[RGB, YCbCr], separate_psnr=false
 
 data:
   train_dataset:
@@ -50,7 +31,7 @@ data:
       scale: 3
       blur_sigma: 1.0
       use_tqdm: true
-      cache_dir: ./.lmdb_cache/DIV2K_train_HR   # TODO: set or accept default
+      cache_dir: ./.lmdb_cache/DIV2K_train_HR
   val_dataset:
     class_path: sisr.datasets.srcnn.ValidationDataset
     init_args:
@@ -106,12 +87,12 @@ trainer:
       init_args:
         monitor_metric: val_psnr(RGB)
         save_top_k: 3
-        dirpath: ./experiments/SRCNN/baseline   # TODO
+        dirpath: ./experiments/SRCNN/baseline
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_ssim
         save_top_k: 3
-        dirpath: ./experiments/SRCNN/baseline   # TODO
+        dirpath: ./experiments/SRCNN/baseline
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
@@ -121,12 +102,12 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: ./experiments         # TODO
+        save_dir: ./experiments
         name: SRCNN
         version: baseline
         log_graph: true
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: ./experiments         # TODO
+        save_dir: ./experiments
         name: SRCNN
         version: baseline
