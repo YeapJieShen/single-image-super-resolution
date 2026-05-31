@@ -1,12 +1,3 @@
-# SRResNet x4 experiment template. One self-contained YAML — no layering.
-#   python -m sisr.cli fit --config templates/config.srresnet.template.yaml
-#
-# Fill in placeholders flagged with TODO before running. Per-run tweaks can
-# also be applied on the CLI:
-#   --trainer.max_steps=1000000
-#   --optimizer.init_args.lr=1e-4
-#   --data.train_dataset.hr_crop_size=96
-
 seed_everything: 42
 
 # Top-level optimizer / lr_scheduler — linked into model.init_args by
