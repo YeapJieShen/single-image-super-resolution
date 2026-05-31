@@ -45,8 +45,8 @@ def test_cli_srresnet_print_config_resolves():
     assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
     out = proc.stdout
     assert "class_path: sisr.models.srresnet.SRResNet" in out
-    assert "train_dataset_class: sisr.datasets.srresnet.TrainDataset" in out
-    assert "val_dataset_class: sisr.datasets.srresnet.ValidationDataset" in out
+    assert "class_path: sisr.datasets.srresnet.TrainDataset" in out
+    assert "class_path: sisr.datasets.srresnet.ValidationDataset" in out
     assert "model_colorspace: RGB" in out
     assert "hr_crop_size: 96" in out
     assert "crop_border: 4" in out

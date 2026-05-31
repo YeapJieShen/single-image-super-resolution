@@ -8,21 +8,30 @@ from sisr.training import SRDataModule
 
 def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
     """SRDataModule pointing at a single tiny image dir for train/val/test."""
-    train_kwargs = {
-        "img_dir": str(image_dir),
-        "subimg_size": 33,
-        "stride": 14,
-        "scale": 2,
-        "blur_sigma": 1.0,
-        "use_tqdm": False,
-        "cache_dir": str(image_dir / ".lmdb_cache_train"),
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "blur_sigma": 1.0,
+            "use_tqdm": False,
+            "cache_dir": str(image_dir / ".lmdb_cache_train"),
+        },
     }
-    val_kwargs = {"img_dir": str(image_dir), "scale": 2}
-    test_kwargs = {"img_dir": str(image_dir), "scale": 2}
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(image_dir), "scale": 2},
+    }
+    test_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(image_dir), "scale": 2},
+    }
     return SRDataModule(
-        train_dataset=train_kwargs,
-        val_dataset=val_kwargs,
-        test_datasets={"Set5": test_kwargs, "Set14": test_kwargs},
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        test_datasets={"Set5": test_spec, "Set14": test_spec},
         train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
         val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
         test_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
@@ -91,20 +100,26 @@ def test_test_dataloader_returns_test_only(tiny_rgb_image_dir: Path):
 def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
     """When test_dataloader_kwargs is omitted, the datamodule reuses
     val_dataloader_kwargs."""
-    train_kwargs = {
-        "img_dir": str(tiny_rgb_image_dir),
-        "subimg_size": 33,
-        "stride": 14,
-        "scale": 2,
-        "blur_sigma": 1.0,
-        "use_tqdm": False,
-        "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_fb"),
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "blur_sigma": 1.0,
+            "use_tqdm": False,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_fb"),
+        },
     }
-    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2}
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
     dm = SRDataModule(
-        train_dataset=train_kwargs,
-        val_dataset=val_kwargs,
-        test_datasets={"Set5": val_kwargs},
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        test_datasets={"Set5": val_spec},
         train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
         val_dataloader_kwargs={"batch_size": 7, "num_workers": 0},
         test_dataloader_kwargs=None,
@@ -114,19 +129,25 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
 
 
 def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir: Path):
-    train_kwargs = {
-        "img_dir": str(tiny_rgb_image_dir),
-        "subimg_size": 33,
-        "stride": 14,
-        "scale": 2,
-        "blur_sigma": 1.0,
-        "use_tqdm": False,
-        "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_only_primary"),
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "blur_sigma": 1.0,
+            "use_tqdm": False,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_only_primary"),
+        },
     }
-    val_kwargs = {"img_dir": str(tiny_rgb_image_dir), "scale": 2}
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
     dm = SRDataModule(
-        train_dataset=train_kwargs,
-        val_dataset=val_kwargs,
+        train_dataset=train_spec,
+        val_dataset=val_spec,
         test_datasets=None,
         train_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
         val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
@@ -134,3 +155,66 @@ def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir
     dm.setup(stage="fit")
     loaders = dm.val_dataloader()
     assert len(loaders) == 1
+
+
+def test_old_class_params_rejected(tiny_rgb_image_dir: Path):
+    """The legacy `train_dataset_class` etc. params no longer exist."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "blur_sigma": 1.0,
+            "use_tqdm": False,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_legacy"),
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    with pytest.raises(TypeError):
+        SRDataModule(
+            train_dataset=train_spec,
+            val_dataset=val_spec,
+            train_dataset_class=object,  # legacy param — must not exist
+        )
+
+
+def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
+    """train_dataset accepts {class_path, init_args} and setup() instantiates it."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "blur_sigma": 1.0,
+            "use_tqdm": False,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_cp"),
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    test_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    dm = SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        test_datasets={"Set5": test_spec},
+        train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
+        val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+        test_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+    dm.setup(stage="fit")
+    from sisr.datasets.srcnn import TrainDataset, ValidationDataset
+    assert isinstance(dm._train_ds, TrainDataset)
+    assert isinstance(dm._val_ds, ValidationDataset)
+    assert isinstance(dm._test_ds["Set5"], ValidationDataset)
