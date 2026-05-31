@@ -100,8 +100,8 @@ trainer:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
         log_every_n_val_runs: 1
-        crop_border: 3
         # dataset_names is auto-discovered from data.test_datasets
+        # crop_border is sourced from model.eval_config.crop_border
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_psnr(RGB)

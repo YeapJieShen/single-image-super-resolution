@@ -34,6 +34,9 @@ class BenchmarkImageLogger(Callback):
     ``"{name}_ssim/{filename}"``; per-set means under
     ``"{name}_psnr({key})"`` and ``"{name}_ssim"``.
 
+    Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
+    the use site; this avoids dual-knob configuration drift.
+
     Args:
         dataset_names: Ordered list of test set names (e.g.
             ``["Set5", "Set14"]``) matching the order of
@@ -45,21 +48,16 @@ class BenchmarkImageLogger(Callback):
             ``max_steps=100_000``) val fires ~100 times, so logging every 5
             runs gives ~20 image snapshots — enough to track visual
             progress without flooding TensorBoard storage.  Default ``5``.
-        crop_border: Pixels to crop on each border before metric
-            computation; matches the standard SR-evaluation convention of
-            ignoring the outer ``scale`` pixels.
     """
 
     def __init__(
         self,
         dataset_names: list[str] | None = None,
         log_every_n_val_runs: int = 5,
-        crop_border: int = 0,
     ):
         super().__init__()
         self.dataset_names = list(dataset_names) if dataset_names else None
         self.log_every_n_val_runs = log_every_n_val_runs
-        self.crop_border = crop_border
 
         # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
         # Test: only test sets present, at idx 0..N-1     → {0: 'Set5', ...}
@@ -204,8 +202,8 @@ class BenchmarkImageLogger(Callback):
 
             sr_4d = sr[i].unsqueeze(0).cpu()
             hr_4d = hr_cropped[i].unsqueeze(0).cpu()
-            if self.crop_border > 0:
-                n = self.crop_border
+            n = pl_module.eval_config.crop_border
+            if n > 0:
                 sr_4d = sr_4d[..., n:-n, n:-n]
                 hr_4d = hr_4d[..., n:-n, n:-n]
             psnr_tensors = pl_module._build_psnr_tensors(sr_4d, hr_4d)
