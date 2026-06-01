@@ -73,11 +73,12 @@ class TrainDataset(torch.utils.data.Dataset):
         return len(self.img_paths) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns a ``(lr_tensor, hr_tensor)`` pair where ``hr_tensor`` is a
-        random ``hr_crop_size`` square crop and ``lr_tensor`` is its bicubic
-        downscale by ``scale`` (side ``hr_crop_size // scale``).  Both are
-        ``float32`` in ``[0, 1]`` with shape ``(3, H, W)``.
+        """Returns a ``(lr_tensor, hr_tensor)`` pair where ``hr_tensor`` is a random crop.
+
+        ``hr_tensor`` is a random ``hr_crop_size`` square crop and
+        ``lr_tensor`` is its bicubic downscale by ``scale`` (side
+        ``hr_crop_size // scale``). Both are ``float32`` in ``[0, 1]``
+        with shape ``(3, H, W)``.
         """
         path = self.img_paths[idx % len(self.img_paths)]
         hr_img = Image.open(path).convert('RGB')
@@ -133,10 +134,11 @@ class ValidationDataset(torch.utils.data.Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns a ``(lr_tensor, hr_tensor)`` pair: ``hr_tensor`` is the HR
-        image cropped to a multiple of ``scale``, and ``lr_tensor`` is its
-        bicubic downscale by ``scale``. Both are ``float32`` in ``[0, 1]``.
+        """Returns a ``(lr_tensor, hr_tensor)`` pair for the image at ``idx``.
+
+        ``hr_tensor`` is the HR image cropped to a multiple of ``scale``,
+        and ``lr_tensor`` is its bicubic downscale by ``scale``. Both are
+        ``float32`` in ``[0, 1]``.
         """
         path = self.img_paths[idx]
         hr_img = Image.open(path).convert('RGB')
