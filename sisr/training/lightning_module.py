@@ -106,11 +106,11 @@ class SRLightning(lightning.LightningModule):
             if self.eval_config.separate_psnr:
                 metric_keys.extend(self._CS_CHANNEL_NAMES[cs])
             metric_keys.append(cs)
-        self.val_psnr_metrics = torch.nn.ModuleDict({
-            k: torchmetrics.image.PeakSignalNoiseRatio(data_range=1.0)
-            for k in metric_keys
+        self._psnr_keys = metric_keys
+        self.val_metrics = torchmetrics.MetricCollection({
+            **{f'psnr({k})': torchmetrics.image.PeakSignalNoiseRatio(data_range=1.0) for k in metric_keys},
+            'ssim': torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1.0),
         })
-        self.val_ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1.0)
 
     @staticmethod
     def _flatten_hparams(hparams: dict[str, Any], sep: str = '/') -> dict:
@@ -166,7 +166,7 @@ class SRLightning(lightning.LightningModule):
             ``(sr_subset, hr_subset)`` tensor pair ready for PSNR
             computation.
         """
-        keys = set(self.val_psnr_metrics.keys())
+        keys = set(self._psnr_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         if keys & {'RGB', 'R', 'G', 'B'}:
@@ -286,20 +286,22 @@ class SRLightning(lightning.LightningModule):
             hr_cropped = hr_cropped[..., n:-n, n:-n]
 
         psnr_tensors = self._build_psnr_tensors(sr, hr_cropped)
-        ssim = self.val_ssim(sr, hr_cropped)
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
         self.log('val_loss', loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
         primary = self.eval_config.psnr_channels[0]
-        for key, metric in self.val_psnr_metrics.items():
+        for key in self._psnr_keys:
             sr_t, hr_t = psnr_tensors[key]
             self.log(
-                f'val_psnr({key})', metric(sr_t, hr_t),
+                f'val_psnr({key})', self.val_metrics[f'psnr({key})'](sr_t, hr_t),
                 prog_bar=(key == primary),
                 on_step=False, add_dataloader_idx=False,
             )
-        self.log('val_ssim', ssim, prog_bar=True, on_step=False, add_dataloader_idx=False)
+        self.log(
+            'val_ssim', self.val_metrics['ssim'](sr, hr_cropped),
+            prog_bar=True, on_step=False, add_dataloader_idx=False,
+        )
 
     def test_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
