@@ -106,6 +106,53 @@ def test_cli_matmul_precision_rejects_invalid():
     assert proc.returncode != 0
 
 
+# In-process unit tests for SRLightningCLI.before_instantiate_classes. Subprocess
+# tests above cover argparse wiring; these cover the hook's branching logic so it
+# shows up in line coverage.
+def _make_cli_stub(subcommand: str | None, matmul_precision: str | None):
+    """Build an SRLightningCLI instance bypassing __init__ for direct hook testing."""
+    from types import SimpleNamespace
+    from sisr.cli import SRLightningCLI
+
+    cli = SRLightningCLI.__new__(SRLightningCLI)
+    cli.subcommand = subcommand
+    cli.config = {subcommand: SimpleNamespace(matmul_precision=matmul_precision)} if subcommand else {}
+    return cli
+
+
+def test_before_instantiate_classes_calls_torch_setter(monkeypatch):
+    """When matmul_precision is set, torch.set_float32_matmul_precision is called with it."""
+    import torch
+    calls: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
+
+    _make_cli_stub(subcommand="fit", matmul_precision="medium").before_instantiate_classes()
+
+    assert calls == ["medium"]
+
+
+def test_before_instantiate_classes_skips_when_unset(monkeypatch):
+    """When matmul_precision is None, torch.set_float32_matmul_precision is NOT called."""
+    import torch
+    calls: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
+
+    _make_cli_stub(subcommand="fit", matmul_precision=None).before_instantiate_classes()
+
+    assert calls == []
+
+
+def test_before_instantiate_classes_skips_when_no_subcommand(monkeypatch):
+    """The hook returns early when self.subcommand is None (e.g., --help)."""
+    import torch
+    calls: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
+
+    _make_cli_stub(subcommand=None, matmul_precision="medium").before_instantiate_classes()
+
+    assert calls == []
+
+
 TEMPLATE_PATHS = sorted((REPO_ROOT / "templates").glob("config.*.template.yaml"))
 assert TEMPLATE_PATHS, "No templates found — check REPO_ROOT"
 
