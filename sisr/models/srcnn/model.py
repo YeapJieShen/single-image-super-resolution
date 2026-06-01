@@ -2,8 +2,7 @@ import torch
 
 
 class SRCNN(torch.nn.Module):
-    """
-    SRCNN (Super-Resolution Convolutional Neural Network) model for single image super-resolution.
+    """SRCNN (Super-Resolution Convolutional Neural Network) model for single image super-resolution.
     The architecture consists of three main parts: feature extraction, non-linear mapping, and reconstruction.
 
     Reference:
@@ -53,8 +52,7 @@ class SRCNN(torch.nn.Module):
             num_filters[-1], num_channels, kernel_size=kernel_sizes[-1], padding=padding)
 
     def _check_architecture(self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]):
-        """
-        Validates the architecture parameters for the SRCNN model.
+        """Validates the architecture parameters for the SRCNN model.
 
         Args:
             num_filters (tuple[int, ...]): A tuple containing the number of filters for each convolutional layer.
@@ -88,8 +86,7 @@ class SRCNN(torch.nn.Module):
         return self._hparams
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
-        """
-        Initializes the weights of the convolutional layers using a normal distribution and sets the biases to zero.
+        """Initializes the weights of the convolutional layers using a normal distribution and sets the biases to zero.
         Following the initialization method described in the original SRCNN paper (https://arxiv.org/pdf/1501.00092).
 
         Args:
@@ -102,8 +99,7 @@ class SRCNN(torch.nn.Module):
                 torch.nn.init.constant_(module.bias, 0.0)
 
     def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
-        """
-        Forward pass of the SRCNN model.
+        """Forward pass of the SRCNN model.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, num_channels, height, width)

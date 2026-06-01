@@ -9,8 +9,7 @@ from typing import Any
 
 
 class BenchmarkImageLogger(Callback):
-    """
-    Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
+    """Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
     one or more held-out test/benchmark dataloaders (Set5, Set14, …).
 
     Fires during *both* validation and test stages:
@@ -277,9 +276,7 @@ class BenchmarkImageLogger(Callback):
 
     @staticmethod
     def _pad_to_match(img: torch.Tensor, target_hw: tuple) -> torch.Tensor:
-        """
-        Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size.
-
+        """Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size.
 
         Args:
             img (torch.Tensor): Image tensor of shape ``(C, H, W)``.
@@ -305,8 +302,7 @@ class BenchmarkImageLogger(Callback):
 
 
 class GradNormLogger(Callback):
-    """
-    Log the total gradient L2 norm to TensorBoard periodically.
+    """Log the total gradient L2 norm to TensorBoard periodically.
 
     Computes ``sqrt(sum(p.grad.norm() ** 2))`` across all model parameters
     after the backward pass and logs it as the ``"grad_norm"`` scalar.
@@ -323,8 +319,7 @@ class GradNormLogger(Callback):
     def on_after_backward(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """
-        Compute and log gradient norm if on the right step cadence.
+        """Compute and log gradient norm if on the right step cadence.
 
         Args:
             trainer (lightning.Trainer): The trainer instance.
@@ -343,8 +338,7 @@ class GradNormLogger(Callback):
 
 
 class WeightHistogramLogger(Callback):
-    """
-    Log the weights of the model as histograms to TensorBoard periodically,
+    """Log the weights of the model as histograms to TensorBoard periodically,
     grouped by parameter prefixes (e.g., model.feat, model.mapping, model.recon).
 
     Args:
@@ -359,8 +353,7 @@ class WeightHistogramLogger(Callback):
     def on_train_batch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule, outputs: Any, batch: Any, batch_idx: int
     ):
-        """
-        Log grouped weights as histograms if on the right step cadence.
+        """Log grouped weights as histograms if on the right step cadence.
 
         Args:
             trainer (lightning.Trainer): The trainer instance.
@@ -389,8 +382,7 @@ class WeightHistogramLogger(Callback):
 
 
 class SRCheckpoint(ModelCheckpoint):
-    """
-    Model checkpoint that monitors a super-resolution quality metric.
+    """Model checkpoint that monitors a super-resolution quality metric.
 
     A thin convenience wrapper around
     :class:`~lightning.pytorch.callbacks.ModelCheckpoint` that

@@ -7,8 +7,7 @@ from pathlib import Path
 
 
 class TrainDataset(torch.utils.data.Dataset):
-    """
-    Random-crop HR/LR pairs for SRResNet-style training.
+    """Random-crop HR/LR pairs for SRResNet-style training.
 
     Each ``__getitem__`` takes a random ``hr_crop_size`` square crop from an
     HR image and bicubic-downsamples it by ``scale`` to form the LR input.
@@ -96,8 +95,7 @@ class TrainDataset(torch.utils.data.Dataset):
 
 
 class ValidationDataset(torch.utils.data.Dataset):
-    """
-    Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
+    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
 
     Each item is a full image pair. The HR image is cropped to a multiple of
     ``scale`` so the model's ×``scale`` output lands exactly on the HR size;

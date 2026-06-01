@@ -6,8 +6,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class SRDataModule(lightning.LightningDataModule):
-    """
-    Generic LightningDataModule for single-image super-resolution.
+    """Generic LightningDataModule for single-image super-resolution.
 
     Owns the train / validation / test Dataset constructions and exposes them
     as DataLoaders. Datasets are described by ``{class_path, init_args}`` specs

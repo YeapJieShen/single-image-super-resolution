@@ -14,8 +14,7 @@ from .config import SREvalConfig, SRTrainingConfig
 
 
 class SRLightning(lightning.LightningModule):
-    """
-    Generic Lightning wrapper for single-image super-resolution models.
+    """Generic Lightning wrapper for single-image super-resolution models.
 
     Architecture-agnostic: any ``torch.nn.Module`` that accepts an LR tensor
     of shape ``(B, C, H, W)`` and returns an SR tensor can be plugged in.

@@ -15,8 +15,7 @@ def _process_subimages(
     blur_sigma: float,
     base_idx: int,
 ) -> list[tuple[str, bytes]]:
-    """
-    Extracts all LR/HR sub-image pairs from a single image and returns
+    """Extracts all LR/HR sub-image pairs from a single image and returns
     them as keyed pairs ready for LMDB insertion.
 
     This is a top-level function (not a method) so that it can be
@@ -82,8 +81,7 @@ def _process_subimages(
 
 
 class TrainDataset(torch.utils.data.Dataset):
-    """
-    Dataset that serves precomputed LR/HR sub-image pairs from an LMDB cache.
+    """Dataset that serves precomputed LR/HR sub-image pairs from an LMDB cache.
 
     On first instantiation with a given set of parameters the dataset
     extracts every sliding-window sub-image from every image, generates the
@@ -161,8 +159,7 @@ class TrainDataset(torch.utils.data.Dataset):
         )
 
     def _compute_checksum(self) -> str:
-        """
-        Computes a SHA-256 checksum over the file manifest and dataset
+        """Computes a SHA-256 checksum over the file manifest and dataset
         parameters.
 
         The manifest includes every file name and its size (via ``stat``),
@@ -185,8 +182,7 @@ class TrainDataset(torch.utils.data.Dataset):
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
     def _compute_offsets(self) -> tuple[list[int], int]:
-        """
-        Reads image dimensions (without decoding pixels) to compute
+        """Reads image dimensions (without decoding pixels) to compute
         per-image cumulative sub-image offsets.
 
         Returns:
@@ -209,8 +205,7 @@ class TrainDataset(torch.utils.data.Dataset):
         return offsets, offset
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
-        """
-        Populates the LMDB cache using parallel image processing.
+        """Populates the LMDB cache using parallel image processing.
 
         Each image is submitted to a worker process which extracts
         sub-images and returns keyed byte pairs.  Results are written
@@ -238,8 +233,7 @@ class TrainDataset(torch.utils.data.Dataset):
         return self._cache.length
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Retrieves the LR/HR sub-image pair at the given index.
+        """Retrieves the LR/HR sub-image pair at the given index.
 
         Reads the raw uint8 bytes from LMDB, reshapes them into
         ``(C, H, W)`` arrays, and converts to ``float32`` tensors
@@ -279,8 +273,7 @@ class TrainDataset(torch.utils.data.Dataset):
 
 
 class ValidationDataset(torch.utils.data.Dataset):
-    """
-    Dataset that serves full-image LR/HR pairs for validation.
+    """Dataset that serves full-image LR/HR pairs for validation.
 
     Unlike :class:`TrainDataset` this dataset does not extract sub-images.
     Each item is a full image pair where the low-resolution version is
@@ -320,8 +313,7 @@ class ValidationDataset(torch.utils.data.Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Retrieves the LR/HR image pair at the given index.
+        """Retrieves the LR/HR image pair at the given index.
 
         Args:
             idx (int): Zero-based image index.

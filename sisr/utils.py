@@ -95,8 +95,7 @@ def reconstruct_sr_rgb(
 
 
 class LMDBCacheBuildContext:
-    """
-    Context object passed to the ``build_fn`` callback of :class:`LMDBCache`.
+    """Context object passed to the ``build_fn`` callback of :class:`LMDBCache`.
 
     Provides helpers for writing data into the LMDB being built.
 
@@ -110,8 +109,7 @@ class LMDBCacheBuildContext:
         self.use_tqdm = use_tqdm
 
     def write_batch(self, pairs: Sequence[tuple[str, bytes]]) -> None:
-        """
-        Writes a batch of key-value pairs in a single transaction.
+        """Writes a batch of key-value pairs in a single transaction.
 
         Args:
             pairs (Sequence[tuple[str, bytes]]): Sequence of ``(key, value)`` tuples to write.
@@ -129,8 +127,7 @@ class LMDBCacheBuildContext:
         num_workers: int = 8,
         desc: str = "Building LMDB cache",
     ):
-        """
-        Processes *items* in parallel and writes results to LMDB.
+        """Processes *items* in parallel and writes results to LMDB.
 
         Each item is submitted to a ``ProcessPoolExecutor``.  The worker
         function *process_fn* must be a top-level (picklable) callable
@@ -189,8 +186,7 @@ class LMDBCacheBuildContext:
 
 
 class LMDBCache:
-    """
-    A checksum-validated LMDB key-value store with parallel build support.
+    """A checksum-validated LMDB key-value store with parallel build support.
 
     On construction the cache checks whether a valid LMDB database
     already exists (matched by *checksum*).  If not, it calls
@@ -247,8 +243,7 @@ class LMDBCache:
 
     @property
     def path(self) -> Path:
-        """
-        Path to the LMDB database directory.
+        """Path to the LMDB database directory.
 
         Returns:
             The path where the LMDB database is stored.
@@ -257,8 +252,7 @@ class LMDBCache:
 
     @property
     def length(self) -> int:
-        """
-        Number of entries stored in the cache.
+        """Number of entries stored in the cache.
 
         Returns:
             The number of entries.
@@ -266,8 +260,7 @@ class LMDBCache:
         return self._length
 
     def get_env(self) -> lmdb.Environment:
-        """
-        Returns the LMDB environment, opening it lazily on first call.
+        """Returns the LMDB environment, opening it lazily on first call.
 
         Each ``DataLoader`` worker process must call this independently
         because LMDB memory-mapped environments cannot be shared across
@@ -282,8 +275,7 @@ class LMDBCache:
         return self._env
 
     def get(self, key: str) -> bytes | None:
-        """
-        Reads a single value from the cache.
+        """Reads a single value from the cache.
 
         Args:
             key (str): The string key to look up.
@@ -299,8 +291,7 @@ class LMDBCache:
             return bytes(buf)
 
     def get_batch(self, keys: Sequence[str]) -> list[bytes | None]:
-        """
-        Reads multiple values from the cache in a single transaction.
+        """Reads multiple values from the cache in a single transaction.
 
         Args:
             keys (Sequence[str]): Sequence of string keys to look up.
@@ -318,8 +309,7 @@ class LMDBCache:
         return results
 
     def _try_load(self, checksum: str) -> bool:
-        """
-        Validates an existing LMDB by comparing its stored checksum.
+        """Validates an existing LMDB by comparing its stored checksum.
 
         Args:
             checksum (str): The expected checksum to validate against.
@@ -356,8 +346,7 @@ class LMDBCache:
         build_fn: Callable[[LMDBCacheBuildContext], None],
         use_tqdm: bool,
     ):
-        """
-        Creates a fresh LMDB and delegates population to *build_fn*.
+        """Creates a fresh LMDB and delegates population to *build_fn*.
 
         Args:
             checksum (str): The checksum to store for future validation.
