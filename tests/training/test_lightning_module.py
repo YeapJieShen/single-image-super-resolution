@@ -1,6 +1,8 @@
 import functools
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import lightning
 import pytest
 import torch
 
@@ -298,3 +300,55 @@ def test_base_training_config_skips_reset_parameters():
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
     model.reset_parameters.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# on_train_start hook
+# ---------------------------------------------------------------------------
+
+def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning):
+    """The hook calls TensorBoardLogger.log_hyperparams once with val metrics dict."""
+    tb = MagicMock(spec=lightning.pytorch.loggers.TensorBoardLogger)
+    srcnn_rgb_lit.trainer = SimpleNamespace(loggers=[tb])
+
+    srcnn_rgb_lit.on_train_start()
+
+    tb.log_hyperparams.assert_called_once()
+    args, kwargs = tb.log_hyperparams.call_args
+    params_arg = args[0] if args else kwargs.get('params')
+    metrics_arg = args[1] if len(args) > 1 else kwargs.get('metrics')
+
+    expected_metrics = {f'val_psnr({k})': 0.0 for k in srcnn_rgb_lit._psnr_keys}
+    expected_metrics['val_ssim'] = 0.0
+
+    assert params_arg == srcnn_rgb_lit.hparams
+    assert metrics_arg == expected_metrics
+
+
+def test_on_train_start_no_tb_logger_is_noop(srcnn_rgb_lit: SRLightning):
+    """The hook does nothing when no TensorBoardLogger is attached."""
+    csv = MagicMock(spec=lightning.pytorch.loggers.CSVLogger)
+    srcnn_rgb_lit.trainer = SimpleNamespace(loggers=[csv])
+
+    srcnn_rgb_lit.on_train_start()
+
+    csv.log_hyperparams.assert_not_called()
+
+
+def test_on_train_start_no_loggers_is_noop(srcnn_rgb_lit: SRLightning):
+    """The hook does nothing when the loggers list is empty."""
+    srcnn_rgb_lit.trainer = SimpleNamespace(loggers=[])
+
+    srcnn_rgb_lit.on_train_start()  # must not raise
+
+
+def test_on_train_start_multiple_tb_loggers_each_receive_call(srcnn_rgb_lit: SRLightning):
+    """When multiple TensorBoardLoggers are attached, each gets log_hyperparams."""
+    tb1 = MagicMock(spec=lightning.pytorch.loggers.TensorBoardLogger)
+    tb2 = MagicMock(spec=lightning.pytorch.loggers.TensorBoardLogger)
+    srcnn_rgb_lit.trainer = SimpleNamespace(loggers=[tb1, tb2])
+
+    srcnn_rgb_lit.on_train_start()
+
+    tb1.log_hyperparams.assert_called_once()
+    tb2.log_hyperparams.assert_called_once()

@@ -164,3 +164,18 @@ def test_template_yaml_parses(template_path: Path):
         data = yaml.safe_load(f)
     assert isinstance(data, dict), f"{template_path} did not parse as a mapping"
     assert "trainer" in data and "model" in data and "data" in data
+
+
+@pytest.mark.parametrize("template_path", TEMPLATE_PATHS, ids=[p.name for p in TEMPLATE_PATHS])
+def test_template_disables_default_hp_metric(template_path: Path):
+    """Each shipped template must disable TensorBoard's hp_metric: -1 placeholder.
+
+    The resolved --print_config output is the source of truth; checking the YAML
+    file directly would miss cases where a default is inherited or overridden.
+    """
+    proc = _cli("fit", "--config", str(template_path), "--print_config")
+    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
+    assert "default_hp_metric: false" in proc.stdout, (
+        f"{template_path.name} does not disable the hp_metric placeholder. "
+        f"Add `default_hp_metric: false` under the TensorBoardLogger init_args."
+    )

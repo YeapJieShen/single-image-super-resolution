@@ -303,6 +303,28 @@ class SRLightning(lightning.LightningModule):
             prog_bar=True, on_step=False, add_dataloader_idx=False,
         )
 
+    def on_train_start(self) -> None:
+        """Register val metric tags with TensorBoard's HParams tab.
+
+        Replaces Lightning's default ``hp_metric`` placeholder (disabled via
+        ``default_hp_metric=False`` on the logger) with the real validation
+        metrics this module emits. Placeholder values are ``0.0``; TensorBoard's
+        HParams plugin then fills the columns from the matching scalar tags
+        logged by :meth:`validation_step`.
+        """
+        tb_loggers = [
+            l for l in self.loggers
+            if isinstance(l, lightning.pytorch.loggers.TensorBoardLogger)
+        ]
+        if not tb_loggers:
+            return
+        metrics = {
+            **{f'val_psnr({k})': 0.0 for k in self._psnr_keys},
+            'val_ssim': 0.0,
+        }
+        for tb in tb_loggers:
+            tb.log_hyperparams(self.hparams, metrics)
+
     def test_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> None:

@@ -104,6 +104,7 @@ trainer:
         name: SRCNN
         version: baseline
         log_graph: true
+        default_hp_metric: false
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
         save_dir: experiments
