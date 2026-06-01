@@ -34,27 +34,27 @@ pip install -e ".[dev]"
 
 ## Usage
 
-Training is configured entirely through YAML. Copy a template from [`templates/`](templates/), fill in the `TODO` placeholders (dataset directories, experiment output paths), then:
+Training is configured entirely through YAML. Copy a template from [`templates/`](templates/), edit the dataset directories and experiment output paths, then:
 
 ```bash
 # Train SRCNN (x3):
-python -m sisr.cli fit --config templates/config.srcnn.template.yaml
+sisr fit --config templates/config.srcnn.template.yaml
 
 # Train SRResNet (x4):
-python -m sisr.cli fit --config templates/config.srresnet.template.yaml
+sisr fit --config templates/config.srresnet.template.yaml
 ```
 
 Per-run overrides can be passed on the CLI without editing the YAML:
 
 ```bash
-python -m sisr.cli fit --config templates/config.srcnn.template.yaml \
+sisr fit --config templates/config.srcnn.template.yaml \
     --trainer.max_steps=500000 --optimizer.init_args.lr=1e-3
 ```
 
 After training, evaluate a checkpoint against the test sets (Set5, Set14, …):
 
 ```bash
-python -m sisr.cli test --config templates/config.srcnn.template.yaml \
+sisr test --config templates/config.srcnn.template.yaml \
     --ckpt_path path/to/best.ckpt
 ```
 

@@ -1,9 +1,12 @@
 """LightningCLI entrypoint for SR training.
 
 Usage:
-    python -m sisr.cli fit --config templates/config.srcnn.template.yaml
-    python -m sisr.cli test --config templates/config.srcnn.template.yaml \\
-                            --ckpt_path <best.ckpt>
+    sisr fit --config templates/config.srcnn.template.yaml
+    sisr test --config templates/config.srcnn.template.yaml \\
+              --ckpt_path <best.ckpt>
+
+The ``sisr`` console script is registered by ``pyproject.toml``; ``python -m
+sisr.cli ...`` also works.
 
 Top-level YAML keys ``optimizer:`` / ``lr_scheduler:`` are linked into
 ``model.init_args.optimizer`` / ``model.init_args.lr_scheduler`` by

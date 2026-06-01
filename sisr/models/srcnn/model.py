@@ -57,9 +57,8 @@ class SRCNN(torch.nn.Module):
         Validates the architecture parameters for the SRCNN model.
 
         Args:
-            num_filters (tuple[int, ...]): A tuple containing the number of filters for each convolutional layer
-            kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each convolutional layer
-            padding (str | int): The padding type or size for the convolutional layers
+            num_filters (tuple[int, ...]): A tuple containing the number of filters for each convolutional layer.
+            kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each convolutional layer.
 
         Raises:
             ValueError: If num_filters or kernel_sizes are not tuples, if they have different lengths, or if any of their elements are not positive integers.
