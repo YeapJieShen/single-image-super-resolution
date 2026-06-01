@@ -171,6 +171,7 @@ class BenchmarkImageLogger(Callback):
         )
 
     def _on_image_log_interval(self) -> bool:
+        """Return True when this val run should also log image strips."""
         return self._val_run_count % self.log_every_n_val_runs == 0
 
     def _collect_batch(
@@ -184,6 +185,27 @@ class BenchmarkImageLogger(Callback):
         dataloader_idx: int,
         should_log_images: bool,
     ):
+        """Forward one batch, compute per-image metrics, and buffer the results.
+
+        Shared between :meth:`on_validation_batch_end` and
+        :meth:`on_test_batch_end`. Border cropping is sourced from
+        ``pl_module.eval_config.crop_border`` at the use site.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being evaluated.
+            batch (Any): ``(lr_img, hr_img)`` tuple from the loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataset_name (str): Name of the test set this batch comes from.
+            source_dataloaders: ``trainer.val_dataloaders`` or
+                ``trainer.test_dataloaders`` — used to recover the
+                underlying dataset for filename resolution.
+            dataloader_idx (int): Index into ``source_dataloaders``.
+            should_log_images (bool): When True the LR/SR/HR tensors are
+                cached for image-strip emission in :meth:`_flush_buffer`;
+                otherwise only scalar metrics are buffered.
+        """
         lr_img, hr_img = batch
 
         with torch.no_grad():
@@ -230,6 +252,21 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         should_log_images: bool,
     ):
+        """Log per-set means and (optionally) image strips for buffered batches.
+
+        Shared between :meth:`on_validation_epoch_end` and
+        :meth:`on_test_epoch_end`. Looks up the TensorBoard logger from
+        ``trainer.loggers``; silently skips image emission for sets whose
+        logger is missing.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (used for
+                ``global_step`` and the TensorBoard logger lookup).
+            pl_module (lightning.LightningModule): Receives ``log()`` calls
+                for the per-set mean metrics.
+            should_log_images (bool): When True, LR|SR|HR image strips are
+                emitted to TensorBoard alongside the scalar means.
+        """
         step = trainer.global_step
 
         for dataset_name, samples in self._buffer.items():

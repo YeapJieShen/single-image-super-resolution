@@ -160,6 +160,21 @@ class SRLightning(lightning.LightningModule):
         return tensors
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the wrapped SR model on ``x`` and return its raw output.
+
+        Pure inference path — no colorspace conversion, no metrics, no
+        cropping. Used by ``trainer.predict`` and direct ``module(x)``
+        calls. The training / validation paths go through :meth:`_step`,
+        which adds the colorspace pipeline.
+
+        Args:
+            x: LR input tensor of shape ``(B, C, H, W)``.
+
+        Returns:
+            SR tensor as produced by the wrapped model. Shape depends on
+            the architecture (same as ``x`` for SRCNN; ``(B, C, H*scale,
+            W*scale)`` for SRResNet).
+        """
         return self.model(x)
 
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[
@@ -193,6 +208,20 @@ class SRLightning(lightning.LightningModule):
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        """Compute training loss for one batch and log it.
+
+        Delegates the forward + colorspace + loss pipeline to :meth:`_step`
+        and logs ``train_loss`` on every step for the progress bar.
+
+        Args:
+            batch: ``(lr_img, hr_img)`` tuple as produced by the
+                :class:`SRDataModule` train loader. Both are ``float32`` in
+                ``[0, 1]``.
+            batch_idx: Index of the batch within the current epoch.
+
+        Returns:
+            Scalar loss tensor for the optimizer.
+        """
         loss, *_ = self._step(batch)
         self.log('train_loss', loss, prog_bar=True, on_step=True)
         return loss

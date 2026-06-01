@@ -81,6 +81,15 @@ class SRDataModule(lightning.LightningDataModule):
             self._val_ds = instantiate_class((), self._val_spec)
 
     def train_dataloader(self) -> DataLoader:
+        """Build the training DataLoader.
+
+        ``shuffle=True`` is forced — any ``shuffle`` entry the user supplies
+        in ``train_dataloader_kwargs`` would be a TypeError (duplicate
+        kwarg) and the YAML schema does not expose ``shuffle``.
+
+        Returns:
+            DataLoader over the train spec, shuffled.
+        """
         return DataLoader(self._train_ds, shuffle=True, **self._train_dl_kwargs)
 
     def val_dataloader(self) -> list:

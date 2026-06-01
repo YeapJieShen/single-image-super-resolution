@@ -34,16 +34,26 @@ class SRLightningCLI(LightningCLI):
     """
 
     def add_arguments_to_parser(self, parser):
-        # Non-subclass mode (model_class=SRLightning fixed): SRLightning's
-        # init args land at model.<arg>, not model.init_args.<arg>.
+        """Wire top-level ``optimizer:`` / ``lr_scheduler:`` YAML keys into the model.
+
+        Non-subclass mode (``model_class=SRLightning`` fixed) means
+        ``SRLightning``'s init args land at ``model.<arg>``, not
+        ``model.init_args.<arg>`` — that's why the link targets omit
+        ``init_args``.
+        """
         parser.add_optimizer_args(link_to="model.optimizer")
         parser.add_lr_scheduler_args(link_to="model.lr_scheduler")
 
 
 def main() -> None:
-    # `freeze_support` lives inside `main` (not the __main__ block) so it
-    # also runs when invoked via the `sisr` console script declared in
-    # pyproject.toml — that entry point bypasses __main__.
+    """Console-script entrypoint.
+
+    Invoked as ``sisr ...`` via the entry point registered in
+    ``pyproject.toml``, and also as ``python -m sisr.cli ...``.
+    ``freeze_support`` lives inside ``main`` (not the ``__main__`` block)
+    so it also runs under the console-script path, which bypasses
+    ``__main__``.
+    """
     if sys.platform == 'win32':
         from multiprocessing import freeze_support
         freeze_support()

@@ -83,6 +83,16 @@ class SRCNN(torch.nn.Module):
 
     @property
     def hparams(self) -> dict:
+        """Return the model architecture hyperparameters as a dict.
+
+        Merged into Lightning's HParams by :class:`~sisr.training.SRLightning`
+        so the architecture spec appears alongside training params in
+        TensorBoard.
+
+        Returns:
+            Dict with keys ``num_channels``, ``num_filters``,
+            ``kernel_sizes``, ``padding``.
+        """
         return self._hparams
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
