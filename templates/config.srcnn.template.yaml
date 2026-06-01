@@ -17,7 +17,7 @@ model:
   training_config:
     class_path: sisr.models.srcnn.SRCNNTrainingConfig
     init_args:
-      example_input_shape: [3, 224, 224]   # for TensorBoard model graph
+      example_input_shape: [3, 224, 224]   # For TensorBoard graph
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 
@@ -31,15 +31,15 @@ data:
       scale: 3
       blur_sigma: 1.0
       use_tqdm: true
-      cache_dir: ./.lmdb_cache/DIV2K_train_HR
+      cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
     class_path: sisr.datasets.srcnn.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: 3
-      blur_sigma: 1.0                           # keep in sync with train_dataset.init_args.blur_sigma
-  test_datasets:                                # surface as both val_dataloader (monitor during fit)
-    Set5:                                       # and test_dataloader (final eval via `cli test`)
+      blur_sigma: 1.0
+  test_datasets:
+    Set5:
       class_path: sisr.datasets.srcnn.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
@@ -81,18 +81,16 @@ trainer:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
         log_every_n_val_runs: 1
-        # dataset_names is auto-discovered from data.test_datasets
-        # crop_border is sourced from model.eval_config.crop_border
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_psnr(RGB)
         save_top_k: 3
-        dirpath: ./experiments/SRCNN/baseline
+        dirpath: experiments/SRCNN/baseline
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_ssim
         save_top_k: 3
-        dirpath: ./experiments/SRCNN/baseline
+        dirpath: experiments/SRCNN/baseline
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
@@ -102,12 +100,12 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: ./experiments
+        save_dir: experiments
         name: SRCNN
         version: baseline
         log_graph: true
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: ./experiments
+        save_dir: experiments
         name: SRCNN
         version: baseline
