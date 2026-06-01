@@ -9,7 +9,7 @@ model:
   model:
     class_path: sisr.models.srresnet.SRResNet
     init_args:
-      scale: 4                  # must be a power of 2
+      scale: 4
       in_out_channels: 3
       hidden_channel: 64
       kernel_sizes: [9, 3, 9]
@@ -18,12 +18,12 @@ model:
   training_config:
     class_path: sisr.training.SRTrainingConfig
     init_args:
-      model_colorspace: RGB     # SRResNet trains on RGB (SRGAN convention)
-      example_input_shape: [3, 24, 24]   # LR patch (96 / 4) for the TensorBoard graph
+      model_colorspace: RGB
+      example_input_shape: [3, 24, 24]   # For TensorBoard graph
   eval_config:
     class_path: sisr.training.SREvalConfig
     init_args:
-      crop_border: 4            # exclude the outer `scale` pixels (x4)
+      crop_border: 4
       psnr_channels: [RGB, YCbCr]
 
 data:
@@ -32,15 +32,15 @@ data:
     init_args:
       img_dir: data/DIV2K_train_HR
       scale: 4
-      hr_crop_size: 96            # LR crop is 96 / 4 = 24; must be divisible by scale
-      crops_per_image: 1          # raise to draw more random crops per image per epoch
+      hr_crop_size: 96
+      crops_per_image: 1
   val_dataset:
     class_path: sisr.datasets.srresnet.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: 4
-  test_datasets:                  # surface as both val_dataloader (monitor during fit)
-    Set5:                         # and test_dataloader (final eval via `cli test`)
+  test_datasets:
+    Set5:
       class_path: sisr.datasets.srresnet.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
@@ -80,18 +80,16 @@ trainer:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
         log_every_n_val_runs: 1
-        # dataset_names is auto-discovered from data.test_datasets
-        # crop_border is sourced from model.eval_config.crop_border
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_psnr(RGB)
         save_top_k: 3
-        dirpath: ./experiments/SRResNet/baseline
+        dirpath: experiments/SRResNet/baseline
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_ssim
         save_top_k: 3
-        dirpath: ./experiments/SRResNet/baseline
+        dirpath: experiments/SRResNet/baseline
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
@@ -101,12 +99,12 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: ./experiments
+        save_dir: experiments
         name: SRResNet
         version: baseline
         log_graph: true
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: ./experiments
+        save_dir: experiments
         name: SRResNet
         version: baseline

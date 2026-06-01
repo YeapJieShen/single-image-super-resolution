@@ -1,21 +1,13 @@
 {
-    // Test discovery uses the pyproject.toml `[tool.pytest.ini_options]`
-    // testpaths, so we don't need pytestArgs here.
     "python.testing.pytestEnabled": true,
     "python.testing.unittestEnabled": false,
 
-    // Skip the OS file watcher for the heavy dirs the current code produces:
-    // user-provided HR images, the LMDB training cache, and the TensorBoard /
-    // CSV / checkpoint output tree. Root-anchored (no leading "**/") so they
-    // only match the top-level dirs.
     "files.watcherExclude": {
         "data/**": true,
         ".lmdb_cache/**": true,
         "experiments/**": true
     },
 
-    // Keep project-wide search + Quick Open fast and free of binary noise
-    // (LMDB pages, .pt checkpoints, tfevents).
     "search.exclude": {
         "data": true,
         ".lmdb_cache": true,
