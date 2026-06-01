@@ -2,5 +2,6 @@
 from .base import SRProcessor
 from .rgb import RGBProcessor
 from .y_channel import YChannelProcessor
+from .ycbcr import YCbCrProcessor
 
-__all__ = ["SRProcessor", "RGBProcessor", "YChannelProcessor"]
+__all__ = ["SRProcessor", "RGBProcessor", "YChannelProcessor", "YCbCrProcessor"]
