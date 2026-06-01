@@ -109,6 +109,14 @@ class SRLightning(lightning.LightningModule):
 
         None values are dropped (they add noise without aiding comparison).
         Class objects are reduced to their ``__name__``.
+
+        Args:
+            hparams: Nested mapping of hparams (may contain dicts, lists,
+                tuples, scalars, or class objects).
+            sep: Separator used to join nested keys. Defaults to ``'/'``.
+
+        Returns:
+            Flat dict with ``sep``-joined keys and scalar leaves.
         """
         result = {}
 
@@ -139,6 +147,15 @@ class SRLightning(lightning.LightningModule):
         """Pre-compute (sr, hr) tensor pairs for every tracked PSNR key.
 
         Colorspace conversions are performed at most once per call.
+
+        Args:
+            sr: SR tensor of shape ``(B, 3, H, W)`` in RGB.
+            hr: HR tensor of shape ``(B, 3, H, W)`` in RGB.
+
+        Returns:
+            Mapping from PSNR key (``'RGB'``, ``'Y'``, ``'Cb'``, ...) to
+            ``(sr_subset, hr_subset)`` tensor pair ready for PSNR
+            computation.
         """
         keys = set(self.val_psnr_metrics.keys())
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -182,10 +199,18 @@ class SRLightning(lightning.LightningModule):
     ]:
         """Shared forward + loss for training and validation steps.
 
-        Returns ``(loss, lr_img, hr_img, sr_rgb, hr_cropped)``.  Loss is
-        computed in :attr:`SRTrainingConfig.model_colorspace`; metrics
-        downstream consume ``sr_rgb`` / ``hr_cropped`` (both full RGB,
-        spatially aligned).
+        Loss is computed in :attr:`SRTrainingConfig.model_colorspace`;
+        metrics downstream consume ``sr_rgb`` / ``hr_cropped`` (both
+        full RGB, spatially aligned).
+
+        Args:
+            batch: ``(lr_img, hr_img)`` tuple from a loader. Both RGB,
+                ``float32`` in ``[0, 1]``.
+
+        Returns:
+            ``(loss, lr_img, hr_img, sr_rgb, hr_cropped)``. ``loss`` is a
+            scalar tensor; ``sr_rgb`` and ``hr_cropped`` are RGB tensors
+            with matching spatial size.
         """
         lr_img, hr_img = batch
         cs = self.training_config.model_colorspace
@@ -233,6 +258,13 @@ class SRLightning(lightning.LightningModule):
 
         Benchmark / test loaders (idx >= 1) are handled by
         :class:`~sisr.training.callbacks.BenchmarkImageLogger`.
+
+        Args:
+            batch: ``(lr_img, hr_img)`` tuple from the val loader.
+            batch_idx: Index of the batch within the current val epoch.
+            dataloader_idx: Index of the loader within the list returned
+                by :meth:`SRDataModule.val_dataloader`. ``0`` is the
+                primary val set; anything else is skipped.
         """
         if dataloader_idx != 0:
             return
@@ -265,22 +297,40 @@ class SRLightning(lightning.LightningModule):
     ) -> None:
         """No-op so Lightning iterates ``trainer.test_dataloaders``.
 
-        All metric computation, per-image logging, and image-strip emission
-        for the test sets happens in
+        All metric computation, per-image logging, and image-strip
+        emission for the test sets happens in
         :class:`~sisr.training.callbacks.BenchmarkImageLogger.on_test_*`.
+
+        Args:
+            batch: ``(lr_img, hr_img)`` tuple from the test loader
+                (unused).
+            batch_idx: Index of the batch within the current test epoch
+                (unused).
+            dataloader_idx: Index of the test loader (unused).
         """
         return None
 
     def configure_optimizers(self):
         """Build optimizer (and optional scheduler) from top-level YAML.
 
-        Uniform LR by default — ``self.optimizer(self.parameters())`` exactly
-        matches what LightningCLI's ``auto_configure_optimizers`` would do.
+        Uniform LR by default — ``self.optimizer(self.parameters())``
+        exactly matches what LightningCLI's ``auto_configure_optimizers``
+        would do.
 
         When ``training_config.layer_lrs`` is set, builds per-``Conv2d``
-        ``param_groups`` with explicit absolute LRs.  This requires every
+        ``param_groups`` with explicit absolute LRs. This requires every
         trainable parameter to live inside a ``Conv2d`` (SRCNN-style — no
         BatchNorm / PReLU); the validation below makes that explicit.
+
+        Returns:
+            The constructed optimizer, or a ``([optimizer], [scheduler])``
+            tuple if ``self.lr_scheduler`` is set. Lightning accepts both.
+
+        Raises:
+            ValueError: If ``training_config.layer_lrs`` length does not
+                match the model's ``Conv2d`` count, or if any trainable
+                parameter lives outside a ``Conv2d`` while ``layer_lrs``
+                is set.
         """
         lrs = self.training_config.layer_lrs
         if lrs is None:

@@ -73,8 +73,17 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ):
-        """Resolve ``dataset_names`` (auto-discover from the datamodule when
-        not supplied) and build both stage-specific dataloader_idx mappings.
+        """Resolve ``dataset_names`` and build both dataloader_idx mappings.
+
+        Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
+        when not supplied at construction time.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being trained
+                (unused).
+            stage (str): Lightning trainer stage (unused — both val and
+                test mappings are built up-front).
         """
         if self.dataset_names is None:
             dm = getattr(trainer, "datamodule", None)
@@ -86,7 +95,13 @@ class BenchmarkImageLogger(Callback):
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Clear buffers and bump the val-run counter."""
+        """Clear buffers and bump the val-run counter.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (unused).
+            pl_module (lightning.LightningModule): The model being
+                evaluated (unused).
+        """
         self._val_run_count += 1
         self._buffer = {name: [] for name in self.dataset_names}
 
@@ -101,8 +116,21 @@ class BenchmarkImageLogger(Callback):
     ):
         """Collect LR/SR/HR + per-image metrics for one test loader's batch.
 
-        Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test sets,
-        not the primary val loader at idx 0).
+        Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test
+        sets, not the primary val loader at idx 0).
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+            outputs (Any): The value returned by ``validation_step``
+                (unused — :class:`~sisr.training.SRLightning.validation_step`
+                returns ``None`` for idx >= 1).
+            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataloader_idx (int): Index of the loader within
+                ``trainer.val_dataloaders``.
         """
         if dataloader_idx not in self._val_mapping:
             return
@@ -120,7 +148,13 @@ class BenchmarkImageLogger(Callback):
     def on_validation_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Log per-set means every val epoch; image strips every N val runs."""
+        """Log per-set means every val epoch; image strips every N val runs.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+        """
         self._flush_buffer(
             trainer=trainer,
             pl_module=pl_module,
@@ -130,7 +164,13 @@ class BenchmarkImageLogger(Callback):
     def on_test_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Clear buffers ahead of a test run."""
+        """Clear buffers ahead of a test run.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (unused).
+            pl_module (lightning.LightningModule): The model being
+                evaluated (unused).
+        """
         self._buffer = {name: [] for name in self.dataset_names}
 
     def on_test_batch_end(
@@ -146,6 +186,19 @@ class BenchmarkImageLogger(Callback):
 
         ``cli test`` runs the test loaders only, so all dataloader indices
         are test sets (no primary loader at idx 0).
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+            outputs (Any): The value returned by ``test_step`` (unused —
+                :class:`~sisr.training.SRLightning.test_step` returns
+                ``None``).
+            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataloader_idx (int): Index of the loader within
+                ``trainer.test_dataloaders``.
         """
         if dataloader_idx not in self._test_mapping:
             return
@@ -163,7 +216,13 @@ class BenchmarkImageLogger(Callback):
     def on_test_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Log per-set means and image strips at the end of `cli test`."""
+        """Log per-set means and image strips at the end of ``cli test``.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+        """
         self._flush_buffer(
             trainer=trainer,
             pl_module=pl_module,

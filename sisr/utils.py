@@ -29,7 +29,16 @@ _YCBCR_TO_B = 1.772                     # cb coefficient
 
 
 def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
-    """Convert a normalised RGB tensor ``(B, 3, H, W)`` to YCbCr (BT.601 full-range)."""
+    """Convert a normalised RGB tensor to YCbCr (BT.601 full-range).
+
+    Args:
+        img (torch.Tensor): RGB tensor of shape ``(B, 3, H, W)`` with
+            values in ``[0, 1]``.
+
+    Returns:
+        torch.Tensor: YCbCr tensor of shape ``(B, 3, H, W)`` in
+        ``[0, 1]`` with Cb/Cr offset by +0.5.
+    """
     r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
     y  = _RGB_TO_Y[0]  * r + _RGB_TO_Y[1]  * g + _RGB_TO_Y[2]  * b
     cb = _RGB_TO_CB[0] * r + _RGB_TO_CB[1] * g + _RGB_TO_CB[2] * b + 0.5
@@ -38,7 +47,16 @@ def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
 
 
 def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
-    """Convert a YCbCr tensor ``(B, 3, H, W)`` to RGB (BT.601 full-range, clamped to [0, 1])."""
+    """Convert a YCbCr tensor to RGB (BT.601 full-range, clamped to [0, 1]).
+
+    Args:
+        img (torch.Tensor): YCbCr tensor of shape ``(B, 3, H, W)`` with
+            Cb/Cr offset by +0.5.
+
+    Returns:
+        torch.Tensor: RGB tensor of shape ``(B, 3, H, W)`` clamped to
+        ``[0, 1]``.
+    """
     y, cb, cr = img[:, 0:1], img[:, 1:2] - 0.5, img[:, 2:3] - 0.5
     r = y + _YCBCR_TO_R * cr
     g = y + _YCBCR_TO_G_CB * cb + _YCBCR_TO_G_CR * cr
@@ -52,9 +70,20 @@ def extract_model_input(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Prepare the model input from a full-RGB LR tensor.
 
-    Returns ``(model_input, lr_ycbcr)`` where ``lr_ycbcr`` is the full LR
-    YCbCr tensor retained for chroma reconstruction (only when
-    ``model_colorspace='Y'``); ``None`` otherwise.
+    Args:
+        lr_img (torch.Tensor): RGB LR tensor of shape ``(B, 3, H, W)``.
+        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
+            model expects.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor | None]: ``(model_input,
+        lr_ycbcr)`` where ``lr_ycbcr`` is the full LR YCbCr tensor
+        retained for chroma reconstruction (only when
+        ``model_colorspace='Y'``); ``None`` otherwise.
+
+    Raises:
+        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
+            ``'Y'``, or ``'YCbCr'``.
     """
     if model_colorspace == 'RGB':
         return lr_img, None
@@ -78,6 +107,24 @@ def reconstruct_sr_rgb(
     For ``model_colorspace='Y'``, stitches SR-Y with bicubic Cb/Cr from the
     LR YCbCr tensor (centre-cropped to match the SR spatial size) and
     converts to RGB.
+
+    Args:
+        sr_model (torch.Tensor): The model's raw output. Shape matches
+            ``model_colorspace`` (``(B, 1, H, W)`` for ``'Y'``,
+            ``(B, 3, H, W)`` for ``'RGB'`` and ``'YCbCr'``).
+        lr_ycbcr (torch.Tensor | None): Full LR YCbCr tensor used to
+            recover Cb/Cr for ``model_colorspace='Y'``; ignored
+            otherwise.
+        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
+            model produced.
+
+    Returns:
+        torch.Tensor: Full-RGB SR tensor of shape ``(B, 3, H, W)``.
+
+    Raises:
+        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
+            ``'Y'``, or ``'YCbCr'``, or if ``model_colorspace='Y'`` is
+            passed without ``lr_ycbcr``.
     """
     if model_colorspace == 'RGB':
         return sr_model
