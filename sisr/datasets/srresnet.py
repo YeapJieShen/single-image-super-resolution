@@ -1,3 +1,11 @@
+"""SRResNet-style data pipeline.
+
+LR is the bicubic downscale of HR by ``scale`` (no upsample round-trip);
+the model is responsible for the ×``scale`` upsampling. :class:`TrainDataset`
+serves random ``hr_crop_size`` crops without caching (random crops aren't
+cacheable); :class:`ValidationDataset` serves full images cropped to a
+multiple of ``scale``.
+"""
 import random
 
 import torch
@@ -7,8 +15,7 @@ from pathlib import Path
 
 
 class TrainDataset(torch.utils.data.Dataset):
-    """
-    Random-crop HR/LR pairs for SRResNet-style training.
+    """Random-crop HR/LR pairs for SRResNet-style training.
 
     Each ``__getitem__`` takes a random ``hr_crop_size`` square crop from an
     HR image and bicubic-downsamples it by ``scale`` to form the LR input.
@@ -66,11 +73,12 @@ class TrainDataset(torch.utils.data.Dataset):
         return len(self.img_paths) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns a ``(lr_tensor, hr_tensor)`` pair where ``hr_tensor`` is a
-        random ``hr_crop_size`` square crop and ``lr_tensor`` is its bicubic
-        downscale by ``scale`` (side ``hr_crop_size // scale``).  Both are
-        ``float32`` in ``[0, 1]`` with shape ``(3, H, W)``.
+        """Returns a ``(lr_tensor, hr_tensor)`` pair where ``hr_tensor`` is a random crop.
+
+        ``hr_tensor`` is a random ``hr_crop_size`` square crop and
+        ``lr_tensor`` is its bicubic downscale by ``scale`` (side
+        ``hr_crop_size // scale``). Both are ``float32`` in ``[0, 1]``
+        with shape ``(3, H, W)``.
         """
         path = self.img_paths[idx % len(self.img_paths)]
         hr_img = Image.open(path).convert('RGB')
@@ -96,8 +104,7 @@ class TrainDataset(torch.utils.data.Dataset):
 
 
 class ValidationDataset(torch.utils.data.Dataset):
-    """
-    Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
+    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
 
     Each item is a full image pair. The HR image is cropped to a multiple of
     ``scale`` so the model's ×``scale`` output lands exactly on the HR size;
@@ -127,10 +134,11 @@ class ValidationDataset(torch.utils.data.Dataset):
         return len(self.img_paths)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns a ``(lr_tensor, hr_tensor)`` pair: ``hr_tensor`` is the HR
-        image cropped to a multiple of ``scale``, and ``lr_tensor`` is its
-        bicubic downscale by ``scale``. Both are ``float32`` in ``[0, 1]``.
+        """Returns a ``(lr_tensor, hr_tensor)`` pair for the image at ``idx``.
+
+        ``hr_tensor`` is the HR image cropped to a multiple of ``scale``,
+        and ``lr_tensor`` is its bicubic downscale by ``scale``. Both are
+        ``float32`` in ``[0, 1]``.
         """
         path = self.img_paths[idx]
         hr_img = Image.open(path).convert('RGB')

@@ -1,3 +1,13 @@
+"""Colorspace conversions and the LMDB cache infrastructure.
+
+BT.601 full-range YCbCr is the project's working chroma space (see
+:mod:`sisr.training.config`); pure conversion functions live here so the
+:class:`~sisr.training.SRLightning` module stays paper-agnostic.
+
+:class:`LMDBCache` is a checksum-validated key-value store used by
+:class:`~sisr.datasets.srcnn.TrainDataset` to persist precomputed
+LR/HR sub-image pairs.
+"""
 import shutil
 import lmdb
 import torch
@@ -9,15 +19,12 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 
-# ----------------------------------------------------------------------------
 # BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
-#
-# Both colorspaces are normalised to [0, 1].  Cb and Cr have a +0.5 offset on
+# Both colorspaces are normalised to [0, 1]. Cb and Cr have a +0.5 offset on
 # their stored representation so that signed chroma values in [-0.5, +0.5]
-# map onto unsigned [0, 1].  This is the *full-range* (a.k.a. "JPEG") variant
+# map onto unsigned [0, 1]. This is the *full-range* (a.k.a. "JPEG") variant
 # of BT.601 — distinct from the studio-range variant which scales Y to
 # [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
-# ----------------------------------------------------------------------------
 
 _RGB_TO_Y  = (0.299, 0.587, 0.114)
 _RGB_TO_CB = (-0.169, -0.331, 0.500)   # output offset +0.5
@@ -29,7 +36,16 @@ _YCBCR_TO_B = 1.772                     # cb coefficient
 
 
 def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
-    """Convert a normalised RGB tensor ``(B, 3, H, W)`` to YCbCr (BT.601 full-range)."""
+    """Convert a normalised RGB tensor to YCbCr (BT.601 full-range).
+
+    Args:
+        img (torch.Tensor): RGB tensor of shape ``(B, 3, H, W)`` with
+            values in ``[0, 1]``.
+
+    Returns:
+        torch.Tensor: YCbCr tensor of shape ``(B, 3, H, W)`` in
+        ``[0, 1]`` with Cb/Cr offset by +0.5.
+    """
     r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
     y  = _RGB_TO_Y[0]  * r + _RGB_TO_Y[1]  * g + _RGB_TO_Y[2]  * b
     cb = _RGB_TO_CB[0] * r + _RGB_TO_CB[1] * g + _RGB_TO_CB[2] * b + 0.5
@@ -38,7 +54,16 @@ def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
 
 
 def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
-    """Convert a YCbCr tensor ``(B, 3, H, W)`` to RGB (BT.601 full-range, clamped to [0, 1])."""
+    """Convert a YCbCr tensor to RGB (BT.601 full-range, clamped to [0, 1]).
+
+    Args:
+        img (torch.Tensor): YCbCr tensor of shape ``(B, 3, H, W)`` with
+            Cb/Cr offset by +0.5.
+
+    Returns:
+        torch.Tensor: RGB tensor of shape ``(B, 3, H, W)`` clamped to
+        ``[0, 1]``.
+    """
     y, cb, cr = img[:, 0:1], img[:, 1:2] - 0.5, img[:, 2:3] - 0.5
     r = y + _YCBCR_TO_R * cr
     g = y + _YCBCR_TO_G_CB * cb + _YCBCR_TO_G_CR * cr
@@ -52,9 +77,20 @@ def extract_model_input(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Prepare the model input from a full-RGB LR tensor.
 
-    Returns ``(model_input, lr_ycbcr)`` where ``lr_ycbcr`` is the full LR
-    YCbCr tensor retained for chroma reconstruction (only when
-    ``model_colorspace='Y'``); ``None`` otherwise.
+    Args:
+        lr_img (torch.Tensor): RGB LR tensor of shape ``(B, 3, H, W)``.
+        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
+            model expects.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor | None]: ``(model_input,
+        lr_ycbcr)`` where ``lr_ycbcr`` is the full LR YCbCr tensor
+        retained for chroma reconstruction (only when
+        ``model_colorspace='Y'``); ``None`` otherwise.
+
+    Raises:
+        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
+            ``'Y'``, or ``'YCbCr'``.
     """
     if model_colorspace == 'RGB':
         return lr_img, None
@@ -78,6 +114,24 @@ def reconstruct_sr_rgb(
     For ``model_colorspace='Y'``, stitches SR-Y with bicubic Cb/Cr from the
     LR YCbCr tensor (centre-cropped to match the SR spatial size) and
     converts to RGB.
+
+    Args:
+        sr_model (torch.Tensor): The model's raw output. Shape matches
+            ``model_colorspace`` (``(B, 1, H, W)`` for ``'Y'``,
+            ``(B, 3, H, W)`` for ``'RGB'`` and ``'YCbCr'``).
+        lr_ycbcr (torch.Tensor | None): Full LR YCbCr tensor used to
+            recover Cb/Cr for ``model_colorspace='Y'``; ignored
+            otherwise.
+        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
+            model produced.
+
+    Returns:
+        torch.Tensor: Full-RGB SR tensor of shape ``(B, 3, H, W)``.
+
+    Raises:
+        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
+            ``'Y'``, or ``'YCbCr'``, or if ``model_colorspace='Y'`` is
+            passed without ``lr_ycbcr``.
     """
     if model_colorspace == 'RGB':
         return sr_model
@@ -95,8 +149,7 @@ def reconstruct_sr_rgb(
 
 
 class LMDBCacheBuildContext:
-    """
-    Context object passed to the ``build_fn`` callback of :class:`LMDBCache`.
+    """Context object passed to the ``build_fn`` callback of :class:`LMDBCache`.
 
     Provides helpers for writing data into the LMDB being built.
 
@@ -110,8 +163,7 @@ class LMDBCacheBuildContext:
         self.use_tqdm = use_tqdm
 
     def write_batch(self, pairs: Sequence[tuple[str, bytes]]) -> None:
-        """
-        Writes a batch of key-value pairs in a single transaction.
+        """Writes a batch of key-value pairs in a single transaction.
 
         Args:
             pairs (Sequence[tuple[str, bytes]]): Sequence of ``(key, value)`` tuples to write.
@@ -129,8 +181,7 @@ class LMDBCacheBuildContext:
         num_workers: int = 8,
         desc: str = "Building LMDB cache",
     ):
-        """
-        Processes *items* in parallel and writes results to LMDB.
+        """Processes *items* in parallel and writes results to LMDB.
 
         Each item is submitted to a ``ProcessPoolExecutor``.  The worker
         function *process_fn* must be a top-level (picklable) callable
@@ -189,8 +240,7 @@ class LMDBCacheBuildContext:
 
 
 class LMDBCache:
-    """
-    A checksum-validated LMDB key-value store with parallel build support.
+    """A checksum-validated LMDB key-value store with parallel build support.
 
     On construction the cache checks whether a valid LMDB database
     already exists (matched by *checksum*).  If not, it calls
@@ -247,8 +297,7 @@ class LMDBCache:
 
     @property
     def path(self) -> Path:
-        """
-        Path to the LMDB database directory.
+        """Path to the LMDB database directory.
 
         Returns:
             The path where the LMDB database is stored.
@@ -257,8 +306,7 @@ class LMDBCache:
 
     @property
     def length(self) -> int:
-        """
-        Number of entries stored in the cache.
+        """Number of entries stored in the cache.
 
         Returns:
             The number of entries.
@@ -266,8 +314,7 @@ class LMDBCache:
         return self._length
 
     def get_env(self) -> lmdb.Environment:
-        """
-        Returns the LMDB environment, opening it lazily on first call.
+        """Returns the LMDB environment, opening it lazily on first call.
 
         Each ``DataLoader`` worker process must call this independently
         because LMDB memory-mapped environments cannot be shared across
@@ -282,8 +329,7 @@ class LMDBCache:
         return self._env
 
     def get(self, key: str) -> bytes | None:
-        """
-        Reads a single value from the cache.
+        """Reads a single value from the cache.
 
         Args:
             key (str): The string key to look up.
@@ -299,8 +345,7 @@ class LMDBCache:
             return bytes(buf)
 
     def get_batch(self, keys: Sequence[str]) -> list[bytes | None]:
-        """
-        Reads multiple values from the cache in a single transaction.
+        """Reads multiple values from the cache in a single transaction.
 
         Args:
             keys (Sequence[str]): Sequence of string keys to look up.
@@ -318,8 +363,7 @@ class LMDBCache:
         return results
 
     def _try_load(self, checksum: str) -> bool:
-        """
-        Validates an existing LMDB by comparing its stored checksum.
+        """Validates an existing LMDB by comparing its stored checksum.
 
         Args:
             checksum (str): The expected checksum to validate against.
@@ -356,8 +400,7 @@ class LMDBCache:
         build_fn: Callable[[LMDBCacheBuildContext], None],
         use_tqdm: bool,
     ):
-        """
-        Creates a fresh LMDB and delegates population to *build_fn*.
+        """Creates a fresh LMDB and delegates population to *build_fn*.
 
         Args:
             checksum (str): The checksum to store for future validation.

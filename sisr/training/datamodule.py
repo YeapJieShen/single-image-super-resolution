@@ -1,3 +1,11 @@
+"""Generic Lightning DataModule for SR training.
+
+Dataset specs (``{class_path, init_args}``) are materialized lazily in
+:meth:`SRDataModule.setup` so expensive constructors (LMDB cache builds)
+only run for the stages that need them. Test sets are surfaced through
+*both* :meth:`val_dataloader` (for ``cli fit`` monitoring) and
+:meth:`test_dataloader` (for ``cli test --ckpt_path`` final eval).
+"""
 from typing import Any
 
 import lightning
@@ -6,8 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class SRDataModule(lightning.LightningDataModule):
-    """
-    Generic LightningDataModule for single-image super-resolution.
+    """Generic LightningDataModule for single-image super-resolution.
 
     Owns the train / validation / test Dataset constructions and exposes them
     as DataLoaders. Datasets are described by ``{class_path, init_args}`` specs
@@ -66,11 +73,27 @@ class SRDataModule(lightning.LightningDataModule):
 
     @property
     def test_names(self) -> list:
-        """Ordered list of test dataset names — drives BenchmarkImageLogger auto-discovery."""
+        """Ordered list of test dataset names — drives BenchmarkImageLogger auto-discovery.
+
+        Returns:
+            List of names in the order they appear in
+            ``test_datasets``. Empty when no test sets are configured.
+        """
         return list(self._test_specs.keys())
 
     def setup(self, stage: str | None = None) -> None:
-        """Instantiate datasets lazily based on the trainer stage."""
+        """Instantiate datasets lazily based on the trainer stage.
+
+        Called by Lightning at the start of every subcommand. Specs are
+        materialized via :func:`lightning.pytorch.cli.instantiate_class`
+        so expensive constructors (LMDB cache builds, etc.) only run for
+        the stages that need them.
+
+        Args:
+            stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
+                ``'test'``, or ``None`` (for all). Determines which
+                datasets get instantiated.
+        """
         if stage in ('fit', None) and self._train_ds is None:
             self._train_ds = instantiate_class((), self._train_spec)
         if stage in ('fit', 'validate', 'test', None) and not self._test_ds and self._test_specs:
@@ -82,14 +105,27 @@ class SRDataModule(lightning.LightningDataModule):
             self._val_ds = instantiate_class((), self._val_spec)
 
     def train_dataloader(self) -> DataLoader:
+        """Build the training DataLoader.
+
+        ``shuffle=True`` is forced — any ``shuffle`` entry the user supplies
+        in ``train_dataloader_kwargs`` would be a TypeError (duplicate
+        kwarg) and the YAML schema does not expose ``shuffle``.
+
+        Returns:
+            DataLoader over the train spec, shuffled.
+        """
         return DataLoader(self._train_ds, shuffle=True, **self._train_dl_kwargs)
 
     def val_dataloader(self) -> list:
         """Primary validation loader followed by every test loader.
 
-        Index 0 is the held-out primary val set; indices 1+ are the test sets,
-        which lets `BenchmarkImageLogger` log Set5/Set14 progress during
-        every val cycle of `cli fit`.
+        Index 0 is the held-out primary val set; indices 1+ are the test
+        sets, which lets :class:`~sisr.training.callbacks.BenchmarkImageLogger`
+        log Set5 / Set14 progress during every val cycle of ``cli fit``.
+
+        Returns:
+            List ``[primary_val_loader, test_loader_1, test_loader_2,
+            ...]``. Length is ``1 + len(test_names)``.
         """
         loaders = [DataLoader(self._val_ds, shuffle=False, **self._val_dl_kwargs)]
         for ds in self._test_ds.values():
@@ -97,7 +133,12 @@ class SRDataModule(lightning.LightningDataModule):
         return loaders
 
     def test_dataloader(self) -> list:
-        """Test loaders only — for `cli test --ckpt_path <path>` final eval."""
+        """Test loaders only — for ``cli test --ckpt_path <path>`` final eval.
+
+        Returns:
+            List of one DataLoader per entry in ``test_datasets``, in
+            insertion order. Empty when no test sets are configured.
+        """
         return [
             DataLoader(ds, shuffle=False, **self._test_dl_kwargs)
             for ds in self._test_ds.values()

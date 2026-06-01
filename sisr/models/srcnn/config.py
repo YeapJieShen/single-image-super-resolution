@@ -21,10 +21,24 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     The paper trains on the Y channel of YCbCr only and uses a per-layer
     learning rate of ``1e-4`` for the feature-extraction and non-linear-
     mapping layers and ``1e-5`` for the reconstruction layer — i.e. the
-    last layer learns 10× slower.  Weight initialization follows the
+    last layer learns 10× slower. Weight initialization follows the
     paper's Gaussian schedule (``N(0, 0.01)`` with zero biases); set
     ``init_strategy='default'`` to fall back to PyTorch's built-in init.
     Override any field in YAML to deviate.
+
+    Args:
+        model_colorspace: Overrides the base default to ``'Y'``
+            (SRCNN's Y-channel training).
+        layer_lrs: Per-``Conv2d`` LRs ``[1e-4, 1e-4, 1e-5]`` matching the
+            paper's recipe. Set to ``None`` to disable per-layer LRs.
+        init_strategy: ``'paper'`` (default) triggers the Gaussian
+            init via :meth:`SRCNN.reset_parameters` in
+            :class:`~sisr.training.SRLightning`'s constructor;
+            ``'default'`` skips it and uses PyTorch's defaults.
+        init_mean: Mean of the Gaussian used by ``init_strategy='paper'``.
+            Defaults to ``0.0``.
+        init_std: Std of the Gaussian used by ``init_strategy='paper'``.
+            Defaults to ``0.01``.
     """
 
     model_colorspace: Literal['RGB', 'Y', 'YCbCr'] = 'Y'
@@ -40,9 +54,15 @@ class SRCNNTrainingConfig(SRTrainingConfig):
 class SRCNNEvalConfig(SREvalConfig):
     """SRCNN-paper-faithful eval defaults.
 
-    Reports PSNR on both RGB and the YCbCr triplet (the literature usually
-    quotes Y-channel PSNR for SRCNN), and excludes the outer ``scale=3``
-    pixels per the standard SR-evaluation convention.
+    Reports PSNR on both RGB and the YCbCr triplet (the literature
+    usually quotes Y-channel PSNR for SRCNN), and excludes the outer
+    ``scale=3`` pixels per the standard SR-evaluation convention.
+
+    Args:
+        crop_border: Overrides the base default to ``3`` (outer pixels
+            excluded before PSNR / SSIM at the standard ``x3`` scale).
+        psnr_channels: Overrides the base default to
+            ``['RGB', 'YCbCr']`` (the literature reports both).
     """
 
     crop_border: int = 3

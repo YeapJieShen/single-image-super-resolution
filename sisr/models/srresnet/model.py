@@ -1,10 +1,14 @@
+"""SRResNet — the residual generator from Ledig et al. (2017).
+
+Reference: Photo-Realistic Single Image Super-Resolution Using a Generative
+Adversarial Network (https://arxiv.org/pdf/1609.04802).
+"""
 import torch
 import math
 
 
 class SRResidualBlock(torch.nn.Module):
-    """
-    A single residual block used in SRResNet.
+    """A single residual block used in SRResNet.
     Each block applies two convolutional layers with batch normalization,
     and adds the input (identity) as a skip connection.
 
@@ -29,8 +33,7 @@ class SRResidualBlock(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the residual block.
+        """Forward pass of the residual block.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, channels, height, width).
@@ -45,8 +48,7 @@ class SRResidualBlock(torch.nn.Module):
 
 
 class SRUpsampleBlock(torch.nn.Module):
-    """
-    An upsampling block used in SRResNet that increases spatial resolution using sub-pixel convolution.
+    """An upsampling block used in SRResNet that increases spatial resolution using sub-pixel convolution.
 
     Args:
         channels (int): Number of input channels.
@@ -64,8 +66,7 @@ class SRUpsampleBlock(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the upsample block.
+        """Forward pass of the upsample block.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, channels, height, width).
@@ -77,8 +78,7 @@ class SRUpsampleBlock(torch.nn.Module):
 
 
 class SRResNet(torch.nn.Module):
-    """
-    SRResNet (Super-Resolution Residual Network) model for single image super-resolution.
+    """SRResNet (Super-Resolution Residual Network) model for single image super-resolution.
     The architecture consists of an initial feature extraction block, a series of residual blocks
     with a skip connection, sub-pixel upsample blocks, and a final reconstruction layer.
 
@@ -129,8 +129,7 @@ class SRResNet(torch.nn.Module):
         self.tail = torch.nn.Conv2d(hidden_channel, in_out_channels, kernel_size=kernel_sizes[2], padding=padding)
 
     def _check_scale(self, scale: int):
-        """
-        Validates that the scale factor is a power of 2.
+        """Validates that the scale factor is a power of 2.
 
         Args:
             scale (int): The upscaling factor.
@@ -153,8 +152,7 @@ class SRResNet(torch.nn.Module):
         return self._hparams
 
     def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
-        """
-        Forward pass of the SRResNet model.
+        """Forward pass of the SRResNet model.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, in_out_channels, height, width).

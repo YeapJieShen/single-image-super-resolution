@@ -1,3 +1,12 @@
+"""Lightning callbacks for SR training.
+
+:class:`BenchmarkImageLogger` logs per-image LR|SR|HR strips and PSNR/SSIM
+for held-out test sets (Set5, Set14, ...) during both ``cli fit`` (every
+N val cycles) and ``cli test`` (one-shot final eval).
+:class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
+training signals; :class:`SRCheckpoint` is a thin
+:class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics.
+"""
 import math
 import torch
 import torch.nn.functional
@@ -9,8 +18,7 @@ from typing import Any
 
 
 class BenchmarkImageLogger(Callback):
-    """
-    Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
+    """Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
     one or more held-out test/benchmark dataloaders (Set5, Set14, …).
 
     Fires during *both* validation and test stages:
@@ -74,8 +82,17 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ):
-        """Resolve ``dataset_names`` (auto-discover from the datamodule when
-        not supplied) and build both stage-specific dataloader_idx mappings.
+        """Resolve ``dataset_names`` and build both dataloader_idx mappings.
+
+        Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
+        when not supplied at construction time.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being trained
+                (unused).
+            stage (str): Lightning trainer stage (unused — both val and
+                test mappings are built up-front).
         """
         if self.dataset_names is None:
             dm = getattr(trainer, "datamodule", None)
@@ -87,7 +104,13 @@ class BenchmarkImageLogger(Callback):
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Clear buffers and bump the val-run counter."""
+        """Clear buffers and bump the val-run counter.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (unused).
+            pl_module (lightning.LightningModule): The model being
+                evaluated (unused).
+        """
         self._val_run_count += 1
         self._buffer = {name: [] for name in self.dataset_names}
 
@@ -102,8 +125,21 @@ class BenchmarkImageLogger(Callback):
     ):
         """Collect LR/SR/HR + per-image metrics for one test loader's batch.
 
-        Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test sets,
-        not the primary val loader at idx 0).
+        Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test
+        sets, not the primary val loader at idx 0).
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+            outputs (Any): The value returned by ``validation_step``
+                (unused — :class:`~sisr.training.SRLightning.validation_step`
+                returns ``None`` for idx >= 1).
+            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataloader_idx (int): Index of the loader within
+                ``trainer.val_dataloaders``.
         """
         if dataloader_idx not in self._val_mapping:
             return
@@ -121,7 +157,13 @@ class BenchmarkImageLogger(Callback):
     def on_validation_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Log per-set means every val epoch; image strips every N val runs."""
+        """Log per-set means every val epoch; image strips every N val runs.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+        """
         self._flush_buffer(
             trainer=trainer,
             pl_module=pl_module,
@@ -131,7 +173,13 @@ class BenchmarkImageLogger(Callback):
     def on_test_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Clear buffers ahead of a test run."""
+        """Clear buffers ahead of a test run.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (unused).
+            pl_module (lightning.LightningModule): The model being
+                evaluated (unused).
+        """
         self._buffer = {name: [] for name in self.dataset_names}
 
     def on_test_batch_end(
@@ -147,6 +195,19 @@ class BenchmarkImageLogger(Callback):
 
         ``cli test`` runs the test loaders only, so all dataloader indices
         are test sets (no primary loader at idx 0).
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+            outputs (Any): The value returned by ``test_step`` (unused —
+                :class:`~sisr.training.SRLightning.test_step` returns
+                ``None``).
+            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataloader_idx (int): Index of the loader within
+                ``trainer.test_dataloaders``.
         """
         if dataloader_idx not in self._test_mapping:
             return
@@ -164,7 +225,13 @@ class BenchmarkImageLogger(Callback):
     def on_test_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Log per-set means and image strips at the end of `cli test`."""
+        """Log per-set means and image strips at the end of ``cli test``.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being
+                evaluated.
+        """
         self._flush_buffer(
             trainer=trainer,
             pl_module=pl_module,
@@ -172,6 +239,7 @@ class BenchmarkImageLogger(Callback):
         )
 
     def _on_image_log_interval(self) -> bool:
+        """Return True when this val run should also log image strips."""
         return self._val_run_count % self.log_every_n_val_runs == 0
 
     def _collect_batch(
@@ -185,6 +253,27 @@ class BenchmarkImageLogger(Callback):
         dataloader_idx: int,
         should_log_images: bool,
     ):
+        """Forward one batch, compute per-image metrics, and buffer the results.
+
+        Shared between :meth:`on_validation_batch_end` and
+        :meth:`on_test_batch_end`. Border cropping is sourced from
+        ``pl_module.eval_config.crop_border`` at the use site.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being evaluated.
+            batch (Any): ``(lr_img, hr_img)`` tuple from the loader.
+            batch_idx (int): Index of the batch within the current
+                dataloader.
+            dataset_name (str): Name of the test set this batch comes from.
+            source_dataloaders: ``trainer.val_dataloaders`` or
+                ``trainer.test_dataloaders`` — used to recover the
+                underlying dataset for filename resolution.
+            dataloader_idx (int): Index into ``source_dataloaders``.
+            should_log_images (bool): When True the LR/SR/HR tensors are
+                cached for image-strip emission in :meth:`_flush_buffer`;
+                otherwise only scalar metrics are buffered.
+        """
         lr_img, hr_img = batch
 
         with torch.no_grad():
@@ -231,6 +320,21 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         should_log_images: bool,
     ):
+        """Log per-set means and (optionally) image strips for buffered batches.
+
+        Shared between :meth:`on_validation_epoch_end` and
+        :meth:`on_test_epoch_end`. Looks up the TensorBoard logger from
+        ``trainer.loggers``; silently skips image emission for sets whose
+        logger is missing.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer (used for
+                ``global_step`` and the TensorBoard logger lookup).
+            pl_module (lightning.LightningModule): Receives ``log()`` calls
+                for the per-set mean metrics.
+            should_log_images (bool): When True, LR|SR|HR image strips are
+                emitted to TensorBoard alongside the scalar means.
+        """
         step = trainer.global_step
 
         for dataset_name, samples in self._buffer.items():
@@ -277,9 +381,7 @@ class BenchmarkImageLogger(Callback):
 
     @staticmethod
     def _pad_to_match(img: torch.Tensor, target_hw: tuple) -> torch.Tensor:
-        """
-        Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size.
-
+        """Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size.
 
         Args:
             img (torch.Tensor): Image tensor of shape ``(C, H, W)``.
@@ -305,8 +407,7 @@ class BenchmarkImageLogger(Callback):
 
 
 class GradNormLogger(Callback):
-    """
-    Log the total gradient L2 norm to TensorBoard periodically.
+    """Log the total gradient L2 norm to TensorBoard periodically.
 
     Computes ``sqrt(sum(p.grad.norm() ** 2))`` across all model parameters
     after the backward pass and logs it as the ``"grad_norm"`` scalar.
@@ -323,8 +424,7 @@ class GradNormLogger(Callback):
     def on_after_backward(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """
-        Compute and log gradient norm if on the right step cadence.
+        """Compute and log gradient norm if on the right step cadence.
 
         Args:
             trainer (lightning.Trainer): The trainer instance.
@@ -343,8 +443,7 @@ class GradNormLogger(Callback):
 
 
 class WeightHistogramLogger(Callback):
-    """
-    Log the weights of the model as histograms to TensorBoard periodically,
+    """Log the weights of the model as histograms to TensorBoard periodically,
     grouped by parameter prefixes (e.g., model.feat, model.mapping, model.recon).
 
     Args:
@@ -359,8 +458,7 @@ class WeightHistogramLogger(Callback):
     def on_train_batch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule, outputs: Any, batch: Any, batch_idx: int
     ):
-        """
-        Log grouped weights as histograms if on the right step cadence.
+        """Log grouped weights as histograms if on the right step cadence.
 
         Args:
             trainer (lightning.Trainer): The trainer instance.
@@ -389,8 +487,7 @@ class WeightHistogramLogger(Callback):
 
 
 class SRCheckpoint(ModelCheckpoint):
-    """
-    Model checkpoint that monitors a super-resolution quality metric.
+    """Model checkpoint that monitors a super-resolution quality metric.
 
     A thin convenience wrapper around
     :class:`~lightning.pytorch.callbacks.ModelCheckpoint` that
