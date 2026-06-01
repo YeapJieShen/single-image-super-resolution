@@ -1,3 +1,11 @@
+"""SRResNet-style data pipeline.
+
+LR is the bicubic downscale of HR by ``scale`` (no upsample round-trip);
+the model is responsible for the ×``scale`` upsampling. :class:`TrainDataset`
+serves random ``hr_crop_size`` crops without caching (random crops aren't
+cacheable); :class:`ValidationDataset` serves full images cropped to a
+multiple of ``scale``.
+"""
 import random
 
 import torch

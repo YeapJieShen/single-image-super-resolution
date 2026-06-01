@@ -1,3 +1,11 @@
+"""SRCNN-style data pipeline.
+
+LR is generated from HR via blur → bicubic-down → bicubic-up so the LR
+patches share the spatial size of the HR patches (pre-upsampled SRCNN
+formulation). :class:`TrainDataset` caches sliding-window sub-images
+through :class:`~sisr.utils.LMDBCache`; :class:`ValidationDataset`
+generates LR pairs on the fly for full images.
+"""
 import torch
 import torchvision
 import hashlib

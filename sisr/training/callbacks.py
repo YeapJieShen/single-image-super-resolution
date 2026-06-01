@@ -1,3 +1,12 @@
+"""Lightning callbacks for SR training.
+
+:class:`BenchmarkImageLogger` logs per-image LR|SR|HR strips and PSNR/SSIM
+for held-out test sets (Set5, Set14, ...) during both ``cli fit`` (every
+N val cycles) and ``cli test`` (one-shot final eval).
+:class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
+training signals; :class:`SRCheckpoint` is a thin
+:class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics.
+"""
 import math
 import torch
 import torch.nn.functional

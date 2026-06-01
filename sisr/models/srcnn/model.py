@@ -1,3 +1,8 @@
+"""SRCNN — the 3-layer CNN from Dong et al. (2014).
+
+Reference: Image Super-Resolution Using Deep Convolutional Networks
+(https://arxiv.org/pdf/1501.00092).
+"""
 import torch
 
 

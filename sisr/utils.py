@@ -1,3 +1,13 @@
+"""Colorspace conversions and the LMDB cache infrastructure.
+
+BT.601 full-range YCbCr is the project's working chroma space (see
+:mod:`sisr.training.config`); pure conversion functions live here so the
+:class:`~sisr.training.SRLightning` module stays paper-agnostic.
+
+:class:`LMDBCache` is a checksum-validated key-value store used by
+:class:`~sisr.datasets.srcnn.TrainDataset` to persist precomputed
+LR/HR sub-image pairs.
+"""
 import shutil
 import lmdb
 import torch
@@ -9,15 +19,12 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 
-# ----------------------------------------------------------------------------
 # BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
-#
-# Both colorspaces are normalised to [0, 1].  Cb and Cr have a +0.5 offset on
+# Both colorspaces are normalised to [0, 1]. Cb and Cr have a +0.5 offset on
 # their stored representation so that signed chroma values in [-0.5, +0.5]
-# map onto unsigned [0, 1].  This is the *full-range* (a.k.a. "JPEG") variant
+# map onto unsigned [0, 1]. This is the *full-range* (a.k.a. "JPEG") variant
 # of BT.601 — distinct from the studio-range variant which scales Y to
 # [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
-# ----------------------------------------------------------------------------
 
 _RGB_TO_Y  = (0.299, 0.587, 0.114)
 _RGB_TO_CB = (-0.169, -0.331, 0.500)   # output offset +0.5

@@ -1,3 +1,11 @@
+"""Generic Lightning DataModule for SR training.
+
+Dataset specs (``{class_path, init_args}``) are materialized lazily in
+:meth:`SRDataModule.setup` so expensive constructors (LMDB cache builds)
+only run for the stages that need them. Test sets are surfaced through
+*both* :meth:`val_dataloader` (for ``cli fit`` monitoring) and
+:meth:`test_dataloader` (for ``cli test --ckpt_path`` final eval).
+"""
 from typing import Any
 
 import lightning

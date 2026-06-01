@@ -1,3 +1,12 @@
+"""Generic Lightning wrapper for SR models — :class:`SRLightning`.
+
+The Lightning module is architecture-agnostic: per-paper behavior lives
+in :class:`~sisr.training.config.SRTrainingConfig` /
+:class:`~sisr.training.config.SREvalConfig` subclasses (e.g.
+:class:`~sisr.models.srcnn.SRCNNTrainingConfig`), not in the module
+itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
+:class:`~sisr.cli.SRLightningCLI`.
+"""
 import torch
 import torchvision
 import torchmetrics

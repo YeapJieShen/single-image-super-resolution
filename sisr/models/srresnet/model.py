@@ -1,3 +1,8 @@
+"""SRResNet — the residual generator from Ledig et al. (2017).
+
+Reference: Photo-Realistic Single Image Super-Resolution Using a Generative
+Adversarial Network (https://arxiv.org/pdf/1609.04802).
+"""
 import torch
 import math
 
