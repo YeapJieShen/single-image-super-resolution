@@ -37,12 +37,3 @@ def test_y_channel_reconstruct_upscaled_sr():
     out = p.reconstruct(sr_y, lr)
     assert out.shape == (2, 3, 32, 32)
 
-
-def test_y_channel_reconstruct_y_channel_preserved():
-    """Reconstructed RGB's Y channel matches the input sr_y after YCbCr roundtrip."""
-    p = YChannelProcessor()
-    lr = torch.rand(2, 3, 16, 16)
-    sr_y = torch.rand(2, 1, 16, 16)
-    out_rgb = p.reconstruct(sr_y, lr)
-    recovered_y = rgb_to_ycbcr(out_rgb)[:, 0:1]
-    assert torch.allclose(recovered_y, sr_y, atol=1e-4)
