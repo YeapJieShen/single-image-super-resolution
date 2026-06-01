@@ -13,9 +13,15 @@ Top-level YAML keys ``optimizer:`` / ``lr_scheduler:`` are linked into
 ``SRLightningCLI`` so :class:`~sisr.training.SRLightning` can build its
 ``configure_optimizers`` from them while keeping the YAML symmetric across
 architectures.
+
+Top-level ``matmul_precision:`` (``'highest' | 'high' | 'medium'``) calls
+:func:`torch.set_float32_matmul_precision` once at startup. Set to ``'high'``
+on Ampere+ GPUs to enable TF32 matmul kernels.
 """
 import sys
+from typing import Literal
 
+import torch
 from lightning.pytorch.cli import LightningCLI
 
 from .training import SRDataModule, SRLightning
@@ -31,10 +37,14 @@ class SRLightningCLI(LightningCLI):
     as ``OptimizerCallable`` / ``LRSchedulerCallable``.  ``SRLightning``'s
     own ``configure_optimizers`` then constructs the optimizer (uniform or
     per-Conv2d ``param_groups`` depending on ``training_config.layer_lrs``).
+
+    Also exposes a top-level ``matmul_precision`` YAML key that calls
+    :func:`torch.set_float32_matmul_precision` in
+    :meth:`before_instantiate_classes`.
     """
 
     def add_arguments_to_parser(self, parser):
-        """Wire top-level ``optimizer:`` / ``lr_scheduler:`` YAML keys into the model.
+        """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
         Non-subclass mode (``model_class=SRLightning`` fixed) means
         ``SRLightning``'s init args land at ``model.<arg>``, not
@@ -43,6 +53,24 @@ class SRLightningCLI(LightningCLI):
         """
         parser.add_optimizer_args(link_to="model.optimizer")
         parser.add_lr_scheduler_args(link_to="model.lr_scheduler")
+        parser.add_argument(
+            "--matmul_precision",
+            type=Literal['highest', 'high', 'medium'] | None,
+            default=None,
+            help=(
+                "If set, calls torch.set_float32_matmul_precision(<value>) "
+                "before instantiating classes. Use 'high' on Ampere+ GPUs to "
+                "enable TF32 matmul kernels."
+            ),
+        )
+
+    def before_instantiate_classes(self):
+        """Apply process-global flags (``matmul_precision``) before class instantiation."""
+        if self.subcommand is None:
+            return
+        precision = self.config[self.subcommand].matmul_precision
+        if precision is not None:
+            torch.set_float32_matmul_precision(precision)
 
 
 def main() -> None:

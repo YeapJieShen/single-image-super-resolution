@@ -78,6 +78,34 @@ def test_cli_help_lists_subcommands():
         assert sub in proc.stdout
 
 
+def test_cli_matmul_precision_accepted_and_surfaces():
+    """`--matmul_precision=high` is accepted and round-trips through --print_config."""
+    proc = _cli(
+        "fit", "--config", str(TEMPLATE),
+        "--matmul_precision=high",
+        "--print_config",
+    )
+    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
+    assert "matmul_precision: high" in proc.stdout
+
+
+def test_cli_matmul_precision_defaults_to_null():
+    """When unset, matmul_precision surfaces as null in --print_config."""
+    proc = _cli("fit", "--config", str(TEMPLATE), "--print_config")
+    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
+    assert "matmul_precision: null" in proc.stdout
+
+
+def test_cli_matmul_precision_rejects_invalid():
+    """Invalid matmul_precision values are rejected by the Literal validator."""
+    proc = _cli(
+        "fit", "--config", str(TEMPLATE),
+        "--matmul_precision=bogus",
+        "--print_config",
+    )
+    assert proc.returncode != 0
+
+
 TEMPLATE_PATHS = sorted((REPO_ROOT / "templates").glob("config.*.template.yaml"))
 assert TEMPLATE_PATHS, "No templates found — check REPO_ROOT"
 
