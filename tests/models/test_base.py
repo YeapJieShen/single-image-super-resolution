@@ -27,7 +27,7 @@ def test_srmodel_subclass_inherits_nn_module():
 
 
 def test_srmodel_hparams_returns_underlying_dict():
-    """hparams property exposes self._hparams as a read-only view."""
+    """hparams property exposes self._hparams (same pattern as SRCNN / SRResNet)."""
     class _Trivial(SRModel):
         def __init__(self):
             super().__init__()

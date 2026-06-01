@@ -20,7 +20,7 @@ class SRModel(nn.Module, abc.ABC):
         return self._hparams
 
     @abc.abstractmethod
-    def forward(self, x):
+    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         """Run the model on input ``x`` and return the SR output tensor."""
 
     def reset_parameters(self, **kwargs) -> None:
