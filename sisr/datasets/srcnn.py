@@ -11,10 +11,9 @@ import hashlib
 import cv2
 import numpy as np
 import torch
-import torchvision
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from PIL import Image, ImageFilter
+from PIL import Image
 from pathlib import Path
 from ..utils import LMDBCache, LMDBCacheBuildContext
 
@@ -114,7 +113,7 @@ class TrainDataset(torch.utils.data.Dataset):
             extraction.
         scale (int): Downscaling factor for generating low-resolution
             sub-images.
-        blur_sigma (float): Radius for the Gaussian blur applied before
+        blur_sigma (float): Sigma of the Gaussian blur applied before
             downsampling.  Defaults to ``1.0``.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build.  Defaults to ``False``.
@@ -290,14 +289,14 @@ class ValidationDataset(torch.utils.data.Dataset):
 
     Unlike :class:`TrainDataset` this dataset does not extract sub-images.
     Each item is a full image pair where the low-resolution version is
-    produced by applying Gaussian blur followed by downsampling and
-    upsampling back to the original size.
+    produced by applying Gaussian blur followed by bicubic downsampling
+    and bicubic upsampling back to the original size, using AlbumentationsX.
 
     Args:
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
-        blur_sigma (float): Radius for the Gaussian blur applied before
+        blur_sigma (float): Sigma of the Gaussian blur applied before
             downsampling.  Must match :class:`TrainDataset` to keep train/val
             LR generation consistent.  Defaults to ``1.0``.
 
@@ -322,6 +321,12 @@ class ValidationDataset(torch.utils.data.Dataset):
         if not self.img_paths:
             raise ValueError(f"No images found in {img_dir}")
 
+        self._kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
+        self._to_tensor = A.Compose([
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ])
+
     def __len__(self) -> int:
         return len(self.img_paths)
 
@@ -336,17 +341,23 @@ class ValidationDataset(torch.utils.data.Dataset):
             with shape ``(C, H, W)`` and values in ``[0, 1]``.
         """
         path = self.img_paths[idx]
+        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
+        h, w = arr.shape[:2]
+        lr_h = h // self.scale
+        lr_w = w // self.scale
 
-        hr_img = Image.open(path).convert('RGB')
+        lr_pipeline = A.Compose([
+            A.GaussianBlur(
+                blur_limit=(self._kernel, self._kernel),
+                sigma_limit=(self.blur_sigma, self.blur_sigma),
+                p=1.0,
+            ),
+            A.Resize(lr_h, lr_w, interpolation=cv2.INTER_CUBIC),
+            A.Resize(h, w, interpolation=cv2.INTER_CUBIC),
+        ])
+        lr_arr = lr_pipeline(image=arr)['image']
 
-        lr_img = hr_img.filter(ImageFilter.GaussianBlur(radius=self.blur_sigma))
-        lr_size = (hr_img.width // self.scale, hr_img.height // self.scale)
-        lr_img = lr_img.resize(lr_size, resample=Image.BICUBIC)
-        lr_img = lr_img.resize(hr_img.size, resample=Image.BICUBIC)
-
-        # HR is always served as RGB; Y/YCbCr selection happens downstream in
-        # SRLightning per model_colorspace.
-        hr_tensor = torchvision.transforms.functional.to_tensor(hr_img)
-        lr_tensor = torchvision.transforms.functional.to_tensor(lr_img)
+        lr_tensor = self._to_tensor(image=lr_arr)['image']
+        hr_tensor = self._to_tensor(image=arr)['image']
 
         return lr_tensor, hr_tensor

@@ -145,3 +145,13 @@ def test_validation_dataset_blur_sigma_propagates(tiny_rgb_image_dir: Path):
     lr_a, _ = ds_a[0]
     lr_b, _ = ds_b[0]
     assert not torch.allclose(lr_a, lr_b), "different blur_sigma must produce different LR"
+
+
+def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
+    """Calling __getitem__(idx) twice must return identical tensors —
+    the validation pipeline has no random elements."""
+    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
+    lr_a, hr_a = ds[0]
+    lr_b, hr_b = ds[0]
+    assert torch.equal(lr_a, lr_b), "validation LR must be deterministic"
+    assert torch.equal(hr_a, hr_b), "validation HR must be deterministic"
