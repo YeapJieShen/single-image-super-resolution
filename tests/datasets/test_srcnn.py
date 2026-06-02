@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from sisr.datasets.srcnn import TrainDataset, ValidationDataset
 
@@ -70,6 +70,32 @@ def test_train_dataset_checksum_change_triggers_rebuild(tiny_rgb_image_dir: Path
     ds_a = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
     ds_b = _make_train(tiny_rgb_image_dir, subimg_size=24, stride=8)
     assert len(ds_a) != len(ds_b), "different subimg_size must yield different patch counts"
+
+
+def test_train_dataset_checksum_includes_transforms_impl_tag(tiny_rgb_image_dir: Path):
+    """The checksum input must include 'transforms_impl=albumentations' so caches
+    built under the old PIL implementation invalidate automatically on upgrade."""
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
+    # The canonical hash input is built inside _compute_checksum from these
+    # fields plus the tag. We verify by recomputing what _compute_checksum
+    # should produce and comparing.
+    import hashlib
+    file_manifest = ','.join(
+        f'{p.name}:{p.stat().st_size}' for p in ds.img_paths
+    )
+    expected_canonical = '|'.join([
+        file_manifest,
+        '20',     # subimg_size
+        '8',      # stride
+        '2',      # scale
+        '1.0',    # blur_sigma
+        'transforms_impl=albumentations',
+    ])
+    expected = hashlib.sha256(expected_canonical.encode('utf-8')).hexdigest()
+    assert ds._compute_checksum() == expected, (
+        "checksum must include the 'transforms_impl=albumentations' tag — "
+        "without it, caches built under the PIL implementation would be reused."
+    )
 
 
 def test_train_dataset_no_images_raises(tmp_path: Path):
