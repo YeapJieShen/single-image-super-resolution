@@ -6,6 +6,8 @@ Adversarial Network (https://arxiv.org/pdf/1609.04802).
 import torch
 import math
 
+from sisr.models.base import SRModel
+
 
 class SRResidualBlock(torch.nn.Module):
     """A single residual block used in SRResNet.
@@ -77,7 +79,7 @@ class SRUpsampleBlock(torch.nn.Module):
         return self.upsample(x)
 
 
-class SRResNet(torch.nn.Module):
+class SRResNet(SRModel):
     """SRResNet (Super-Resolution Residual Network) model for single image super-resolution.
     The architecture consists of an initial feature extraction block, a series of residual blocks
     with a skip connection, sub-pixel upsample blocks, and a final reconstruction layer.
@@ -141,15 +143,6 @@ class SRResNet(torch.nn.Module):
             raise ValueError(f"scale must be a positive integer. Got {scale}.")
         if (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
-
-    @property
-    def hparams(self) -> dict:
-        """Returns the model architecture hyperparameters as a dict.
-
-        Merged into Lightning's HParams by :class:`~sisr.training.SRLightning`
-        so the architecture spec appears alongside training params in TensorBoard.
-        """
-        return self._hparams
 
     def forward(self, x: torch.Tensor, clamp_output: bool = False, clamp_minmax: tuple[float, float] = (0.0, 1.0)) -> torch.Tensor:
         """Forward pass of the SRResNet model.
