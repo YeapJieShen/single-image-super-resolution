@@ -6,11 +6,14 @@ formulation). :class:`TrainDataset` caches sliding-window sub-images
 through :class:`~sisr.utils.LMDBCache`; :class:`ValidationDataset`
 generates LR pairs on the fly for full images.
 """
-import torch
-import torchvision
+import math
 import hashlib
+import cv2
 import numpy as np
-from PIL import Image, ImageFilter
+import torch
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from PIL import Image
 from pathlib import Path
 from ..utils import LMDBCache, LMDBCacheBuildContext
 
@@ -27,15 +30,18 @@ def _process_subimages(
     them as keyed pairs ready for LMDB insertion.
 
     This is a top-level function (not a method) so that it can be
-    pickled by ``ProcessPoolExecutor`` across all platforms.
+    pickled by ``ProcessPoolExecutor`` across all platforms. The
+    Albumentations ``Compose`` is constructed inside the function rather
+    than at module level so that workers spawned on Windows do not need
+    to pickle the Compose object across the process boundary.
 
     For each sliding-window position the function:
-      1. Crops the HR sub-image.
-      2. Applies Gaussian blur, downsamples, then upsamples to create
-         the LR sub-image.
+      1. Crops the HR sub-image with a direct numpy slice (deterministic,
+         pixel-exact — no need for ``A.Crop`` overhead).
+      2. Generates the LR sub-image by Gaussian-blurring then
+         bicubic-downsampling and bicubic-upsampling.
       3. Converts both sub-images to ``(C, H, W)`` uint8 layout. HR is
-         always served as RGB; Y/YCbCr selection happens downstream in
-         ``SRLightning`` per ``model_colorspace``.
+         always served as RGB; Y/YCbCr selection happens downstream.
       4. Assigns LMDB keys using ``base_idx`` as the starting offset.
 
     Args:
@@ -44,8 +50,8 @@ def _process_subimages(
             extract.
         stride (int): Step size of the sliding window.
         scale (int): Downscaling factor for LR generation.
-        blur_sigma (float): Radius for the Gaussian blur applied
-            before downsampling.
+        blur_sigma (float): Sigma of the Gaussian blur applied before
+            downsampling.
         base_idx (int): Starting LMDB key index for this image's
             sub-images.
 
@@ -53,36 +59,33 @@ def _process_subimages(
         A flat list of ``(key_string, value_bytes)`` pairs where keys
         follow the pattern ``'lr_{idx:08d}'`` / ``'hr_{idx:08d}'``.
     """
-    img = Image.open(path).convert('RGB')
-    w, h = img.size
+    arr = np.array(Image.open(path).convert('RGB'))
+    h, w = arr.shape[:2]
     w_crop = w - (w % scale)
     h_crop = h - (h % scale)
-    img = img.crop((0, 0, w_crop, h_crop))
+    arr = arr[:h_crop, :w_crop, :]
+
+    lr_size = sub_img_size // scale
+    kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
+    lr_pipeline = A.Compose([
+        A.GaussianBlur(blur_limit=(kernel, kernel), sigma_limit=(blur_sigma, blur_sigma), p=1.0),
+        A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
+        A.Resize(sub_img_size, sub_img_size, interpolation=cv2.INTER_CUBIC),
+    ])
 
     keyed_pairs = []
-    lr_size = sub_img_size // scale
     idx = base_idx
 
     for top in range(0, h_crop - sub_img_size + 1, stride):
         for left in range(0, w_crop - sub_img_size + 1, stride):
-            hr_subimg = img.crop(
-                (left, top, left + sub_img_size, top + sub_img_size))
+            hr_subimg = arr[top:top + sub_img_size, left:left + sub_img_size, :]
+            lr_subimg = lr_pipeline(image=hr_subimg)['image']
 
-            lr_patch = hr_subimg.filter(
-                ImageFilter.GaussianBlur(radius=blur_sigma))
-            lr_patch = lr_patch.resize(
-                (lr_size, lr_size), resample=Image.BICUBIC)
-            lr_patch = lr_patch.resize(
-                (sub_img_size, sub_img_size), resample=Image.BICUBIC)
+            hr_chw = hr_subimg.transpose(2, 0, 1)
+            lr_chw = lr_subimg.transpose(2, 0, 1)
 
-            hr_arr = np.array(hr_subimg)
-            lr_arr = np.array(lr_patch)
-
-            hr_arr = hr_arr.transpose(2, 0, 1)
-            lr_arr = lr_arr.transpose(2, 0, 1)
-
-            keyed_pairs.append((f'lr_{idx:08d}', lr_arr.tobytes()))
-            keyed_pairs.append((f'hr_{idx:08d}', hr_arr.tobytes()))
+            keyed_pairs.append((f'lr_{idx:08d}', lr_chw.tobytes()))
+            keyed_pairs.append((f'hr_{idx:08d}', hr_chw.tobytes()))
             idx += 1
 
     return keyed_pairs
@@ -110,7 +113,7 @@ class TrainDataset(torch.utils.data.Dataset):
             extraction.
         scale (int): Downscaling factor for generating low-resolution
             sub-images.
-        blur_sigma (float): Radius for the Gaussian blur applied before
+        blur_sigma (float): Sigma of the Gaussian blur applied before
             downsampling.  Defaults to ``1.0``.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build.  Defaults to ``False``.
@@ -186,6 +189,7 @@ class TrainDataset(torch.utils.data.Dataset):
             str(self.stride),
             str(self.scale),
             str(self.blur_sigma),
+            'transforms_impl=albumentations',
         ])
         return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
@@ -285,14 +289,14 @@ class ValidationDataset(torch.utils.data.Dataset):
 
     Unlike :class:`TrainDataset` this dataset does not extract sub-images.
     Each item is a full image pair where the low-resolution version is
-    produced by applying Gaussian blur followed by downsampling and
-    upsampling back to the original size.
+    produced by applying Gaussian blur followed by bicubic downsampling
+    and bicubic upsampling back to the original size, using AlbumentationsX.
 
     Args:
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
-        blur_sigma (float): Radius for the Gaussian blur applied before
+        blur_sigma (float): Sigma of the Gaussian blur applied before
             downsampling.  Must match :class:`TrainDataset` to keep train/val
             LR generation consistent.  Defaults to ``1.0``.
 
@@ -317,6 +321,12 @@ class ValidationDataset(torch.utils.data.Dataset):
         if not self.img_paths:
             raise ValueError(f"No images found in {img_dir}")
 
+        self._kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
+        self._to_tensor = A.Compose([
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ])
+
     def __len__(self) -> int:
         return len(self.img_paths)
 
@@ -331,17 +341,23 @@ class ValidationDataset(torch.utils.data.Dataset):
             with shape ``(C, H, W)`` and values in ``[0, 1]``.
         """
         path = self.img_paths[idx]
+        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
+        h, w = arr.shape[:2]
+        lr_h = h // self.scale
+        lr_w = w // self.scale
 
-        hr_img = Image.open(path).convert('RGB')
+        lr_pipeline = A.Compose([
+            A.GaussianBlur(
+                blur_limit=(self._kernel, self._kernel),
+                sigma_limit=(self.blur_sigma, self.blur_sigma),
+                p=1.0,
+            ),
+            A.Resize(lr_h, lr_w, interpolation=cv2.INTER_CUBIC),
+            A.Resize(h, w, interpolation=cv2.INTER_CUBIC),
+        ])
+        lr_arr = lr_pipeline(image=arr)['image']
 
-        lr_img = hr_img.filter(ImageFilter.GaussianBlur(radius=self.blur_sigma))
-        lr_size = (hr_img.width // self.scale, hr_img.height // self.scale)
-        lr_img = lr_img.resize(lr_size, resample=Image.BICUBIC)
-        lr_img = lr_img.resize(hr_img.size, resample=Image.BICUBIC)
-
-        # HR is always served as RGB; Y/YCbCr selection happens downstream in
-        # SRLightning per model_colorspace.
-        hr_tensor = torchvision.transforms.functional.to_tensor(hr_img)
-        lr_tensor = torchvision.transforms.functional.to_tensor(lr_img)
+        lr_tensor = self._to_tensor(image=lr_arr)['image']
+        hr_tensor = self._to_tensor(image=arr)['image']
 
         return lr_tensor, hr_tensor

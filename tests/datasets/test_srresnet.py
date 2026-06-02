@@ -44,6 +44,21 @@ def test_train_dataset_no_images_raises(tmp_path: Path):
         TrainDataset(img_dir=tmp_path, scale=2, hr_crop_size=16)
 
 
+def test_train_dataset_random_crop_varies_across_calls(tiny_rgb_image_dir: Path):
+    """A.RandomCrop should produce different crops across calls on a 36x36
+    image with crop_size=16 (many valid (top, left) positions). With 8
+    sampled calls the probability of all-identical is ~(1/441)**7, far below
+    a reasonable flake threshold."""
+    ds = TrainDataset(img_dir=tiny_rgb_image_dir, scale=4, hr_crop_size=16)
+    samples = [ds[0] for _ in range(8)]
+    hrs = [hr for _, hr in samples]
+    differ = any(
+        not torch.equal(hrs[i], hrs[j])
+        for i in range(len(hrs)) for j in range(i + 1, len(hrs))
+    )
+    assert differ, "A.RandomCrop must yield varying HR crops across calls"
+
+
 # ---------------------------------------------------------------------------
 # ValidationDataset (full image)
 # ---------------------------------------------------------------------------
@@ -62,3 +77,13 @@ def test_validation_dataset_hr_cropped_to_multiple_of_scale(tiny_rgb_image_dir: 
 def test_validation_dataset_no_images_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="No images"):
         ValidationDataset(img_dir=tmp_path, scale=2)
+
+
+def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
+    """Calling __getitem__(idx) twice must return identical tensors —
+    the validation pipeline has no random elements."""
+    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=4)
+    lr_a, hr_a = ds[0]
+    lr_b, hr_b = ds[0]
+    assert torch.equal(lr_a, lr_b), "validation LR must be deterministic"
+    assert torch.equal(hr_a, hr_b), "validation HR must be deterministic"
