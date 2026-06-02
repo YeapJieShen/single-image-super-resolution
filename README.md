@@ -65,3 +65,7 @@ Test sets are also surfaced during `fit` (monitored each validation cycle), and 
 ```bash
 pytest
 ```
+
+## Note on dependencies
+
+This project depends on [AlbumentationsX](https://github.com/albumentations-team/AlbumentationsX), which is licensed under AGPL-3.0 (or a separate commercial license from the upstream). The `single-image-super-resolution` project itself remains MIT-licensed. Users who redistribute or host this code as a network service should review AGPL-3.0 obligations.

@@ -49,6 +49,7 @@ dependencies = [
     "numpy>=1.26",
     "tqdm>=4.66",
     "tensorboard>=2.16",  # default logger in the experiment templates
+    "albumentationsx>=2.0,<3.0",  # AGPL-3.0; provides A.Compose, A.GaussianBlur, A.Resize, A.RandomCrop, A.ToFloat, and albumentations.pytorch.ToTensorV2
 ]
 
 [project.optional-dependencies]
