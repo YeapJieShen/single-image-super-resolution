@@ -23,8 +23,6 @@ def test_public_exports():
     from sisr.utils import (  # noqa: F401
         LMDBCache,
         LMDBCacheBuildContext,
-        extract_model_input,
         rgb_to_ycbcr,
-        reconstruct_sr_rgb,
         ycbcr_to_rgb,
     )

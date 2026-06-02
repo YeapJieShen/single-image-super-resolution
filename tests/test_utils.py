@@ -8,8 +8,6 @@ import torch
 from sisr.utils import (
     LMDBCache,
     LMDBCacheBuildContext,
-    extract_model_input,
-    reconstruct_sr_rgb,
     rgb_to_ycbcr,
     ycbcr_to_rgb,
 )
@@ -64,69 +62,6 @@ def test_round_trip_within_coefficient_precision():
     y = ycbcr_to_rgb(rgb_to_ycbcr(x))
     err = (y - x).abs().max().item()
     assert err < 5e-4
-
-
-def test_extract_model_input_rgb_passthrough():
-    x = torch.rand(1, 3, 4, 4)
-    inp, aux = extract_model_input(x, "RGB")
-    assert torch.equal(inp, x)
-    assert aux is None
-
-
-def test_extract_model_input_y_returns_y_and_full_ycbcr():
-    x = torch.rand(1, 3, 4, 4)
-    inp, aux = extract_model_input(x, "Y")
-    assert inp.shape == (1, 1, 4, 4)
-    assert aux is not None
-    assert aux.shape == (1, 3, 4, 4)
-
-
-def test_extract_model_input_ycbcr():
-    x = torch.rand(1, 3, 4, 4)
-    inp, aux = extract_model_input(x, "YCbCr")
-    assert inp.shape == (1, 3, 4, 4)
-    assert aux is None
-
-
-def test_extract_model_input_unknown_raises():
-    x = torch.rand(1, 3, 4, 4)
-    with pytest.raises(ValueError):
-        extract_model_input(x, "XYZ")
-
-
-def test_reconstruct_sr_rgb_rgb_passthrough():
-    sr = torch.rand(1, 3, 4, 4)
-    out = reconstruct_sr_rgb(sr, lr_ycbcr=None, model_colorspace="RGB")
-    assert torch.equal(out, sr)
-
-
-def test_reconstruct_sr_rgb_y_requires_lr_ycbcr():
-    sr_y = torch.rand(1, 1, 4, 4)
-    with pytest.raises(ValueError):
-        reconstruct_sr_rgb(sr_y, lr_ycbcr=None, model_colorspace="Y")
-
-
-def test_reconstruct_sr_rgb_y_centre_crops_chroma():
-    """When SR is spatially smaller than LR (valid padding), reconstruct must
-    centre-crop the LR's Cb/Cr to match SR's spatial size."""
-    lr_ycbcr = torch.rand(1, 3, 8, 8)
-    sr_y = torch.zeros(1, 1, 4, 4)
-    out = reconstruct_sr_rgb(sr_y, lr_ycbcr=lr_ycbcr, model_colorspace="Y")
-    assert out.shape == (1, 3, 4, 4)
-
-
-def test_reconstruct_sr_rgb_ycbcr_converts_to_rgb():
-    sr = torch.rand(1, 3, 4, 4)
-    out = reconstruct_sr_rgb(sr, lr_ycbcr=None, model_colorspace="YCbCr")
-    assert out.shape == (1, 3, 4, 4)
-    # ycbcr_to_rgb clamps to [0, 1].
-    assert out.min() >= 0.0 and out.max() <= 1.0
-
-
-def test_reconstruct_sr_rgb_unknown_raises():
-    sr = torch.rand(1, 3, 4, 4)
-    with pytest.raises(ValueError):
-        reconstruct_sr_rgb(sr, lr_ycbcr=None, model_colorspace="XYZ")
 
 
 # ---------------------------------------------------------------------------
