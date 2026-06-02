@@ -49,7 +49,11 @@ dependencies = [
     "numpy>=1.26",
     "tqdm>=4.66",
     "tensorboard>=2.16",  # default logger in the experiment templates
-    "albumentationsx>=2.0,<3.0",  # AGPL-3.0; provides A.Compose, A.GaussianBlur, A.Resize, A.RandomCrop, A.ToFloat, and albumentations.pytorch.ToTensorV2
+    # AGPL-3.0; provides A.Compose, A.GaussianBlur, A.Resize, A.RandomCrop, A.ToFloat, and albumentations.pytorch.ToTensorV2.
+    # Pinned <2.2 to stay on albucore<0.1.0 (uses simsimd). albucore>=0.1.5 switched to numkong,
+    # which has a native .pyd that depends on libomp140.x86_64.dll (LLVM OpenMP runtime, not bundled
+    # with Windows / Anaconda / VS Build Tools by default) and fails to import on stock Python 3.13.
+    "albumentationsx>=2.0,<2.2",
 ]
 
 [project.optional-dependencies]
