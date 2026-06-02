@@ -6,20 +6,24 @@ serves random ``hr_crop_size`` crops without caching (random crops aren't
 cacheable); :class:`ValidationDataset` serves full images cropped to a
 multiple of ``scale``.
 """
-import random
-
+import cv2
+import numpy as np
 import torch
-import torchvision
+import torchvision  # still used by ValidationDataset; removed in Task 5
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from pathlib import Path
 
 
 class TrainDataset(torch.utils.data.Dataset):
-    """Random-crop HR/LR pairs for SRResNet-style training.
+    """Random-crop HR/LR pairs for SRResNet-style training (AlbumentationsX backend).
 
     Each ``__getitem__`` takes a random ``hr_crop_size`` square crop from an
-    HR image and bicubic-downsamples it by ``scale`` to form the LR input.
-    Unlike :class:`sisr.datasets.srcnn.TrainDataset` there is **no
+    HR image via :class:`albumentations.RandomCrop` and bicubic-downsamples
+    it by ``scale`` (via :class:`albumentations.Resize` with
+    ``cv2.INTER_CUBIC``) to form the LR input. Unlike
+    :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     blur+downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is
     ``hr_crop_size // scale`` on a side.
@@ -69,6 +73,18 @@ class TrainDataset(torch.utils.data.Dataset):
         if not self.img_paths:
             raise ValueError(f"No images found in {img_dir}")
 
+        lr_size = hr_crop_size // scale
+        self._hr_crop = A.Compose([A.RandomCrop(hr_crop_size, hr_crop_size)])
+        self._lr_pipeline = A.Compose([
+            A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ])
+        self._hr_to_tensor = A.Compose([
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ])
+
     def __len__(self) -> int:
         return len(self.img_paths) * self.crops_per_image
 
@@ -81,24 +97,18 @@ class TrainDataset(torch.utils.data.Dataset):
         with shape ``(3, H, W)``.
         """
         path = self.img_paths[idx % len(self.img_paths)]
-        hr_img = Image.open(path).convert('RGB')
+        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
 
-        w, h = hr_img.size
-        cs = self.hr_crop_size
-        if w < cs or h < cs:
+        h, w = arr.shape[:2]
+        if w < self.hr_crop_size or h < self.hr_crop_size:
             raise ValueError(
-                f"Image {path.name} ({w}x{h}) is smaller than hr_crop_size {cs}."
+                f"Image {path.name} ({w}x{h}) is smaller than hr_crop_size {self.hr_crop_size}."
             )
 
-        left = random.randint(0, w - cs)
-        top = random.randint(0, h - cs)
-        hr_crop = hr_img.crop((left, top, left + cs, top + cs))
+        hr_arr = self._hr_crop(image=arr)['image']  # HWC uint8
 
-        lr_size = cs // self.scale
-        lr_crop = hr_crop.resize((lr_size, lr_size), resample=Image.BICUBIC)
-
-        hr_tensor = torchvision.transforms.functional.to_tensor(hr_crop)
-        lr_tensor = torchvision.transforms.functional.to_tensor(lr_crop)
+        lr_tensor = self._lr_pipeline(image=hr_arr)['image']
+        hr_tensor = self._hr_to_tensor(image=hr_arr)['image']
 
         return lr_tensor, hr_tensor
 
