@@ -5,8 +5,10 @@ Reference: Image Super-Resolution Using Deep Convolutional Networks
 """
 import torch
 
+from sisr.models.base import SRModel
 
-class SRCNN(torch.nn.Module):
+
+class SRCNN(SRModel):
     """SRCNN (Super-Resolution Convolutional Neural Network) model for single image super-resolution.
     The architecture consists of three main parts: feature extraction, non-linear mapping, and reconstruction.
 
@@ -85,20 +87,6 @@ class SRCNN(torch.nn.Module):
         if len(num_filters) + 1 != len(kernel_sizes):
             raise ValueError(
                 f"num_filters must have exactly one less element than kernel_sizes. Got num_filters={num_filters} and kernel_sizes={kernel_sizes}.")
-
-    @property
-    def hparams(self) -> dict:
-        """Return the model architecture hyperparameters as a dict.
-
-        Merged into Lightning's HParams by :class:`~sisr.training.SRLightning`
-        so the architecture spec appears alongside training params in
-        TensorBoard.
-
-        Returns:
-            Dict with keys ``num_channels``, ``num_filters``,
-            ``kernel_sizes``, ``padding``.
-        """
-        return self._hparams
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
         """Initializes the weights of the convolutional layers using a normal distribution and sets the biases to zero.
