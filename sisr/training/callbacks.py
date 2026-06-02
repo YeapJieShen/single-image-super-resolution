@@ -277,7 +277,9 @@ class BenchmarkImageLogger(Callback):
         lr_img, hr_img = batch
 
         with torch.no_grad():
-            sr = pl_module(lr_img)
+            model_in = pl_module.processor.extract(lr_img)
+            sr_model_out = pl_module.model(model_in)
+            sr = pl_module.processor.reconstruct(sr_model_out, lr_img)
 
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr.shape[-2:])
 

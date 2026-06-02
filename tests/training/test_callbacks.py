@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from sisr.models.srcnn import SRCNN
-from sisr.processors import RGBProcessor
+from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
     BenchmarkImageLogger,
     GradNormLogger,
@@ -418,4 +418,41 @@ def test_benchmark_collect_batch_crops_per_eval_config():
     assert len(cb._buffer["Set5"]) == 1
     _, _, _, _, psnr_dict, ssim = cb._buffer["Set5"][0]
     assert "RGB" in psnr_dict
+    assert isinstance(ssim, float)
+
+
+def test_benchmark_collect_batch_routes_through_processor():
+    """SRCNN+YChannelProcessor: _collect_batch must extract Y from RGB LR before the
+    model forward, then reconstruct SR back to RGB. Bypassing the processor would
+    feed 3-channel RGB to a 1-channel Conv2d and crash with a shape mismatch."""
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    # 1-channel SRCNN paired with YChannelProcessor — production SRCNN template shape.
+    model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB", "YCbCr"]),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(
+        val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],
+    )
+    # Batch is 3-channel RGB (dataset-format); the processor must extract Y before the model.
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer, pl_module=pl_module, outputs=None,
+        batch=batch, batch_idx=0, dataloader_idx=1,
+    )
+    assert len(cb._buffer["Set5"]) == 1
+    _, lr_cached, sr_cached, hr_cached, psnr_dict, ssim = cb._buffer["Set5"][0]
+    # All cached tensors are full RGB (reconstruct stitched SR-Y with bicubic Cb/Cr).
+    assert lr_cached.shape == (3, 16, 16)
+    assert sr_cached.shape == (3, 16, 16)
+    assert hr_cached.shape == (3, 16, 16)
+    assert "RGB" in psnr_dict
+    assert "YCbCr" in psnr_dict
     assert isinstance(ssim, float)

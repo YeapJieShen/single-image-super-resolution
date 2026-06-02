@@ -34,6 +34,11 @@ class SRCNNTrainingConfig(SRTrainingConfig):
             init via :meth:`SRCNN.reset_parameters` in
             :class:`~sisr.training.SRLightning`'s constructor;
             ``'default'`` skips it and uses PyTorch's defaults.
+        init_mean / init_std: Gaussian parameters used by
+            ``init_strategy='paper'``; inherited from
+            :class:`~sisr.training.config.SRTrainingConfig` with defaults
+            ``0.0`` / ``0.01`` matching the SRCNN paper. Override in YAML
+            to deviate.
     """
 
     layer_lrs: list[float] | None = field(
