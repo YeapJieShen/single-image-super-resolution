@@ -50,10 +50,18 @@ dependencies = [
     "tqdm>=4.66",
     "tensorboard>=2.16",  # default logger in the experiment templates
     # AGPL-3.0; provides A.Compose, A.GaussianBlur, A.Resize, A.RandomCrop, A.ToFloat, and albumentations.pytorch.ToTensorV2.
-    # Pinned <2.2 to stay on albucore<0.1.0 (uses simsimd). albucore>=0.1.5 switched to numkong,
-    # which has a native .pyd that depends on libomp140.x86_64.dll (LLVM OpenMP runtime, not bundled
-    # with Windows / Anaconda / VS Build Tools by default) and fails to import on stock Python 3.13.
-    "albumentationsx>=2.0,<2.2",
+    # Capped at <=2.1.0 to stay on albucore<0.1.0 (simsimd-backed). albucore 0.1.0 switched its native
+    # backend to numkong, whose .pyd depends on libomp140.x86_64.dll (LLVM OpenMP runtime, not bundled
+    # with Windows / Anaconda / VS Build Tools / VC++ Redistributable by default) and fails to import
+    # on stock Python 3.13. Mapping confirmed: albumentationsx 2.1.0 pins albucore==0.0.41 (simsimd);
+    # albumentationsx 2.1.1 pins albucore==0.1.2 (numkong). The cap is exact, not range, because the
+    # albucore versions are mid-2.1.x and there is no stable boundary between sub-versions.
+    "albumentationsx>=2.0,<=2.1.0",
+    # cv2 is imported directly by sisr/datasets/* (for cv2.INTER_CUBIC). albumentationsx<2.2 declares
+    # opencv only as optional extras ([headless] / [gui] / [contrib]), so a clean install resolves no
+    # cv2 distribution by default and dataset module import fails. Declaring it explicitly here keeps
+    # the requirement honest. Headless variant avoids X11/Qt baggage and matches CI/non-GUI use.
+    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]
