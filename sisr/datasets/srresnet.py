@@ -9,7 +9,6 @@ multiple of ``scale``.
 import cv2
 import numpy as np
 import torch
-import torchvision  # still used by ValidationDataset; removed in Task 5
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
@@ -114,7 +113,8 @@ class TrainDataset(torch.utils.data.Dataset):
 
 
 class ValidationDataset(torch.utils.data.Dataset):
-    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
+    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test
+    (AlbumentationsX backend).
 
     Each item is a full image pair. The HR image is cropped to a multiple of
     ``scale`` so the model's ×``scale`` output lands exactly on the HR size;
@@ -140,6 +140,11 @@ class ValidationDataset(torch.utils.data.Dataset):
         if not self.img_paths:
             raise ValueError(f"No images found in {img_dir}")
 
+        self._to_tensor = A.Compose([
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ])
+
     def __len__(self) -> int:
         return len(self.img_paths)
 
@@ -151,17 +156,19 @@ class ValidationDataset(torch.utils.data.Dataset):
         ``float32`` in ``[0, 1]``.
         """
         path = self.img_paths[idx]
-        hr_img = Image.open(path).convert('RGB')
+        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
 
-        w, h = hr_img.size
-        w_crop = w - (w % self.scale)
+        h, w = arr.shape[:2]
         h_crop = h - (h % self.scale)
-        hr_img = hr_img.crop((0, 0, w_crop, h_crop))
+        w_crop = w - (w % self.scale)
+        hr_arr = arr[:h_crop, :w_crop, :]  # deterministic exact-corner crop
 
-        lr_img = hr_img.resize(
-            (w_crop // self.scale, h_crop // self.scale), resample=Image.BICUBIC)
+        lr_pipeline = A.Compose([
+            A.Resize(h_crop // self.scale, w_crop // self.scale, interpolation=cv2.INTER_CUBIC),
+        ])
+        lr_arr = lr_pipeline(image=hr_arr)['image']
 
-        hr_tensor = torchvision.transforms.functional.to_tensor(hr_img)
-        lr_tensor = torchvision.transforms.functional.to_tensor(lr_img)
+        lr_tensor = self._to_tensor(image=lr_arr)['image']
+        hr_tensor = self._to_tensor(image=hr_arr)['image']
 
         return lr_tensor, hr_tensor
