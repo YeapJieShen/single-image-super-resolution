@@ -10,14 +10,16 @@ model:
   model:
     class_path: sisr.models.srcnn.SRCNN
     init_args:
-      num_channels: 3
+      num_channels: 1                    # Y-channel only (was 3 — latent bug fix)
       num_filters: [64, 32]
       kernel_sizes: [9, 1, 5]
       padding: 0
+  processor:
+    class_path: sisr.processors.YChannelProcessor
   training_config:
     class_path: sisr.models.srcnn.SRCNNTrainingConfig
     init_args:
-      example_input_shape: [3, 224, 224]   # For TensorBoard graph
+      example_input_shape: [1, 224, 224]  # For TensorBoard graph (1-channel Y)
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 

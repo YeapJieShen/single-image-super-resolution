@@ -29,11 +29,13 @@ def test_cli_print_config_resolves():
     out = proc.stdout
     # Sanity markers — confirm config-class wiring resolved correctly.
     assert "class_path: sisr.models.srcnn.SRCNN" in out
+    assert "class_path: sisr.processors.YChannelProcessor" in out
     assert "class_path: sisr.models.srcnn.SRCNNTrainingConfig" in out
     assert "class_path: sisr.models.srcnn.SRCNNEvalConfig" in out
     assert "layer_lrs:" in out
     assert "crop_border: 3" in out
-    assert "model_colorspace: Y" in out
+    # The removed model_colorspace field must not reappear.
+    assert "model_colorspace" not in out
     # Top-level optimizer block linked from YAML.
     assert "optimizer:" in out
 
@@ -45,11 +47,13 @@ def test_cli_srresnet_print_config_resolves():
     assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
     out = proc.stdout
     assert "class_path: sisr.models.srresnet.SRResNet" in out
+    assert "class_path: sisr.processors.RGBProcessor" in out
     assert "class_path: sisr.datasets.srresnet.TrainDataset" in out
     assert "class_path: sisr.datasets.srresnet.ValidationDataset" in out
-    assert "model_colorspace: RGB" in out
     assert "hr_crop_size: 96" in out
     assert "crop_border: 4" in out
+    # The removed model_colorspace field must not reappear.
+    assert "model_colorspace" not in out
 
 
 def test_cli_test_subcommand_exposes_ckpt_path():

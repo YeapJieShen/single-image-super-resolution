@@ -2,9 +2,9 @@
 
 Split into two classes by lifecycle:
 
-* :class:`SRTrainingConfig` controls behaviour during ``cli fit`` — model
-  input/output colorspace, per-Conv2d learning rates, and the example input
-  shape used to log the model graph to TensorBoard.
+* :class:`SRTrainingConfig` controls behaviour during ``cli fit`` — per-Conv2d
+  learning rates, paper-init knobs, and the example input shape used to log
+  the model graph to TensorBoard.
 * :class:`SREvalConfig` controls validation/test metric computation —
   boundary-pixel exclusion (``crop_border``) and which colorspaces PSNR is
   reported in.
@@ -13,6 +13,9 @@ Per-architecture defaults live in subclasses next to the model code (e.g.
 ``sisr.models.srcnn.SRCNNTrainingConfig``); a YAML user picks them via
 ``class_path`` on ``model.training_config`` / ``model.eval_config`` and
 overrides individual fields with ``init_args``.
+
+The colorspace the model trains in is no longer a string field here; it is
+expressed by the choice of processor (see :mod:`sisr.processors`).
 """
 from dataclasses import dataclass, field
 from typing import Literal
@@ -20,21 +23,9 @@ from typing import Literal
 
 @dataclass
 class SRTrainingConfig:
-    """How to train the SR model — affects forward pass, loss, and optimizer setup.
+    """How to train the SR model — affects optimizer setup and weight init.
 
     Args:
-        model_colorspace: Colorspace the inner model trains on.
-
-            * ``'RGB'`` (default) — model receives and emits RGB directly.
-            * ``'Y'`` — Y channel of LR YCbCr is fed to the model; the SR
-              output is stitched with bicubic Cb/Cr taken from the LR image
-              and converted back to RGB before metrics are computed.
-            * ``'YCbCr'`` — model trains on full YCbCr; output converted
-              back to RGB for metrics.
-
-            The dataset always serves RGB; conversion happens inside
-            :class:`SRLightning` via :mod:`sisr.utils`.
-
         layer_lrs: Absolute per-``Conv2d`` learning rates (one entry per
             ``Conv2d`` in the model, in module-traversal order).  When
             ``None`` (default), training uses the optimizer's base ``lr``
@@ -44,14 +35,30 @@ class SRTrainingConfig:
             raises ``ValueError`` otherwise.
 
         example_input_shape: Shape of a single input sample *excluding* the
-            batch dimension (e.g. ``(3, 33, 33)`` for a 33×33 RGB patch).
+            batch dimension (e.g. ``(1, 33, 33)`` for a 33×33 Y-channel patch).
             When provided, ``self.example_input_array`` is set so the
             TensorBoard logger can capture the model graph.
+
+        init_strategy: ``'paper'`` triggers a paper-faithful weight init via
+            :meth:`SRModel.reset_parameters` in :class:`SRLightning`'s constructor;
+            ``'default'`` (the default) skips it and uses PyTorch's defaults.
+            Subclasses pin a paper-faithful default (e.g. ``SRCNNTrainingConfig``
+            uses ``'paper'``).
+
+        init_mean: Mean of the Gaussian used by SRCNN's
+            ``init_strategy='paper'``. Other paper-init implementations may
+            ignore this. Defaults to ``0.0``.
+
+        init_std: Std of the Gaussian used by SRCNN's
+            ``init_strategy='paper'``. Other paper-init implementations may
+            ignore this. Defaults to ``0.01``.
     """
 
-    model_colorspace: Literal['RGB', 'Y', 'YCbCr'] = 'RGB'
     layer_lrs: list[float] | None = None
     example_input_shape: tuple[int, ...] | None = None
+    init_strategy: Literal['default', 'paper'] = 'default'
+    init_mean: float = 0.0
+    init_std: float = 0.01
 
 
 @dataclass

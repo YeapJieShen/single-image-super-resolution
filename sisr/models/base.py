@@ -1,6 +1,7 @@
 """Abstract base class for single-image super-resolution architectures."""
 import abc
 
+import torch
 import torch.nn as nn
 
 
@@ -20,7 +21,7 @@ class SRModel(nn.Module, abc.ABC):
         return self._hparams
 
     @abc.abstractmethod
-    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the model on input ``x`` and return the SR output tensor."""
 
     def reset_parameters(self, **kwargs) -> None:

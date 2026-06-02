@@ -1,8 +1,9 @@
 """Colorspace conversions and the LMDB cache infrastructure.
 
-BT.601 full-range YCbCr is the project's working chroma space (see
-:mod:`sisr.training.config`); pure conversion functions live here so the
-:class:`~sisr.training.SRLightning` module stays paper-agnostic.
+BT.601 full-range YCbCr is the project's working chroma space. Pure
+conversion functions live here so the :class:`~sisr.processors.SRProcessor`
+subclasses and any external callers can use them without depending on
+Lightning or model code.
 
 :class:`LMDBCache` is a checksum-validated key-value store used by
 :class:`~sisr.datasets.srcnn.TrainDataset` to persist precomputed
@@ -11,12 +12,11 @@ LR/HR sub-image pairs.
 import shutil
 import lmdb
 import torch
-import torchvision
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from tqdm.auto import tqdm
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any
 
 
 # BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
@@ -69,83 +69,6 @@ def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
     g = y + _YCBCR_TO_G_CB * cb + _YCBCR_TO_G_CR * cr
     b = y + _YCBCR_TO_B * cb
     return torch.cat([r, g, b], dim=1).clamp(0.0, 1.0)
-
-
-def extract_model_input(
-    lr_img: torch.Tensor,
-    model_colorspace: Literal['RGB', 'Y', 'YCbCr'],
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Prepare the model input from a full-RGB LR tensor.
-
-    Args:
-        lr_img (torch.Tensor): RGB LR tensor of shape ``(B, 3, H, W)``.
-        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
-            model expects.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor | None]: ``(model_input,
-        lr_ycbcr)`` where ``lr_ycbcr`` is the full LR YCbCr tensor
-        retained for chroma reconstruction (only when
-        ``model_colorspace='Y'``); ``None`` otherwise.
-
-    Raises:
-        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
-            ``'Y'``, or ``'YCbCr'``.
-    """
-    if model_colorspace == 'RGB':
-        return lr_img, None
-    lr_ycbcr = rgb_to_ycbcr(lr_img)
-    if model_colorspace == 'Y':
-        return lr_ycbcr[:, 0:1], lr_ycbcr
-    if model_colorspace == 'YCbCr':
-        return lr_ycbcr, None
-    raise ValueError(
-        f"Unknown model_colorspace {model_colorspace!r}. Expected 'RGB', 'Y', or 'YCbCr'."
-    )
-
-
-def reconstruct_sr_rgb(
-    sr_model: torch.Tensor,
-    lr_ycbcr: torch.Tensor | None,
-    model_colorspace: Literal['RGB', 'Y', 'YCbCr'],
-) -> torch.Tensor:
-    """Reconstruct a full-RGB SR image from the model output.
-
-    For ``model_colorspace='Y'``, stitches SR-Y with bicubic Cb/Cr from the
-    LR YCbCr tensor (centre-cropped to match the SR spatial size) and
-    converts to RGB.
-
-    Args:
-        sr_model (torch.Tensor): The model's raw output. Shape matches
-            ``model_colorspace`` (``(B, 1, H, W)`` for ``'Y'``,
-            ``(B, 3, H, W)`` for ``'RGB'`` and ``'YCbCr'``).
-        lr_ycbcr (torch.Tensor | None): Full LR YCbCr tensor used to
-            recover Cb/Cr for ``model_colorspace='Y'``; ignored
-            otherwise.
-        model_colorspace (Literal['RGB', 'Y', 'YCbCr']): Colorspace the
-            model produced.
-
-    Returns:
-        torch.Tensor: Full-RGB SR tensor of shape ``(B, 3, H, W)``.
-
-    Raises:
-        ValueError: If ``model_colorspace`` is not one of ``'RGB'``,
-            ``'Y'``, or ``'YCbCr'``, or if ``model_colorspace='Y'`` is
-            passed without ``lr_ycbcr``.
-    """
-    if model_colorspace == 'RGB':
-        return sr_model
-    if model_colorspace == 'Y':
-        if lr_ycbcr is None:
-            raise ValueError("model_colorspace='Y' requires lr_ycbcr to reconstruct chroma.")
-        cb = torchvision.transforms.functional.center_crop(lr_ycbcr[:, 1:2], sr_model.shape[-2:])
-        cr = torchvision.transforms.functional.center_crop(lr_ycbcr[:, 2:3], sr_model.shape[-2:])
-        return ycbcr_to_rgb(torch.cat([sr_model, cb, cr], dim=1))
-    if model_colorspace == 'YCbCr':
-        return ycbcr_to_rgb(sr_model)
-    raise ValueError(
-        f"Unknown model_colorspace {model_colorspace!r}. Expected 'RGB', 'Y', or 'YCbCr'."
-    )
 
 
 class LMDBCacheBuildContext:

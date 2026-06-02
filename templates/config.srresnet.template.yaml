@@ -15,10 +15,11 @@ model:
       kernel_sizes: [9, 3, 9]
       num_residual_blocks: 16
       padding: same
+  processor:
+    class_path: sisr.processors.RGBProcessor
   training_config:
     class_path: sisr.training.SRTrainingConfig
     init_args:
-      model_colorspace: RGB
       example_input_shape: [3, 24, 24]   # For TensorBoard graph
   eval_config:
     class_path: sisr.training.SREvalConfig

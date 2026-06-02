@@ -18,36 +18,33 @@ from sisr.training.config import SREvalConfig, SRTrainingConfig
 class SRCNNTrainingConfig(SRTrainingConfig):
     """SRCNN-paper-faithful training defaults.
 
-    The paper trains on the Y channel of YCbCr only and uses a per-layer
-    learning rate of ``1e-4`` for the feature-extraction and non-linear-
-    mapping layers and ``1e-5`` for the reconstruction layer — i.e. the
-    last layer learns 10× slower. Weight initialization follows the
-    paper's Gaussian schedule (``N(0, 0.01)`` with zero biases); set
+    The paper trains on the Y channel of YCbCr only (selected at the YAML
+    layer by pairing with :class:`~sisr.processors.YChannelProcessor`) and
+    uses a per-layer learning rate of ``1e-4`` for the feature-extraction
+    and non-linear-mapping layers and ``1e-5`` for the reconstruction layer
+    — i.e. the last layer learns 10× slower. Weight initialization follows
+    the paper's Gaussian schedule (``N(0, 0.01)`` with zero biases); set
     ``init_strategy='default'`` to fall back to PyTorch's built-in init.
     Override any field in YAML to deviate.
 
     Args:
-        model_colorspace: Overrides the base default to ``'Y'``
-            (SRCNN's Y-channel training).
         layer_lrs: Per-``Conv2d`` LRs ``[1e-4, 1e-4, 1e-5]`` matching the
             paper's recipe. Set to ``None`` to disable per-layer LRs.
         init_strategy: ``'paper'`` (default) triggers the Gaussian
             init via :meth:`SRCNN.reset_parameters` in
             :class:`~sisr.training.SRLightning`'s constructor;
             ``'default'`` skips it and uses PyTorch's defaults.
-        init_mean: Mean of the Gaussian used by ``init_strategy='paper'``.
-            Defaults to ``0.0``.
-        init_std: Std of the Gaussian used by ``init_strategy='paper'``.
-            Defaults to ``0.01``.
+        init_mean / init_std: Gaussian parameters used by
+            ``init_strategy='paper'``; inherited from
+            :class:`~sisr.training.config.SRTrainingConfig` with defaults
+            ``0.0`` / ``0.01`` matching the SRCNN paper. Override in YAML
+            to deviate.
     """
 
-    model_colorspace: Literal['RGB', 'Y', 'YCbCr'] = 'Y'
     layer_lrs: list[float] | None = field(
         default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5]
     )
     init_strategy: Literal['default', 'paper'] = 'paper'
-    init_mean: float = 0.0
-    init_std: float = 0.01
 
 
 @dataclass

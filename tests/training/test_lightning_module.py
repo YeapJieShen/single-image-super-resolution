@@ -6,8 +6,15 @@ import lightning
 import pytest
 import torch
 
+from sisr.models.base import SRModel
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet.model import SRResNet
+from sisr.processors import (
+    RGBProcessor,
+    SRProcessor,
+    YChannelProcessor,
+    YCbCrProcessor,
+)
 from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
 
 
@@ -17,11 +24,12 @@ from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
 
 @pytest.fixture
 def srcnn_rgb_lit() -> SRLightning:
-    """SRLightning wrapping a 3-channel SRCNN (RGB training)."""
+    """SRLightning wrapping a 3-channel SRCNN with the RGB pass-through processor."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     return SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="RGB"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -29,11 +37,12 @@ def srcnn_rgb_lit() -> SRLightning:
 
 @pytest.fixture
 def srcnn_y_lit() -> SRLightning:
-    """SRLightning wrapping a 1-channel SRCNN trained on Y (paper-faithful)."""
+    """SRLightning wrapping a 1-channel SRCNN with the Y-channel processor (paper-faithful)."""
     model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     return SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="Y"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB", "YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -79,12 +88,13 @@ def test_step_y_path_reconstructs_rgb(srcnn_y_lit: SRLightning, rgb_lr_hr_batch)
 
 
 def test_step_y_path_loss_on_y_only():
-    """When model_colorspace='Y', criterion sees 1-channel inputs."""
+    """With YChannelProcessor, criterion sees 1-channel inputs."""
     model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     criterion = MagicMock(return_value=torch.tensor(0.0, requires_grad=True))
     lit = SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="Y"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(),
         criterion=criterion,
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -99,11 +109,12 @@ def test_step_y_path_loss_on_y_only():
 
 
 def test_step_ycbcr_path():
-    """3-channel YCbCr training path."""
+    """3-channel YCbCr training path via YCbCrProcessor."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="YCbCr"),
+        processor=YCbCrProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -129,6 +140,7 @@ def test_configure_optimizers_per_layer_lrs():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(layer_lrs=[1.0e-4, 1.0e-4, 1.0e-5]),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
@@ -143,6 +155,7 @@ def test_configure_optimizers_per_layer_count_mismatch_raises():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(layer_lrs=[1e-4, 1e-4]),  # 2 vs 3
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -158,6 +171,7 @@ def test_configure_optimizers_per_layer_with_non_conv_params_raises():
     n_convs = sum(1 for m in model.modules() if isinstance(m, torch.nn.Conv2d))
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(layer_lrs=[1e-4] * n_convs),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -171,6 +185,7 @@ def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -214,6 +229,7 @@ def test_build_psnr_tensors_with_separate_psnr_includes_per_channel():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(psnr_channels=["RGB"], separate_psnr=True),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -228,6 +244,7 @@ def test_build_psnr_tensors_ycbcr_does_conversion():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(psnr_channels=["YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -269,6 +286,7 @@ def test_paper_init_calls_reset_parameters():
     model.reset_parameters = MagicMock()
     SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRCNNTrainingConfig(init_strategy="paper", init_mean=0.5, init_std=0.02),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -282,6 +300,7 @@ def test_default_init_skips_reset_parameters():
     model.reset_parameters = MagicMock()
     SRLightning(
         model=model,
+        processor=RGBProcessor(),
         training_config=SRCNNTrainingConfig(init_strategy="default"),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -290,12 +309,13 @@ def test_default_init_skips_reset_parameters():
 
 
 def test_base_training_config_skips_reset_parameters():
-    """Plain SRTrainingConfig (no init_strategy attr) → no call, no crash."""
+    """Base SRTrainingConfig defaults init_strategy='default' → no call, no crash."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     model.reset_parameters = MagicMock()
     SRLightning(
         model=model,
-        training_config=SRTrainingConfig(),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),    # init_strategy='default' by default
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -352,3 +372,83 @@ def test_on_train_start_multiple_tb_loggers_each_receive_call(srcnn_rgb_lit: SRL
 
     tb1.log_hyperparams.assert_called_once()
     tb2.log_hyperparams.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# new: isinstance guards and processor flow
+# ---------------------------------------------------------------------------
+
+def test_srlightning_rejects_non_srmodel():
+    """SRLightning(model=<plain nn.Module>) raises TypeError with a readable message."""
+    model = torch.nn.Conv2d(3, 3, 1)              # plain nn.Module, not SRModel
+    with pytest.raises(TypeError, match="SRModel subclass"):
+        SRLightning(
+            model=model,
+            processor=RGBProcessor(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_srlightning_rejects_non_srprocessor():
+    """SRLightning(processor=<not SRProcessor>) raises TypeError with a readable message."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(TypeError, match="SRProcessor subclass"):
+        SRLightning(
+            model=model,
+            processor=object(),                    # not an SRProcessor
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_step_calls_processor_extract_and_reconstruct():
+    """_step routes through processor.extract (twice — input and HR) and processor.reconstruct."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    processor = MagicMock(spec=SRProcessor)
+    # extract returns 3-channel passthrough; reconstruct returns its first arg.
+    processor.extract.side_effect = lambda x: x
+    processor.reconstruct.side_effect = lambda sr, lr: sr
+
+    lit = SRLightning(
+        model=model,
+        processor=processor,
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(2, 3, 33, 33)
+    hr = torch.rand(2, 3, 33, 33)
+    lit._step((lr, hr))
+
+    # extract called twice: once for LR input, once for HR-for-loss.
+    assert processor.extract.call_count == 2
+    # reconstruct called once with (sr_model_out, lr_img).
+    assert processor.reconstruct.call_count == 1
+
+
+def test_paper_init_polymorphic_on_non_overriding_subclass():
+    """init_strategy='paper' on a SRModel subclass without paper init is a no-op (not a crash)."""
+    # SRResNet doesn't override reset_parameters; the base SRModel.reset_parameters
+    # accepts **kwargs and does nothing.
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(init_strategy="paper", init_mean=0.5, init_std=0.02),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    # No exception = success. (The actual weights are whatever PyTorch's default init produced.)
+
+
+def test_saved_hparams_contain_processor_name():
+    """The processor's class name is saved into Lightning hparams for TensorBoard distinction."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    # Lightning's self.hparams is a flat dict after the _flatten_hparams step.
+    assert lit.hparams.get("processor") == "RGBProcessor"
