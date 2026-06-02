@@ -1,6 +1,7 @@
 """End-to-end CLI smoke tests via subprocess."""
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 
+# Drive the installed `sisr` console script (declared in pyproject.toml's
+# [project.scripts]) rather than `python -m sisr.cli`, so these smoke tests
+# exercise the same entry point an end user gets after `pip install`. The
+# scripts dir is the venv's Scripts/ (Windows) or bin/ (POSIX), resolved
+# without depending on PATH activation.
+SISR_BIN = Path(sysconfig.get_path("scripts")) / (
+    "sisr.exe" if sys.platform == "win32" else "sisr"
+)
+assert SISR_BIN.exists(), (
+    f"sisr console script not found at {SISR_BIN} — run `pip install -e .` first"
+)
+
 
 def _cli(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Invoke `python -m sisr.cli ...` from the repo root with a fresh process."""
+    """Invoke the installed `sisr` console script from the repo root."""
     return subprocess.run(
-        [sys.executable, "-m", "sisr.cli", *args],
+        [str(SISR_BIN), *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
