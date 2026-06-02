@@ -42,16 +42,18 @@ def test_cli_print_config_resolves():
 
 def test_cli_srresnet_print_config_resolves():
     """`cli fit --print_config` exits 0 and resolves the SRResNet template
-    (model + base configs + random-crop dataset classes)."""
+    (model + paper-faithful configs + random-crop dataset classes)."""
     proc = _cli("fit", "--config", str(SRRESNET_TEMPLATE), "--print_config")
     assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
     out = proc.stdout
     assert "class_path: sisr.models.srresnet.SRResNet" in out
     assert "class_path: sisr.processors.RGBProcessor" in out
+    assert "class_path: sisr.models.srresnet.SRResNetTrainingConfig" in out
+    assert "class_path: sisr.models.srresnet.SRResNetEvalConfig" in out
     assert "class_path: sisr.datasets.srresnet.TrainDataset" in out
     assert "class_path: sisr.datasets.srresnet.ValidationDataset" in out
     assert "hr_crop_size: 96" in out
-    assert "crop_border: 4" in out
+    assert "crop_border: 4" in out                  # still present — inherited default
     # The removed model_colorspace field must not reappear.
     assert "model_colorspace" not in out
 

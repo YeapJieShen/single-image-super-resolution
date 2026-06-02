@@ -18,14 +18,11 @@ model:
   processor:
     class_path: sisr.processors.RGBProcessor
   training_config:
-    class_path: sisr.training.SRTrainingConfig
+    class_path: sisr.models.srresnet.SRResNetTrainingConfig
     init_args:
       example_input_shape: [3, 24, 24]   # For TensorBoard graph
   eval_config:
-    class_path: sisr.training.SREvalConfig
-    init_args:
-      crop_border: 4
-      psnr_channels: [RGB, YCbCr]
+    class_path: sisr.models.srresnet.SRResNetEvalConfig
 
 data:
   train_dataset:
