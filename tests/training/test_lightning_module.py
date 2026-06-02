@@ -372,3 +372,83 @@ def test_on_train_start_multiple_tb_loggers_each_receive_call(srcnn_rgb_lit: SRL
 
     tb1.log_hyperparams.assert_called_once()
     tb2.log_hyperparams.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# new: isinstance guards and processor flow
+# ---------------------------------------------------------------------------
+
+def test_srlightning_rejects_non_srmodel():
+    """SRLightning(model=<plain nn.Module>) raises TypeError with a readable message."""
+    model = torch.nn.Conv2d(3, 3, 1)              # plain nn.Module, not SRModel
+    with pytest.raises(TypeError, match="SRModel subclass"):
+        SRLightning(
+            model=model,
+            processor=RGBProcessor(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_srlightning_rejects_non_srprocessor():
+    """SRLightning(processor=<not SRProcessor>) raises TypeError with a readable message."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(TypeError, match="SRProcessor subclass"):
+        SRLightning(
+            model=model,
+            processor=object(),                    # not an SRProcessor
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_step_calls_processor_extract_and_reconstruct():
+    """_step routes through processor.extract (twice — input and HR) and processor.reconstruct."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    processor = MagicMock(spec=SRProcessor)
+    # extract returns 3-channel passthrough; reconstruct returns its first arg.
+    processor.extract.side_effect = lambda x: x
+    processor.reconstruct.side_effect = lambda sr, lr: sr
+
+    lit = SRLightning(
+        model=model,
+        processor=processor,
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(2, 3, 33, 33)
+    hr = torch.rand(2, 3, 33, 33)
+    lit._step((lr, hr))
+
+    # extract called twice: once for LR input, once for HR-for-loss.
+    assert processor.extract.call_count == 2
+    # reconstruct called once with (sr_model_out, lr_img).
+    assert processor.reconstruct.call_count == 1
+
+
+def test_paper_init_polymorphic_on_non_overriding_subclass():
+    """init_strategy='paper' on a SRModel subclass without paper init is a no-op (not a crash)."""
+    # SRResNet doesn't override reset_parameters; the base SRModel.reset_parameters
+    # accepts **kwargs and does nothing.
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(init_strategy="paper", init_mean=0.5, init_std=0.02),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    # No exception = success. (The actual weights are whatever PyTorch's default init produced.)
+
+
+def test_saved_hparams_contain_processor_name():
+    """The processor's class name is saved into Lightning hparams for TensorBoard distinction."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    # Lightning's self.hparams is a flat dict after the _flatten_hparams step.
+    assert lit.hparams.get("processor") == "RGBProcessor"
