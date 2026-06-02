@@ -14,50 +14,41 @@ import lightning
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from typing import Any
 
-from ..utils import (
-    extract_model_input,
-    reconstruct_sr_rgb,
-    rgb_to_ycbcr,
-)
+from ..models.base import SRModel
+from ..processors import SRProcessor
+from ..utils import rgb_to_ycbcr
 from .config import SREvalConfig, SRTrainingConfig
 
 
 class SRLightning(lightning.LightningModule):
     """Generic Lightning wrapper for single-image super-resolution models.
 
-    Architecture-agnostic: any ``torch.nn.Module`` that accepts an LR tensor
-    of shape ``(B, C, H, W)`` and returns an SR tensor can be plugged in.
-    The wrapped model is passed in pre-instantiated (jsonargparse / LightningCLI
-    handle the construction via ``class_path`` / ``init_args``).
-
-    Per-architecture training and evaluation knobs live in
-    :class:`~sisr.training.config.SRTrainingConfig` and
-    :class:`~sisr.training.config.SREvalConfig` (and their subclasses next to
-    each model, e.g. :class:`~sisr.models.srcnn.SRCNNTrainingConfig`).
-    Optimizer and LR scheduler are wired from top-level YAML keys (``optimizer:``,
-    ``lr_scheduler:``) by :class:`~sisr.cli.SRLightningCLI` via
-    ``link_arguments``; the user does not pass them explicitly under
-    ``model.init_args``.
+    Composes an :class:`~sisr.models.base.SRModel` with an
+    :class:`~sisr.processors.SRProcessor`. The model is a pure tensor function;
+    the processor handles per-batch colorspace conversion between the dataset's
+    RGB format and the model's input/output colorspace. Both are wired
+    independently in YAML via ``class_path``.
 
     Args:
-        model: An initialised SR model instance.  If it exposes an
-            ``hparams`` mapping (as :class:`~sisr.models.srcnn.SRCNN` does),
-            those values are merged into the Lightning hparams so model
-            specs appear alongside training params in TensorBoard HParams.
-        training_config: Per-architecture training settings (model_colorspace,
-            layer_lrs, example_input_shape).  Defaults to
-            :class:`SRTrainingConfig`'s base defaults (RGB, uniform LR).
+        model: An initialised :class:`SRModel` subclass (e.g. :class:`SRCNN`,
+            :class:`SRResNet`). Required.
+        processor: An :class:`SRProcessor` subclass (e.g.
+            :class:`~sisr.processors.RGBProcessor`,
+            :class:`~sisr.processors.YChannelProcessor`,
+            :class:`~sisr.processors.YCbCrProcessor`). Required.
+        training_config: Per-architecture training settings (layer_lrs,
+            example_input_shape, init_*). Defaults to base
+            :class:`SRTrainingConfig` (uniform LR, no paper init).
         eval_config: Per-architecture evaluation settings (crop_border,
-            psnr_channels, separate_psnr).  Defaults to
-            :class:`SREvalConfig`'s base defaults (no crop, RGB-only PSNR).
-        criterion: Loss instance.  Defaults to :class:`torch.nn.MSELoss`
-            when ``None``.
-        optimizer: ``OptimizerCallable`` (``functools.partial(optimizer_cls,
-            **init_args)``-style) — populated from top-level YAML
-            ``optimizer:``.  Defaults to :class:`torch.optim.Adam`.
-        lr_scheduler: ``LRSchedulerCallable`` or ``None`` — populated from
-            top-level YAML ``lr_scheduler:``.  Defaults to ``None``
-            (constant LR).
+            psnr_channels, separate_psnr). Defaults to base :class:`SREvalConfig`.
+        criterion: Loss instance. Defaults to :class:`torch.nn.MSELoss`.
+        optimizer: ``OptimizerCallable`` populated from top-level YAML
+            ``optimizer:``. Defaults to :class:`torch.optim.Adam`.
+        lr_scheduler: ``LRSchedulerCallable`` or ``None``. Defaults to ``None``.
+
+    Raises:
+        TypeError: If ``model`` is not an :class:`SRModel` subclass, or
+            if ``processor`` is not an :class:`SRProcessor` subclass.
     """
 
     _CS_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
@@ -67,7 +58,8 @@ class SRLightning(lightning.LightningModule):
 
     def __init__(
         self,
-        model: torch.nn.Module,
+        model: SRModel,
+        processor: SRProcessor,
         training_config: SRTrainingConfig | None = None,
         eval_config: SREvalConfig | None = None,
         criterion: torch.nn.Module | None = None,
@@ -75,26 +67,41 @@ class SRLightning(lightning.LightningModule):
         lr_scheduler: LRSchedulerCallable | None = None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=['model', 'criterion', 'optimizer', 'lr_scheduler'])
+        if not isinstance(model, SRModel):
+            raise TypeError(
+                f"SRLightning requires an SRModel subclass; got "
+                f"{type(model).__name__}. Update your YAML to point at a "
+                f"class under sisr.models.* that inherits from SRModel."
+            )
+        if not isinstance(processor, SRProcessor):
+            raise TypeError(
+                f"SRLightning requires an SRProcessor subclass; got "
+                f"{type(processor).__name__}. Update your YAML to point "
+                f"at a class under sisr.processors.* that inherits from "
+                f"SRProcessor."
+            )
+
+        self.save_hyperparameters(ignore=['model', 'processor', 'criterion', 'optimizer', 'lr_scheduler'])
 
         self.model = model
+        self.processor = processor
         self.training_config = training_config or SRTrainingConfig()
         self.eval_config = eval_config or SREvalConfig()
         self.criterion = criterion if criterion is not None else torch.nn.MSELoss()
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
-        strategy = getattr(self.training_config, 'init_strategy', 'default')
-        if strategy == 'paper' and hasattr(model, 'reset_parameters'):
-            mean = getattr(self.training_config, 'init_mean', 0.0)
-            std = getattr(self.training_config, 'init_std', 0.01)
-            model.reset_parameters(mean=mean, std=std)
+        if self.training_config.init_strategy == 'paper':
+            model.reset_parameters(
+                mean=self.training_config.init_mean,
+                std=self.training_config.init_std,
+            )
 
-        # Merge model.hparams into Lightning hparams for TensorBoard HParams.
-        model_hparams = getattr(model, 'hparams', {})
+        # Merge model.hparams + processor identity into Lightning hparams for TensorBoard HParams.
         self._hparams = self._flatten_hparams({
             **self._hparams,
-            'model': model_hparams,
+            'model': model.hparams,
+            'processor': type(processor).__name__,
             'criterion': type(self.criterion).__name__,
         })
 
@@ -208,9 +215,10 @@ class SRLightning(lightning.LightningModule):
     ]:
         """Shared forward + loss for training and validation steps.
 
-        Loss is computed in :attr:`SRTrainingConfig.model_colorspace`;
-        metrics downstream consume ``sr_rgb`` / ``hr_cropped`` (both
-        full RGB, spatially aligned).
+        The processor handles all colorspace conversion; loss is computed in
+        the model's IO colorspace (against HR converted to the same space
+        via ``processor.extract``). Metrics downstream consume ``sr_rgb`` /
+        ``hr_cropped`` (both full RGB, spatially aligned).
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple from a loader. Both RGB,
@@ -222,22 +230,14 @@ class SRLightning(lightning.LightningModule):
             with matching spatial size.
         """
         lr_img, hr_img = batch
-        cs = self.training_config.model_colorspace
 
-        model_input, lr_ycbcr = extract_model_input(lr_img, cs)
-        sr_model = self.model(model_input)
-        sr_rgb = reconstruct_sr_rgb(sr_model, lr_ycbcr, cs)
+        model_input = self.processor.extract(lr_img)
+        sr_model_out = self.model(model_input)
+        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
 
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
-
-        # Loss is computed in model colorspace against HR in that same space.
-        if cs == 'Y':
-            hr_for_loss = rgb_to_ycbcr(hr_cropped)[:, 0:1]
-        elif cs == 'YCbCr':
-            hr_for_loss = rgb_to_ycbcr(hr_cropped)
-        else:
-            hr_for_loss = hr_cropped
-        loss = self.criterion(sr_model, hr_for_loss)
+        hr_for_loss = self.processor.extract(hr_cropped)
+        loss = self.criterion(sr_model_out, hr_for_loss)
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 

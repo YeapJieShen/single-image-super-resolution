@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from sisr.models.srcnn import SRCNN
+from sisr.processors import RGBProcessor
 from sisr.training import (
     BenchmarkImageLogger,
     GradNormLogger,
@@ -201,7 +202,8 @@ def _make_real_pl_module() -> SRLightning:
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     return SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="RGB"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -397,7 +399,8 @@ def test_benchmark_collect_batch_crops_per_eval_config():
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     pl_module = SRLightning(
         model=model,
-        training_config=SRTrainingConfig(model_colorspace="RGB"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
         eval_config=SREvalConfig(crop_border=3),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )

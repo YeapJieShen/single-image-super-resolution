@@ -5,9 +5,11 @@ from sisr.training import SREvalConfig, SRTrainingConfig
 
 def test_sr_training_config_defaults():
     cfg = SRTrainingConfig()
-    assert cfg.model_colorspace == "RGB"
     assert cfg.layer_lrs is None
     assert cfg.example_input_shape is None
+    assert cfg.init_strategy == 'default'
+    assert cfg.init_mean == 0.0
+    assert cfg.init_std == 0.01
 
 
 def test_sr_eval_config_defaults():
@@ -28,7 +30,7 @@ def test_sr_eval_config_psnr_channels_isolated_per_instance():
 def test_sr_training_config_field_names():
     """Reduced surface check — guards against accidental field renames."""
     names = {f.name for f in fields(SRTrainingConfig)}
-    assert names == {"model_colorspace", "layer_lrs", "example_input_shape"}
+    assert names == {"layer_lrs", "example_input_shape", "init_strategy", "init_mean", "init_std"}
 
 
 def test_sr_eval_config_field_names():

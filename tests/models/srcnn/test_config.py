@@ -4,7 +4,8 @@ from sisr.training import SREvalConfig, SRTrainingConfig
 
 def test_srcnn_training_config_paper_defaults():
     cfg = SRCNNTrainingConfig()
-    assert cfg.model_colorspace == "Y"
+    # model_colorspace was removed in the SR base-classes refactor;
+    # colorspace intent is now expressed by pairing with sisr.processors.YChannelProcessor.
     assert cfg.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
 
 
