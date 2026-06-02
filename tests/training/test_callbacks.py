@@ -57,6 +57,38 @@ def test_benchmark_setup_datamodule_without_test_names_is_safe():
 
 
 # ---------------------------------------------------------------------------
+# BenchmarkImageLogger._bicubic_to
+# ---------------------------------------------------------------------------
+
+def test_bicubic_to_returns_target_shape():
+    """LR (3, 4, 4) -> (3, 16, 16) for a 4x upscaling model."""
+    lr = torch.rand(3, 4, 4)
+    out = BenchmarkImageLogger._bicubic_to(lr, (16, 16))
+    assert out.shape == (3, 16, 16)
+
+
+def test_bicubic_to_clamps_to_unit_interval():
+    """Bicubic overshoots on high-contrast inputs; the helper clamps so the
+    panel renders cleanly as a normalized image."""
+    lr = torch.zeros(3, 4, 4)
+    lr[:, 0, 0] = 1.0
+    out = BenchmarkImageLogger._bicubic_to(lr, (16, 16))
+    assert out.min().item() >= 0.0
+    assert out.max().item() <= 1.0
+
+
+def test_bicubic_to_matches_torch_interpolate_bicubic():
+    """Lock the helper to bicubic mode (not bilinear/nearest)."""
+    torch.manual_seed(0)
+    lr = torch.rand(3, 4, 4)
+    expected = torch.nn.functional.interpolate(
+        lr.unsqueeze(0), size=(16, 16), mode="bicubic", align_corners=False
+    ).squeeze(0).clamp(0.0, 1.0)
+    out = BenchmarkImageLogger._bicubic_to(lr, (16, 16))
+    torch.testing.assert_close(out, expected)
+
+
+# ---------------------------------------------------------------------------
 # BenchmarkImageLogger._pad_to_match
 # ---------------------------------------------------------------------------
 
@@ -309,10 +341,48 @@ def test_benchmark_validation_epoch_end_logs_image_strips_when_on_interval(tmp_p
     tb_logger.finalize("success")  # flush
 
 
+def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path, monkeypatch):
+    """The first triptych panel must be the bicubic-upsampled LR at HR size,
+    not the original LR or a zero-padded LR. Locks the Bicubic|SR|HR layout."""
+    import lightning.pytorch.loggers as pl_loggers
+    import torchvision.utils
+
+    captured: list[list[torch.Tensor]] = []
+    real_make_grid = torchvision.utils.make_grid
+
+    def spy_make_grid(tensors, *args, **kwargs):
+        captured.append(list(tensors))
+        return real_make_grid(tensors, *args, **kwargs)
+
+    monkeypatch.setattr(torchvision.utils, "make_grid", spy_make_grid)
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    lr = torch.rand(3, 4, 4)
+    sr = torch.rand(3, 16, 16)
+    hr = torch.rand(3, 16, 16)
+    cb._buffer["Set5"] = [("img_0", lr, sr, hr, {"RGB": 30.0}, 0.9)]
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
+    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    tb_logger.finalize("success")
+
+    assert len(captured) == 1
+    panels = captured[0]
+    assert len(panels) == 3
+    expected_bicubic = BenchmarkImageLogger._bicubic_to(lr, hr.shape[-2:])
+    torch.testing.assert_close(panels[0], expected_bicubic)
+    # SR is already HR-sized so _pad_to_match is a no-op; HR is untouched.
+    torch.testing.assert_close(panels[1], sr)
+    torch.testing.assert_close(panels[2], hr)
+
+
 def test_benchmark_image_strips_handle_upscaling_sizes(tmp_path: Path):
     """For an upscaling model (SRResNet) the LR is smaller than SR/HR; the
-    strip must pad LR up to the HR size rather than crash make_grid on a size
-    mismatch."""
+    strip must bicubic-upsample LR to HR size rather than crash make_grid on
+    a size mismatch."""
     import lightning.pytorch.loggers as pl_loggers
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")

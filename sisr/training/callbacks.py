@@ -1,6 +1,6 @@
 """Lightning callbacks for SR training.
 
-:class:`BenchmarkImageLogger` logs per-image LR|SR|HR strips and PSNR/SSIM
+:class:`BenchmarkImageLogger` logs per-image bicubic|SR|HR strips and PSNR/SSIM
 for held-out test sets (Set5, Set14, ...) during both ``cli fit`` (every
 N val cycles) and ``cli test`` (one-shot final eval).
 :class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
@@ -18,8 +18,8 @@ from typing import Any
 
 
 class BenchmarkImageLogger(Callback):
-    """Log per-image LR|SR|HR composites and scalar PSNR/SSIM to TensorBoard for
-    one or more held-out test/benchmark dataloaders (Set5, Set14, …).
+    """Log per-image bicubic|SR|HR composites and scalar PSNR/SSIM to TensorBoard
+    for one or more held-out test/benchmark dataloaders (Set5, Set14, …).
 
     Fires during *both* validation and test stages:
 
@@ -34,9 +34,10 @@ class BenchmarkImageLogger(Callback):
       ``dataset_names``.  Images are logged every test run (no throttle —
       ``cli test`` is typically a one-shot final-eval invocation).
 
-    Each image lands as a horizontal **LR | SR | HR** strip; when the model
-    uses ``padding='valid'`` the SR output is zero-padded so all three panels
-    share the same spatial size.
+    Each image lands as a horizontal **bicubic | SR | HR** strip at HR scale:
+    the LR is bicubic-upsampled to HR size (the standard SR baseline), and the
+    SR output is center-padded when smaller than HR (``padding='valid'``) so
+    all three panels share the same spatial size.
 
     Per-image PSNR/SSIM scalars go under ``"{name}_psnr/{filename}"`` and
     ``"{name}_ssim/{filename}"``; per-set means under
@@ -334,8 +335,8 @@ class BenchmarkImageLogger(Callback):
                 ``global_step`` and the TensorBoard logger lookup).
             pl_module (lightning.LightningModule): Receives ``log()`` calls
                 for the per-set mean metrics.
-            should_log_images (bool): When True, LR|SR|HR image strips are
-                emitted to TensorBoard alongside the scalar means.
+            should_log_images (bool): When True, bicubic|SR|HR image strips
+                are emitted to TensorBoard alongside the scalar means.
         """
         step = trainer.global_step
 
@@ -366,20 +367,45 @@ class BenchmarkImageLogger(Callback):
                         experiment.add_scalar(f"{dataset_name}_psnr({key})/{filename}", psnr_val, global_step=step)
                     experiment.add_scalar(f"{dataset_name}_ssim/{filename}", ssim, global_step=step)
 
-                    # Pad LR and SR up to the HR size so all three tile cleanly.
-                    # For SRCNN (lr/sr/hr already equal) this is a no-op; for
-                    # upscaling models (SRResNet) the small LR is zero-padded up
-                    # to the HR size rather than crashing make_grid on a size
-                    # mismatch.
+                    # Triptych: bicubic | SR | HR, all at HR size.
+                    # The bicubic panel is the LR upsampled to HR via bicubic
+                    # interpolation — the standard SR baseline.  For SRCNN the
+                    # LR is already at HR size (pre-upsampled in the dataset),
+                    # so this resamples at 1:1 and is near-identity.  For
+                    # SRResNet (LR < HR) it upscales to HR for direct visual
+                    # comparison against SR.  SR is center-padded only when
+                    # smaller than HR (SRCNN with padding='valid') to preserve
+                    # full HR context on the right.
                     target_hw = hr.shape[-2:]
-                    lr_padded = self._pad_to_match(lr, target_hw)
+                    bicubic = self._bicubic_to(lr, target_hw)
                     sr_padded = self._pad_to_match(sr, target_hw)
                     strip = torchvision.utils.make_grid(
-                        [lr_padded, sr_padded, hr], nrow=3, padding=2, pad_value=0.5
+                        [bicubic, sr_padded, hr], nrow=3, padding=2, pad_value=0.5
                     )
                     experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
         self._buffer.clear()
+
+    @staticmethod
+    def _bicubic_to(img: torch.Tensor, target_hw: tuple) -> torch.Tensor:
+        """Bicubic-upsample a ``(C, H, W)`` tensor to *target_hw*, clamped to [0, 1].
+
+        Used to render the bicubic baseline panel of the triptych at HR size.
+        Bicubic can overshoot for high-contrast inputs, so the output is
+        clamped to the unit interval to keep the panel renderable as a
+        normalized image.
+
+        Args:
+            img (torch.Tensor): Image tensor of shape ``(C, H, W)``.
+            target_hw (tuple): Target ``(H, W)`` spatial dimensions.
+
+        Returns:
+            torch.Tensor: Bicubic-resampled tensor of shape ``(C, target_H, target_W)``.
+        """
+        out = torch.nn.functional.interpolate(
+            img.unsqueeze(0), size=target_hw, mode="bicubic", align_corners=False
+        ).squeeze(0)
+        return out.clamp(0.0, 1.0)
 
     @staticmethod
     def _pad_to_match(img: torch.Tensor, target_hw: tuple) -> torch.Tensor:

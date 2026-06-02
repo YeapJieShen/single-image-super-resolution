@@ -58,7 +58,7 @@ sisr test --config templates/config.srcnn.template.yaml \
     --ckpt_path path/to/best.ckpt
 ```
 
-Test sets are also surfaced during `fit` (monitored each validation cycle), and PSNR/SSIM plus LR│SR│HR image strips are logged to TensorBoard.
+Test sets are also surfaced during `fit` (monitored each validation cycle), and PSNR/SSIM plus bicubic│SR│HR image strips are logged to TensorBoard.
 
 ## Tests
 
