@@ -80,15 +80,22 @@ def test_residual_block_preserves_shape():
     assert out.shape == x.shape
 
 
-def test_residual_block_adds_identity():
-    """With BatchNorm in eval and zero input, the residual addition should
-    surface even tiny non-zero contributions from biases."""
+def test_residual_block_is_identity_when_branch_zeroed():
+    """block(x) = x + branch(x), where branch = conv->BN->PReLU->conv->BN.
+    Zero the SECOND conv's weight+bias so its output is 0; in eval mode the
+    trailing BatchNorm maps 0 -> 0 (running_mean=0, bias=0), collapsing the whole
+    residual branch to 0. The block must then reproduce its (random, non-zero)
+    input exactly. The old test fed zeros and only asserted the shape, so a
+    dropped/renamed skip connection would have passed unnoticed."""
+    torch.manual_seed(0)
     block = SRResidualBlock(channels=16, kernel_size=3).eval()
-    x = torch.zeros(1, 16, 4, 4)
+    with torch.no_grad():
+        block.block2[0].weight.zero_()   # block2 = Sequential(Conv2d, BatchNorm2d)
+        block.block2[0].bias.zero_()
+    x = torch.rand(1, 16, 4, 4)           # random, non-zero: identity must survive
     with torch.no_grad():
         out = block(x)
-    # block(x) = x + branch(x); for x=0, out = branch(0). Just check it ran.
-    assert out.shape == x.shape
+    torch.testing.assert_close(out, x, atol=1e-6, rtol=0)
 
 
 def test_upsample_block_doubles_spatial():
