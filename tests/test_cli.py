@@ -5,6 +5,7 @@ via ``SRLightningCLI(args=..., run=False)`` (see ``_resolve``); only
 ``test_cli_print_config_resolves`` and ``test_cli_help_lists_subcommands`` still
 spawn the installed ``sisr`` console script to exercise the real entry point.
 """
+
 import subprocess
 import sys
 import sysconfig
@@ -23,9 +24,7 @@ SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 # exercise the same entry point an end user gets after `pip install`. The
 # scripts dir is the venv's Scripts/ (Windows) or bin/ (POSIX), resolved
 # without depending on PATH activation.
-SISR_BIN = Path(sysconfig.get_path("scripts")) / (
-    "sisr.exe" if sys.platform == "win32" else "sisr"
-)
+SISR_BIN = Path(sysconfig.get_path("scripts")) / ("sisr.exe" if sys.platform == "win32" else "sisr")
 assert SISR_BIN.exists(), (
     f"sisr console script not found at {SISR_BIN} — run `pip install -e .` first"
 )
@@ -119,7 +118,7 @@ def test_srresnet_config_resolves_in_process():
     assert isinstance(m.processor, RGBProcessor)
     assert isinstance(m.training_config, SRResNetTrainingConfig)
     assert isinstance(m.eval_config, SRResNetEvalConfig)
-    assert m.eval_config.crop_border == 4          # inherited-default check
+    assert m.eval_config.crop_border == 4  # inherited-default check
     # Dataset specs stay plain {class_path, init_args} dicts (materialized lazily
     # in SRDataModule.setup), so assert on the resolved raw config.
     assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.srresnet.TrainDataset"
@@ -193,17 +192,21 @@ def test_matmul_precision_rejects_invalid_in_process():
 def _make_cli_stub(subcommand: str | None, matmul_precision: str | None):
     """Build an SRLightningCLI instance bypassing __init__ for direct hook testing."""
     from types import SimpleNamespace
+
     from sisr.cli import SRLightningCLI
 
     cli = SRLightningCLI.__new__(SRLightningCLI)
     cli.subcommand = subcommand
-    cli.config = {subcommand: SimpleNamespace(matmul_precision=matmul_precision)} if subcommand else {}
+    cli.config = (
+        {subcommand: SimpleNamespace(matmul_precision=matmul_precision)} if subcommand else {}
+    )
     return cli
 
 
 def test_before_instantiate_classes_calls_torch_setter(monkeypatch):
     """When matmul_precision is set, torch.set_float32_matmul_precision is called with it."""
     import torch
+
     calls: list[str] = []
     monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
 
@@ -215,6 +218,7 @@ def test_before_instantiate_classes_calls_torch_setter(monkeypatch):
 def test_before_instantiate_classes_skips_when_unset(monkeypatch):
     """When matmul_precision is None, torch.set_float32_matmul_precision is NOT called."""
     import torch
+
     calls: list[str] = []
     monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
 
@@ -226,6 +230,7 @@ def test_before_instantiate_classes_skips_when_unset(monkeypatch):
 def test_before_instantiate_classes_skips_when_no_subcommand(monkeypatch):
     """The hook returns early when self.subcommand is None (e.g., --help)."""
     import torch
+
     calls: list[str] = []
     monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda p: calls.append(p))
 
@@ -256,7 +261,7 @@ def test_template_disables_default_hp_metric(template_path: Path):
     would miss that)."""
     cli = _resolve("--config", str(template_path))
     loggers = cli.config.trainer.logger
-    tb = next(l for l in loggers if str(l.class_path).endswith("TensorBoardLogger"))
+    tb = next(logger for logger in loggers if str(logger.class_path).endswith("TensorBoardLogger"))
     assert tb.init_args.default_hp_metric is False, (
         f"{template_path.name} does not disable the hp_metric placeholder. "
         f"Add `default_hp_metric: false` under the TensorBoardLogger init_args."

@@ -9,6 +9,7 @@ Reference: Photo-Realistic Single Image Super-Resolution Using a
 Generative Adversarial Network (https://arxiv.org/pdf/1609.04802),
 Section 3.2 (SRResNet baseline).
 """
+
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -33,7 +34,7 @@ class SRResNetTrainingConfig(SRTrainingConfig):
     a YAML schema change.
     """
 
-    init_strategy: Literal['default', 'paper'] = 'default'
+    init_strategy: Literal["default", "paper"] = "default"
 
 
 @dataclass
@@ -52,4 +53,4 @@ class SRResNetEvalConfig(SREvalConfig):
     """
 
     crop_border: int = 4
-    psnr_channels: list[str] = field(default_factory=lambda: ['RGB', 'YCbCr'])
+    psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "YCbCr"])

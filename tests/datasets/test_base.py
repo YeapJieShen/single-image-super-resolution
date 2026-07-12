@@ -31,6 +31,7 @@ class _Mini(SRDataset):
 def test_srdataset_subclass_missing_abstract_methods_fails_at_construction():
     """A mis-shaped dataset (no __len__/__getitem__) must fail clearly at
     construction time via the ABC, not silently at first runtime access."""
+
     class Bad(SRDataset):
         pass
 

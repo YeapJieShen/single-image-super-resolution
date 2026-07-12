@@ -6,11 +6,14 @@ serves random ``hr_crop_size`` crops without caching (random crops aren't
 cacheable); :class:`ValidationDataset` serves full images cropped to a
 multiple of ``scale``.
 """
+
+from pathlib import Path
+
+import albumentations as A
 import cv2
 import torch
-import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from pathlib import Path
+
 from .base import SRDataset
 
 
@@ -57,9 +60,7 @@ class TrainDataset(SRDataset):
         super().__init__()
 
         if hr_crop_size % scale != 0:
-            raise ValueError(
-                f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({scale})."
-            )
+            raise ValueError(f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({scale}).")
 
         self._index_images(img_dir)
         self.scale = scale
@@ -68,11 +69,13 @@ class TrainDataset(SRDataset):
 
         lr_size = hr_crop_size // scale
         self._hr_crop = A.Compose([A.RandomCrop(hr_crop_size, hr_crop_size)])
-        self._lr_pipeline = A.Compose([
-            A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
-            A.ToFloat(max_value=255.0),
-            ToTensorV2(),
-        ])
+        self._lr_pipeline = A.Compose(
+            [
+                A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
+                A.ToFloat(max_value=255.0),
+                ToTensorV2(),
+            ]
+        )
         self._hr_to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
@@ -95,10 +98,10 @@ class TrainDataset(SRDataset):
                 f"Image {path.name} ({w}x{h}) is smaller than hr_crop_size {self.hr_crop_size}."
             )
 
-        hr_arr = self._hr_crop(image=arr)['image']  # HWC uint8
+        hr_arr = self._hr_crop(image=arr)["image"]  # HWC uint8
 
-        lr_tensor = self._lr_pipeline(image=hr_arr)['image']
-        hr_tensor = self._hr_to_tensor(image=hr_arr)['image']
+        lr_tensor = self._lr_pipeline(image=hr_arr)["image"]
+        hr_tensor = self._hr_to_tensor(image=hr_arr)["image"]
 
         return lr_tensor, hr_tensor
 
@@ -146,12 +149,14 @@ class ValidationDataset(SRDataset):
         w_crop = w - (w % self.scale)
         hr_arr = arr[:h_crop, :w_crop, :]  # deterministic exact-corner crop
 
-        lr_pipeline = A.Compose([
-            A.Resize(h_crop // self.scale, w_crop // self.scale, interpolation=cv2.INTER_CUBIC),
-        ])
-        lr_arr = lr_pipeline(image=hr_arr)['image']
+        lr_pipeline = A.Compose(
+            [
+                A.Resize(h_crop // self.scale, w_crop // self.scale, interpolation=cv2.INTER_CUBIC),
+            ]
+        )
+        lr_arr = lr_pipeline(image=hr_arr)["image"]
 
-        lr_tensor = self._to_tensor(image=lr_arr)['image']
-        hr_tensor = self._to_tensor(image=hr_arr)['image']
+        lr_tensor = self._to_tensor(image=lr_arr)["image"]
+        hr_tensor = self._to_tensor(image=hr_arr)["image"]
 
         return lr_tensor, hr_tensor

@@ -1,4 +1,5 @@
 """Behavior tests for RGBProcessor — no-op pass-through."""
+
 import torch
 
 from sisr.processors import RGBProcessor, SRProcessor

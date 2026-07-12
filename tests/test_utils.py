@@ -12,10 +12,10 @@ from sisr.utils import (
     ycbcr_to_rgb,
 )
 
-
 # ---------------------------------------------------------------------------
 # Colorspace utilities
 # ---------------------------------------------------------------------------
+
 
 def test_rgb_to_ycbcr_shape_and_dtype():
     x = torch.rand(2, 3, 8, 8, dtype=torch.float32)
@@ -73,8 +73,10 @@ _MAP_SIZE = 16 * 1024 * 1024  # 16 MiB — plenty for tiny test caches
 
 def _make_build_fn(n: int, value_prefix: bytes = b"v"):
     """Returns a build_fn that writes n keys named key_0..key_{n-1}."""
+
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.write_batch([(f"key_{i}", value_prefix + str(i).encode()) for i in range(n)])
+
     return build
 
 
@@ -242,6 +244,7 @@ def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
 # LMDBCacheBuildContext.parallel_build
 # ---------------------------------------------------------------------------
 
+
 def _sq_process_fn(item: int) -> list[tuple[str, bytes]]:
     """Top-level (picklable) worker: squares *item* into one keyed pair.
 
@@ -254,6 +257,7 @@ def test_parallel_build_persists_every_submitted_item(tmp_path: Path):
     """parallel_build must submit every item to the pool and persist each
     worker's returned pairs — previously only write_batch was covered, so the
     submit/collect loop was untested."""
+
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[2, 3, 4, 5], process_fn=_sq_process_fn, num_workers=2)
 
@@ -273,6 +277,7 @@ def test_parallel_build_persists_every_submitted_item(tmp_path: Path):
 def test_parallel_build_single_worker_skips_process_pool(tmp_path: Path):
     """num_workers=1 must run the build inline (no ProcessPoolExecutor), so it
     is safe to nest inside a test/xdist worker without oversubscribing cores."""
+
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[2, 3, 4], process_fn=_sq_process_fn, num_workers=1)
 
@@ -293,6 +298,7 @@ def test_parallel_build_single_worker_skips_process_pool(tmp_path: Path):
 def test_parallel_build_none_workers_builds_single_item_inline(tmp_path: Path):
     """num_workers=None must resolve to min(os.cpu_count() or 1, n_items); a lone
     item yields <= 1 effective worker and therefore an inline build."""
+
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[7], process_fn=_sq_process_fn, num_workers=None)
 

@@ -75,6 +75,7 @@ def test_train_dataloader_shuffles(tiny_rgb_image_dir: Path):
     assert isinstance(loader, DataLoader)
     # DataLoader.sampler is RandomSampler when shuffle=True.
     from torch.utils.data import RandomSampler
+
     assert isinstance(loader.sampler, RandomSampler)
 
 
@@ -219,6 +220,7 @@ def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
     )
     dm.setup(stage="fit")
     from sisr.datasets.srcnn import TrainDataset, ValidationDataset
+
     assert isinstance(dm._train_ds, TrainDataset)
     assert isinstance(dm._val_ds, ValidationDataset)
     assert isinstance(dm._test_ds["Set5"], ValidationDataset)

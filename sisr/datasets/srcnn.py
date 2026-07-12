@@ -6,15 +6,18 @@ formulation). :class:`TrainDataset` caches sliding-window sub-images
 through :class:`~sisr.utils.LMDBCache`; :class:`ValidationDataset`
 generates LR pairs on the fly for full images.
 """
-import math
+
 import hashlib
+import math
+from collections.abc import Iterator
+from pathlib import Path
+
+import albumentations as A
 import cv2
 import numpy as np
 import torch
-import albumentations as A
 from PIL import Image
-from pathlib import Path
-from collections.abc import Iterator
+
 from ..utils import LMDBCache, LMDBCacheBuildContext
 from .base import SRDataset
 
@@ -93,30 +96,32 @@ def _process_subimages(
         A flat list of ``(key_string, value_bytes)`` pairs where keys
         follow the pattern ``'lr_{idx:08d}'`` / ``'hr_{idx:08d}'``.
     """
-    arr = np.array(Image.open(path).convert('RGB'))
+    arr = np.array(Image.open(path).convert("RGB"))
     h, w = arr.shape[:2]
 
     lr_size = sub_img_size // scale
     kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
-    lr_pipeline = A.Compose([
-        A.GaussianBlur(blur_limit=(kernel, kernel), sigma_limit=(blur_sigma, blur_sigma), p=1.0),
-        A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
-        A.Resize(sub_img_size, sub_img_size, interpolation=cv2.INTER_CUBIC),
-    ])
+    lr_pipeline = A.Compose(
+        [
+            A.GaussianBlur(
+                blur_limit=(kernel, kernel), sigma_limit=(blur_sigma, blur_sigma), p=1.0
+            ),
+            A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
+            A.Resize(sub_img_size, sub_img_size, interpolation=cv2.INTER_CUBIC),
+        ]
+    )
 
     keyed_pairs = []
-    for offset, (top, left) in enumerate(
-        _iter_patch_origins(h, w, scale, sub_img_size, stride)
-    ):
+    for offset, (top, left) in enumerate(_iter_patch_origins(h, w, scale, sub_img_size, stride)):
         idx = base_idx + offset
-        hr_subimg = arr[top:top + sub_img_size, left:left + sub_img_size, :]
-        lr_subimg = lr_pipeline(image=hr_subimg)['image']
+        hr_subimg = arr[top : top + sub_img_size, left : left + sub_img_size, :]
+        lr_subimg = lr_pipeline(image=hr_subimg)["image"]
 
         hr_chw = hr_subimg.transpose(2, 0, 1)
         lr_chw = lr_subimg.transpose(2, 0, 1)
 
-        keyed_pairs.append((f'lr_{idx:08d}', lr_chw.tobytes()))
-        keyed_pairs.append((f'hr_{idx:08d}', hr_chw.tobytes()))
+        keyed_pairs.append((f"lr_{idx:08d}", lr_chw.tobytes()))
+        keyed_pairs.append((f"hr_{idx:08d}", hr_chw.tobytes()))
 
     return keyed_pairs
 
@@ -179,7 +184,7 @@ class TrainDataset(SRDataset):
         self.blur_sigma = blur_sigma
         self.build_num_workers = build_num_workers
 
-        cache_dir = Path(cache_dir) if cache_dir else self.img_dir / '.lmdb_cache'
+        cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         checksum = self._compute_checksum()
 
         self._img_offsets, total_patches = self._compute_offsets()
@@ -189,13 +194,13 @@ class TrainDataset(SRDataset):
 
         self._cache = LMDBCache(
             cache_dir=cache_dir,
-            name='srcnn_patches',
+            name="srcnn_patches",
             checksum=checksum,
             length=total_patches,
             map_size=map_size,
             metadata={
-                'channels': '3',
-                'subimg_size': str(self.sub_img_size),
+                "channels": "3",
+                "subimg_size": str(self.sub_img_size),
             },
             build_fn=self._build,
             use_tqdm=use_tqdm,
@@ -212,18 +217,18 @@ class TrainDataset(SRDataset):
         Returns:
             A hex-encoded SHA-256 digest string.
         """
-        file_manifest = ','.join(
-            f'{p.name}:{p.stat().st_size}' for p in self.img_paths
+        file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in self.img_paths)
+        canonical = "|".join(
+            [
+                file_manifest,
+                str(self.sub_img_size),
+                str(self.stride),
+                str(self.scale),
+                str(self.blur_sigma),
+                "transforms_impl=albumentations",
+            ]
         )
-        canonical = '|'.join([
-            file_manifest,
-            str(self.sub_img_size),
-            str(self.stride),
-            str(self.scale),
-            str(self.blur_sigma),
-            'transforms_impl=albumentations',
-        ])
-        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _compute_offsets(self) -> tuple[list[int], int]:
         """Reads image dimensions (without decoding pixels) to compute
@@ -240,8 +245,9 @@ class TrainDataset(SRDataset):
             img = Image.open(path)
             w, h = img.size
             img.close()
-            n = sum(1 for _ in _iter_patch_origins(
-                h, w, self.scale, self.sub_img_size, self.stride))
+            n = sum(
+                1 for _ in _iter_patch_origins(h, w, self.scale, self.sub_img_size, self.stride)
+            )
             offsets.append(offset)
             offset += n
         return offsets, offset
@@ -258,8 +264,7 @@ class TrainDataset(SRDataset):
                 :class:`LMDBCache`.
         """
         process_args = [
-            (self.sub_img_size, self.stride, self.scale,
-             self.blur_sigma, self._img_offsets[i])
+            (self.sub_img_size, self.stride, self.scale, self.blur_sigma, self._img_offsets[i])
             for i in range(len(self.img_paths))
         ]
 
@@ -291,8 +296,8 @@ class TrainDataset(SRDataset):
         C = 3
         H = W = self.sub_img_size
 
-        lr_key = f'lr_{idx:08d}'
-        hr_key = f'hr_{idx:08d}'
+        lr_key = f"lr_{idx:08d}"
+        hr_key = f"hr_{idx:08d}"
         env = self._cache.get_env()
         with env.begin(write=False, buffers=True) as txn:
             lr_buf = txn.get(lr_key.encode())
@@ -303,10 +308,8 @@ class TrainDataset(SRDataset):
                 raise KeyError(lr_key)
             if hr_buf is None:
                 raise KeyError(hr_key)
-            lr_arr = np.frombuffer(
-                lr_buf, dtype=np.uint8).reshape(C, H, W).copy()
-            hr_arr = np.frombuffer(
-                hr_buf, dtype=np.uint8).reshape(C, H, W).copy()
+            lr_arr = np.frombuffer(lr_buf, dtype=np.uint8).reshape(C, H, W).copy()
+            hr_arr = np.frombuffer(hr_buf, dtype=np.uint8).reshape(C, H, W).copy()
 
         lr_tensor = torch.tensor(lr_arr, dtype=torch.float32).div_(255.0)
         hr_tensor = torch.tensor(hr_arr, dtype=torch.float32).div_(255.0)
@@ -368,18 +371,20 @@ class ValidationDataset(SRDataset):
         lr_h = h // self.scale
         lr_w = w // self.scale
 
-        lr_pipeline = A.Compose([
-            A.GaussianBlur(
-                blur_limit=(self._kernel, self._kernel),
-                sigma_limit=(self.blur_sigma, self.blur_sigma),
-                p=1.0,
-            ),
-            A.Resize(lr_h, lr_w, interpolation=cv2.INTER_CUBIC),
-            A.Resize(h, w, interpolation=cv2.INTER_CUBIC),
-        ])
-        lr_arr = lr_pipeline(image=arr)['image']
+        lr_pipeline = A.Compose(
+            [
+                A.GaussianBlur(
+                    blur_limit=(self._kernel, self._kernel),
+                    sigma_limit=(self.blur_sigma, self.blur_sigma),
+                    p=1.0,
+                ),
+                A.Resize(lr_h, lr_w, interpolation=cv2.INTER_CUBIC),
+                A.Resize(h, w, interpolation=cv2.INTER_CUBIC),
+            ]
+        )
+        lr_arr = lr_pipeline(image=arr)["image"]
 
-        lr_tensor = self._to_tensor(image=lr_arr)['image']
-        hr_tensor = self._to_tensor(image=arr)['image']
+        lr_tensor = self._to_tensor(image=lr_arr)["image"]
+        hr_tensor = self._to_tensor(image=arr)["image"]
 
         return lr_tensor, hr_tensor

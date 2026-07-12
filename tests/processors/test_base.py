@@ -1,4 +1,5 @@
 """Contract tests for SRProcessor — the abstract base for colorspace adapters."""
+
 import pytest
 import torch
 
@@ -13,14 +14,17 @@ def test_srprocessor_is_abstract():
 
 def test_srprocessor_subclass_must_implement_both_methods():
     """A subclass missing either abstract method also raises on instantiation."""
+
     class _ExtractOnly(SRProcessor):
-        def extract(self, lr_rgb): return lr_rgb
+        def extract(self, lr_rgb):
+            return lr_rgb
 
     with pytest.raises(TypeError, match="abstract"):
         _ExtractOnly()
 
     class _ReconstructOnly(SRProcessor):
-        def reconstruct(self, sr_model_out, lr_rgb): return sr_model_out
+        def reconstruct(self, sr_model_out, lr_rgb):
+            return sr_model_out
 
     with pytest.raises(TypeError, match="abstract"):
         _ReconstructOnly()
@@ -28,9 +32,13 @@ def test_srprocessor_subclass_must_implement_both_methods():
 
 def test_srprocessor_complete_subclass_instantiates():
     """Subclass implementing both abstract methods can be instantiated."""
+
     class _Complete(SRProcessor):
-        def extract(self, lr_rgb): return lr_rgb
-        def reconstruct(self, sr_model_out, lr_rgb): return sr_model_out
+        def extract(self, lr_rgb):
+            return lr_rgb
+
+        def reconstruct(self, sr_model_out, lr_rgb):
+            return sr_model_out
 
     p = _Complete()
     assert isinstance(p, SRProcessor)

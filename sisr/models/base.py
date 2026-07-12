@@ -1,4 +1,5 @@
 """Abstract base class for single-image super-resolution architectures."""
+
 import abc
 
 import torch

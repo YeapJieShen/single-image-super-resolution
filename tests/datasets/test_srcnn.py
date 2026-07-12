@@ -8,10 +8,10 @@ from PIL import Image
 
 from sisr.datasets.srcnn import TrainDataset, ValidationDataset
 
-
 # ---------------------------------------------------------------------------
 # TrainDataset
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def shared_srcnn_train_ds(tmp_path_factory) -> TrainDataset:
@@ -100,19 +100,20 @@ def test_train_dataset_checksum_includes_transforms_impl_tag(shared_srcnn_train_
     """The checksum input must include 'transforms_impl=albumentations' so caches
     built under the old PIL implementation invalidate automatically on upgrade."""
     import hashlib
+
     ds = shared_srcnn_train_ds
-    file_manifest = ','.join(
-        f'{p.name}:{p.stat().st_size}' for p in ds.img_paths
+    file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in ds.img_paths)
+    expected_canonical = "|".join(
+        [
+            file_manifest,
+            "20",  # subimg_size
+            "8",  # stride
+            "2",  # scale
+            "1.0",  # blur_sigma
+            "transforms_impl=albumentations",
+        ]
     )
-    expected_canonical = '|'.join([
-        file_manifest,
-        '20',     # subimg_size
-        '8',      # stride
-        '2',      # scale
-        '1.0',    # blur_sigma
-        'transforms_impl=albumentations',
-    ])
-    expected = hashlib.sha256(expected_canonical.encode('utf-8')).hexdigest()
+    expected = hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest()
     assert ds._compute_checksum() == expected, (
         "checksum must include the 'transforms_impl=albumentations' tag — "
         "without it, caches built under the PIL implementation would be reused."
@@ -144,8 +145,7 @@ def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Pat
     ProcessPoolExecutor), so the one-time build is safe inside a test/xdist
     worker instead of nesting an 8-process pool."""
     with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
-        ds = _make_train(
-            tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
+        ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
     mock_pool.assert_not_called()
     assert len(ds) > 0
     lr, hr = ds[0]
@@ -159,8 +159,7 @@ def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
     misalign the LMDB lr_/hr_ keys."""
     from sisr.datasets.srcnn import _iter_patch_origins, _process_subimages
 
-    ds = _make_train(
-        tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
     _, total = ds._compute_offsets()
 
     # The worker's actual emitted pairs (one lr + one hr per patch) across every
@@ -182,6 +181,7 @@ def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
 # ---------------------------------------------------------------------------
 # ValidationDataset
 # ---------------------------------------------------------------------------
+
 
 def test_validation_dataset_serves_full_image_pairs(tiny_rgb_image_dir: Path):
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
@@ -222,8 +222,10 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
 # SRDataset contract (P3.6 / P5.4)
 # ---------------------------------------------------------------------------
 
+
 def test_srcnn_datasets_are_srdataset_subclasses():
     from sisr.datasets.base import SRDataset
+
     assert issubclass(TrainDataset, SRDataset)
     assert issubclass(ValidationDataset, SRDataset)
 

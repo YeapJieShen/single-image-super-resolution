@@ -6,9 +6,10 @@ from sisr.models.srresnet.model import SRResidualBlock, SRResNet, SRUpsampleBloc
 
 def test_package_reexports_public_symbols():
     """SRResNet et al. are importable from the package, not just .model."""
-    from sisr.models.srresnet import SRResNet as PkgSRResNet
     from sisr.models.srresnet import SRResidualBlock as PkgBlock
+    from sisr.models.srresnet import SRResNet as PkgSRResNet
     from sisr.models.srresnet import SRUpsampleBlock as PkgUpsample
+
     assert PkgSRResNet is SRResNet
     assert PkgBlock is SRResidualBlock
     assert PkgUpsample is SRUpsampleBlock
@@ -90,9 +91,9 @@ def test_residual_block_is_identity_when_branch_zeroed():
     torch.manual_seed(0)
     block = SRResidualBlock(channels=16, kernel_size=3).eval()
     with torch.no_grad():
-        block.block2[0].weight.zero_()   # block2 = Sequential(Conv2d, BatchNorm2d)
+        block.block2[0].weight.zero_()  # block2 = Sequential(Conv2d, BatchNorm2d)
         block.block2[0].bias.zero_()
-    x = torch.rand(1, 16, 4, 4)           # random, non-zero: identity must survive
+    x = torch.rand(1, 16, 4, 4)  # random, non-zero: identity must survive
     with torch.no_grad():
         out = block(x)
     torch.testing.assert_close(out, x, atol=1e-6, rtol=0)

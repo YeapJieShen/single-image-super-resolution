@@ -9,7 +9,7 @@ def test_sr_training_config_defaults():
     cfg = SRTrainingConfig()
     assert cfg.layer_lrs is None
     assert cfg.example_input_shape is None
-    assert cfg.init_strategy == 'default'
+    assert cfg.init_strategy == "default"
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
 

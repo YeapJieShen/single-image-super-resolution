@@ -7,14 +7,16 @@ N val cycles) and ``cli test`` (one-shot final eval).
 training signals; :class:`SRCheckpoint` is a thin
 :class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics.
 """
+
 import math
+from typing import Any
+
+import lightning
 import torch
 import torch.nn.functional
 import torchmetrics.functional
 import torchvision
-import lightning
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from typing import Any
 
 
 class BenchmarkImageLogger(Callback):
@@ -171,9 +173,7 @@ class BenchmarkImageLogger(Callback):
             should_log_images=self._on_image_log_interval(),
         )
 
-    def on_test_epoch_start(
-        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
-    ):
+    def on_test_epoch_start(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Clear buffers ahead of a test run.
 
         Args:
@@ -223,9 +223,7 @@ class BenchmarkImageLogger(Callback):
             should_log_images=True,
         )
 
-    def on_test_epoch_end(
-        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
-    ):
+    def on_test_epoch_end(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Log per-set means and image strips at the end of ``cli test``.
 
         Args:
@@ -304,14 +302,16 @@ class BenchmarkImageLogger(Callback):
             ssim = torchmetrics.functional.image.structural_similarity_index_measure(
                 sr_4d, hr_4d, data_range=1.0
             )
-            self._buffer[dataset_name].append((
-                filename,
-                lr_img[i].cpu() if should_log_images else None,
-                sr[i].cpu() if should_log_images else None,
-                hr_img[i].cpu() if should_log_images else None,
-                psnr_dict,
-                ssim.item(),
-            ))
+            self._buffer[dataset_name].append(
+                (
+                    filename,
+                    lr_img[i].cpu() if should_log_images else None,
+                    sr[i].cpu() if should_log_images else None,
+                    hr_img[i].cpu() if should_log_images else None,
+                    psnr_dict,
+                    ssim.item(),
+                )
+            )
 
     def _flush_buffer(
         self,
@@ -350,8 +350,11 @@ class BenchmarkImageLogger(Callback):
 
             if should_log_images:
                 tb_logger = next(
-                    (l for l in trainer.loggers
-                     if isinstance(l, lightning.pytorch.loggers.TensorBoardLogger)),
+                    (
+                        logger
+                        for logger in trainer.loggers
+                        if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
+                    ),
                     None,
                 )
                 if tb_logger is None:
@@ -360,7 +363,9 @@ class BenchmarkImageLogger(Callback):
                 experiment = tb_logger.experiment
                 for filename, lr, sr, hr, psnr_dict, ssim in samples:
                     for key, psnr_val in psnr_dict.items():
-                        experiment.add_scalar(f"{dataset_name}_psnr({key})/{filename}", psnr_val, global_step=step)
+                        experiment.add_scalar(
+                            f"{dataset_name}_psnr({key})/{filename}", psnr_val, global_step=step
+                        )
                     experiment.add_scalar(f"{dataset_name}_ssim/{filename}", ssim, global_step=step)
 
                     # Triptych: bicubic | SR | HR, all at HR size.
@@ -422,7 +427,8 @@ class BenchmarkImageLogger(Callback):
         img = torch.nn.functional.pad(img, (pad_lr, pad_lr, pad_ud, pad_ud), value=0.0)
 
         if img.shape[1] != target_h or img.shape[2] != target_w:
-            # If target size is odd and img is even (or vice versa), add one more pixel of padding to the right/bottom
+            # If target size is odd and img is even (or vice versa), add one more pixel of
+            # padding to the right/bottom
             pad_right = target_w - img.shape[2]
             pad_bottom = target_h - img.shape[1]
             img = torch.nn.functional.pad(img, (0, pad_right, 0, pad_bottom), value=0.0)
@@ -445,9 +451,7 @@ class GradNormLogger(Callback):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
-    def on_after_backward(
-        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
-    ):
+    def on_after_backward(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Compute and log gradient norm if on the right step cadence.
 
         Args:
@@ -463,7 +467,7 @@ class GradNormLogger(Callback):
                 total_norm_sq += p.grad.data.norm(2).item() ** 2
         total_norm = math.sqrt(total_norm_sq)
 
-        pl_module.log('grad_norm', total_norm, on_step=True, on_epoch=False)
+        pl_module.log("grad_norm", total_norm, on_step=True, on_epoch=False)
 
 
 class WeightHistogramLogger(Callback):
@@ -480,7 +484,12 @@ class WeightHistogramLogger(Callback):
         self.log_every_n_steps = log_every_n_steps
 
     def on_train_batch_end(
-        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule, outputs: Any, batch: Any, batch_idx: int
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
     ):
         """Log grouped weights as histograms if on the right step cadence.
 
@@ -495,7 +504,11 @@ class WeightHistogramLogger(Callback):
             return
 
         tb_logger = next(
-            (l for l in trainer.loggers if isinstance(l, lightning.pytorch.loggers.TensorBoardLogger)),
+            (
+                logger
+                for logger in trainer.loggers
+                if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
+            ),
             None,
         )
         if tb_logger is None:
@@ -505,7 +518,7 @@ class WeightHistogramLogger(Callback):
 
         for name, param in pl_module.named_parameters():
             if param.requires_grad and name.startswith("model."):
-                parts = name.split('.', 2)
+                parts = name.split(".", 2)
                 tb_name = parts[0] + "." + "/".join(parts[1:])
                 experiment.add_histogram(tb_name, param, global_step=trainer.global_step)
 
@@ -534,11 +547,11 @@ class SRCheckpoint(ModelCheckpoint):
 
     def __init__(
         self,
-        monitor_metric: str = 'val_psnr(RGB)',
+        monitor_metric: str = "val_psnr(RGB)",
         save_top_k: int = 3,
         dirpath: str | None = None,
-        filename_prefix: str = 'srcnn',
-        mode: str = 'max',
+        filename_prefix: str = "srcnn",
+        mode: str = "max",
         **kwargs: Any,
     ):
         filename = f"{filename_prefix}-{{step}}-{{{monitor_metric}:.4f}}"

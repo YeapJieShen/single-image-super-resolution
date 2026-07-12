@@ -1,4 +1,5 @@
 """Abstract base class for per-batch colorspace adapters."""
+
 import abc
 
 import torch
@@ -18,7 +19,5 @@ class SRProcessor(abc.ABC):
         """Convert dataset LR (RGB, ``[B, 3, H, W]``) into the model's input tensor."""
 
     @abc.abstractmethod
-    def reconstruct(
-        self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor
-    ) -> torch.Tensor:
+    def reconstruct(self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         """Convert the model's output tensor back to SR RGB (``[B, 3, H', W']``)."""

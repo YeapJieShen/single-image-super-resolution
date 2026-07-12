@@ -1,4 +1,5 @@
 """Y-channel processor: extract Y from LR, stitch SR-Y with bicubic LR Cb/Cr."""
+
 import torch
 import torch.nn.functional as F
 
@@ -19,9 +20,7 @@ class YChannelProcessor(SRProcessor):
     def extract(self, lr_rgb: torch.Tensor) -> torch.Tensor:
         return rgb_to_ycbcr(lr_rgb)[:, 0:1]
 
-    def reconstruct(
-        self, sr_y: torch.Tensor, lr_rgb: torch.Tensor
-    ) -> torch.Tensor:
+    def reconstruct(self, sr_y: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         lr_ycbcr = rgb_to_ycbcr(lr_rgb)
         cbcr = F.interpolate(
             lr_ycbcr[:, 1:],
