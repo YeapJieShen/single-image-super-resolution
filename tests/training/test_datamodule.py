@@ -18,6 +18,7 @@ def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
             "blur_sigma": 1.0,
             "use_tqdm": False,
             "cache_dir": str(image_dir / ".lmdb_cache_train"),
+            "build_num_workers": 1,
         },
     }
     val_spec = {
@@ -110,6 +111,7 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
             "blur_sigma": 1.0,
             "use_tqdm": False,
             "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_fb"),
+            "build_num_workers": 1,
         },
     }
     val_spec = {
@@ -139,6 +141,7 @@ def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir
             "blur_sigma": 1.0,
             "use_tqdm": False,
             "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_only_primary"),
+            "build_num_workers": 1,
         },
     }
     val_spec = {
@@ -195,6 +198,7 @@ def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
             "blur_sigma": 1.0,
             "use_tqdm": False,
             "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_train_cp"),
+            "build_num_workers": 1,
         },
     }
     val_spec = {
