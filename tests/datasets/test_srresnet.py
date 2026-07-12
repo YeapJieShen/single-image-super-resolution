@@ -87,3 +87,21 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
     lr_b, hr_b = ds[0]
     assert torch.equal(lr_a, lr_b), "validation LR must be deterministic"
     assert torch.equal(hr_a, hr_b), "validation HR must be deterministic"
+
+
+# ---------------------------------------------------------------------------
+# SRDataset contract (P3.6 / P5.4)
+# ---------------------------------------------------------------------------
+
+def test_srresnet_datasets_are_srdataset_subclasses():
+    from sisr.datasets.base import SRDataset
+    assert issubclass(TrainDataset, SRDataset)
+    assert issubclass(ValidationDataset, SRDataset)
+
+
+def test_srresnet_validation_skips_non_image_files(tiny_rgb_image_dir: Path):
+    (tiny_rgb_image_dir / "notes.txt").write_text("not an image")
+    (tiny_rgb_image_dir / "MANIFEST").write_text("extensionless")
+    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
+    assert len(ds) == 3
+    assert all(p.suffix == ".png" for p in ds.img_paths)
