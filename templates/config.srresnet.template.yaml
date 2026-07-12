@@ -57,10 +57,6 @@ data:
     batch_size: 1
     num_workers: 2
     persistent_workers: true
-  test_dataloader_kwargs:
-    batch_size: 1
-    num_workers: 2
-    persistent_workers: true
 
 trainer:
   max_epochs: -1
