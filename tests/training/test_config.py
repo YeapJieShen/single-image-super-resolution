@@ -1,5 +1,7 @@
 from dataclasses import fields
 
+import pytest
+
 from sisr.training import SREvalConfig, SRTrainingConfig
 
 
@@ -36,3 +38,12 @@ def test_sr_training_config_field_names():
 def test_sr_eval_config_field_names():
     names = {f.name for f in fields(SREvalConfig)}
     assert names == {"crop_border", "psnr_channels", "separate_psnr"}
+
+
+def test_eval_config_rejects_unknown_psnr_channel():
+    """Regression (P2.3): a colorspace outside {RGB, YCbCr} fails fast at
+    construction with an actionable message — not an opaque KeyError deep in
+    SRLightning."""
+    SREvalConfig(psnr_channels=["RGB", "YCbCr"])  # valid — must not raise
+    with pytest.raises(ValueError, match="psnr_channels"):
+        SREvalConfig(psnr_channels=["RGB", "HSV"])

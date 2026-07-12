@@ -84,3 +84,19 @@ class SREvalConfig:
     crop_border: int = 0
     psnr_channels: list[str] = field(default_factory=lambda: ['RGB'])
     separate_psnr: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate ``psnr_channels`` at construction.
+
+        Raises:
+            ValueError: If any entry is not a supported colorspace
+                (``'RGB'`` or ``'YCbCr'``).
+        """
+        valid = ('RGB', 'YCbCr')
+        invalid = [c for c in self.psnr_channels if c not in valid]
+        if invalid:
+            raise ValueError(
+                f"SREvalConfig.psnr_channels entries must be one of "
+                f"{list(valid)}; got unsupported {invalid}. Fix "
+                f"model.eval_config.init_args.psnr_channels in your YAML."
+            )
