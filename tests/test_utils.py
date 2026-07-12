@@ -236,3 +236,35 @@ def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
     with patch("sisr.utils.lmdb.open", side_effect=ValueError("unexpected")):
         with pytest.raises(ValueError, match="unexpected"):
             cache._try_load("abc")
+
+
+# ---------------------------------------------------------------------------
+# LMDBCacheBuildContext.parallel_build
+# ---------------------------------------------------------------------------
+
+def _sq_process_fn(item: int) -> list[tuple[str, bytes]]:
+    """Top-level (picklable) worker: squares *item* into one keyed pair.
+
+    Must be module-level so ProcessPoolExecutor can pickle it on spawn platforms.
+    """
+    return [(f"n_{item}", str(item * item).encode())]
+
+
+def test_parallel_build_persists_every_submitted_item(tmp_path: Path):
+    """parallel_build must submit every item to the pool and persist each
+    worker's returned pairs — previously only write_batch was covered, so the
+    submit/collect loop was untested."""
+    def build(ctx: LMDBCacheBuildContext) -> None:
+        ctx.parallel_build(items=[2, 3, 4, 5], process_fn=_sq_process_fn, num_workers=2)
+
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="pb",
+        checksum="c",
+        length=4,
+        map_size=_MAP_SIZE,
+        build_fn=build,
+    )
+    assert cache.length == 4
+    assert cache.get("n_2") == b"4"
+    assert cache.get("n_5") == b"25"
