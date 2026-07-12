@@ -12,11 +12,11 @@ import cv2
 import numpy as np
 import torch
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from pathlib import Path
 from collections.abc import Iterator
 from ..utils import LMDBCache, LMDBCacheBuildContext
+from .base import SRDataset
 
 
 def _iter_patch_origins(
@@ -121,7 +121,7 @@ def _process_subimages(
     return keyed_pairs
 
 
-class TrainDataset(torch.utils.data.Dataset):
+class TrainDataset(SRDataset):
     """Dataset that serves precomputed LR/HR sub-image pairs from an LMDB cache.
 
     On first instantiation with a given set of parameters the dataset
@@ -172,17 +172,12 @@ class TrainDataset(torch.utils.data.Dataset):
     ):
         super().__init__()
 
-        self.img_dir = Path(img_dir)
+        self._index_images(img_dir)
         self.sub_img_size = subimg_size
         self.stride = stride
         self.scale = scale
         self.blur_sigma = blur_sigma
         self.build_num_workers = build_num_workers
-
-        self.img_paths = sorted(
-            [p for p in self.img_dir.glob('*.*') if p.is_file()])
-        if not self.img_paths:
-            raise ValueError(f"No images found in {img_dir}")
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / '.lmdb_cache'
         checksum = self._compute_checksum()
@@ -319,7 +314,7 @@ class TrainDataset(torch.utils.data.Dataset):
         return lr_tensor, hr_tensor
 
 
-class ValidationDataset(torch.utils.data.Dataset):
+class ValidationDataset(SRDataset):
     """Dataset that serves full-image LR/HR pairs for validation.
 
     Unlike :class:`TrainDataset` this dataset does not extract sub-images.
@@ -347,20 +342,12 @@ class ValidationDataset(torch.utils.data.Dataset):
     ):
         super().__init__()
 
-        self.img_dir = Path(img_dir)
+        self._index_images(img_dir)
         self.scale = scale
         self.blur_sigma = blur_sigma
 
-        self.img_paths = sorted(
-            [p for p in self.img_dir.glob('*.*') if p.is_file()])
-        if not self.img_paths:
-            raise ValueError(f"No images found in {img_dir}")
-
         self._kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
-        self._to_tensor = A.Compose([
-            A.ToFloat(max_value=255.0),
-            ToTensorV2(),
-        ])
+        self._to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -376,7 +363,7 @@ class ValidationDataset(torch.utils.data.Dataset):
             with shape ``(C, H, W)`` and values in ``[0, 1]``.
         """
         path = self.img_paths[idx]
-        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
+        arr = self._load_rgb(path)  # HWC uint8 RGB
         h, w = arr.shape[:2]
         lr_h = h // self.scale
         lr_w = w // self.scale

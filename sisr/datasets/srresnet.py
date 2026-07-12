@@ -7,15 +7,14 @@ cacheable); :class:`ValidationDataset` serves full images cropped to a
 multiple of ``scale``.
 """
 import cv2
-import numpy as np
 import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from PIL import Image
 from pathlib import Path
+from .base import SRDataset
 
 
-class TrainDataset(torch.utils.data.Dataset):
+class TrainDataset(SRDataset):
     """Random-crop HR/LR pairs for SRResNet-style training (AlbumentationsX backend).
 
     Each ``__getitem__`` takes a random ``hr_crop_size`` square crop from an
@@ -62,15 +61,10 @@ class TrainDataset(torch.utils.data.Dataset):
                 f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({scale})."
             )
 
-        self.img_dir = Path(img_dir)
+        self._index_images(img_dir)
         self.scale = scale
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
-
-        self.img_paths = sorted(
-            [p for p in self.img_dir.glob('*.*') if p.is_file()])
-        if not self.img_paths:
-            raise ValueError(f"No images found in {img_dir}")
 
         lr_size = hr_crop_size // scale
         self._hr_crop = A.Compose([A.RandomCrop(hr_crop_size, hr_crop_size)])
@@ -79,10 +73,7 @@ class TrainDataset(torch.utils.data.Dataset):
             A.ToFloat(max_value=255.0),
             ToTensorV2(),
         ])
-        self._hr_to_tensor = A.Compose([
-            A.ToFloat(max_value=255.0),
-            ToTensorV2(),
-        ])
+        self._hr_to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
         return len(self.img_paths) * self.crops_per_image
@@ -96,7 +87,7 @@ class TrainDataset(torch.utils.data.Dataset):
         with shape ``(3, H, W)``.
         """
         path = self.img_paths[idx % len(self.img_paths)]
-        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
+        arr = self._load_rgb(path)  # HWC uint8 RGB
 
         h, w = arr.shape[:2]
         if w < self.hr_crop_size or h < self.hr_crop_size:
@@ -112,7 +103,7 @@ class TrainDataset(torch.utils.data.Dataset):
         return lr_tensor, hr_tensor
 
 
-class ValidationDataset(torch.utils.data.Dataset):
+class ValidationDataset(SRDataset):
     """Full-image HR with bicubic-downsampled LR for SRResNet validation/test
     (AlbumentationsX backend).
 
@@ -132,18 +123,10 @@ class ValidationDataset(torch.utils.data.Dataset):
     def __init__(self, img_dir: str | Path, scale: int):
         super().__init__()
 
-        self.img_dir = Path(img_dir)
+        self._index_images(img_dir)
         self.scale = scale
 
-        self.img_paths = sorted(
-            [p for p in self.img_dir.glob('*.*') if p.is_file()])
-        if not self.img_paths:
-            raise ValueError(f"No images found in {img_dir}")
-
-        self._to_tensor = A.Compose([
-            A.ToFloat(max_value=255.0),
-            ToTensorV2(),
-        ])
+        self._to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -156,7 +139,7 @@ class ValidationDataset(torch.utils.data.Dataset):
         ``float32`` in ``[0, 1]``.
         """
         path = self.img_paths[idx]
-        arr = np.array(Image.open(path).convert('RGB'))  # HWC uint8 RGB
+        arr = self._load_rgb(path)  # HWC uint8 RGB
 
         h, w = arr.shape[:2]
         h_crop = h - (h % self.scale)
