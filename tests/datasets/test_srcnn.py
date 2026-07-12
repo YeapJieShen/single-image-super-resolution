@@ -13,6 +13,32 @@ from sisr.datasets.srcnn import TrainDataset, ValidationDataset
 # TrainDataset
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="module")
+def shared_srcnn_train_ds(tmp_path_factory) -> TrainDataset:
+    """One inline-built SRCNN train cache (subimg_size=20, stride=8) shared by
+    every read-only test in this module.
+
+    Module-scoped so the LMDB build runs once instead of once per test;
+    build_num_workers=1 forces PR 1's inline (no ProcessPool) build path, which
+    keeps it safe when the whole run is under pytest-xdist workers.
+    """
+    img_dir = tmp_path_factory.mktemp("shared_srcnn_hr")
+    rng = np.random.default_rng(seed=0)
+    for i in range(3):
+        arr = rng.integers(0, 256, size=(36, 36, 3), dtype=np.uint8)
+        Image.fromarray(arr).save(img_dir / f"img_{i:02d}.png")
+    return TrainDataset(
+        img_dir=img_dir,
+        subimg_size=20,
+        stride=8,
+        scale=2,
+        blur_sigma=1.0,
+        use_tqdm=False,
+        cache_dir=img_dir / ".lmdb_cache_shared",
+        build_num_workers=1,
+    )
+
+
 def _make_train(image_dir: Path, **overrides) -> TrainDataset:
     defaults = {
         "img_dir": image_dir,
@@ -22,19 +48,18 @@ def _make_train(image_dir: Path, **overrides) -> TrainDataset:
         "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": image_dir / ".lmdb_cache_train",
+        "build_num_workers": 1,
     }
     defaults.update(overrides)
     return TrainDataset(**defaults)
 
 
-def test_train_dataset_builds_and_len_positive(tiny_rgb_image_dir: Path):
-    ds = _make_train(tiny_rgb_image_dir)
-    assert len(ds) > 0
+def test_train_dataset_builds_and_len_positive(shared_srcnn_train_ds: TrainDataset):
+    assert len(shared_srcnn_train_ds) > 0
 
 
-def test_train_dataset_getitem_shape_dtype_range(tiny_rgb_image_dir: Path):
-    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
-    lr, hr = ds[0]
+def test_train_dataset_getitem_shape_dtype_range(shared_srcnn_train_ds: TrainDataset):
+    lr, hr = shared_srcnn_train_ds[0]
     assert lr.shape == (3, 20, 20)
     assert hr.shape == (3, 20, 20)
     assert lr.dtype == torch.float32
@@ -43,12 +68,11 @@ def test_train_dataset_getitem_shape_dtype_range(tiny_rgb_image_dir: Path):
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
 
-def test_train_dataset_missing_key_raises_keyerror(tiny_rgb_image_dir: Path):
+def test_train_dataset_missing_key_raises_keyerror(shared_srcnn_train_ds: TrainDataset):
     """A missing LMDB key (here, an out-of-range index) surfaces as a KeyError
     naming the key, not a cryptic numpy TypeError from np.frombuffer(None)."""
-    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
     with pytest.raises(KeyError, match=r"lr_\d{8}"):
-        ds[len(ds) + 100]
+        shared_srcnn_train_ds[len(shared_srcnn_train_ds) + 100]
 
 
 def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
@@ -72,14 +96,11 @@ def test_train_dataset_checksum_change_triggers_rebuild(tiny_rgb_image_dir: Path
     assert len(ds_a) != len(ds_b), "different subimg_size must yield different patch counts"
 
 
-def test_train_dataset_checksum_includes_transforms_impl_tag(tiny_rgb_image_dir: Path):
+def test_train_dataset_checksum_includes_transforms_impl_tag(shared_srcnn_train_ds: TrainDataset):
     """The checksum input must include 'transforms_impl=albumentations' so caches
     built under the old PIL implementation invalidate automatically on upgrade."""
-    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
-    # The canonical hash input is built inside _compute_checksum from these
-    # fields plus the tag. We verify by recomputing what _compute_checksum
-    # should produce and comparing.
     import hashlib
+    ds = shared_srcnn_train_ds
     file_manifest = ','.join(
         f'{p.name}:{p.stat().st_size}' for p in ds.img_paths
     )
