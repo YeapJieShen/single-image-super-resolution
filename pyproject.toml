@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "single-image-super-resolution"
-version = "0.1.0"
+dynamic = ["version"]
 description = "PyTorch Lightning framework for single-image super-resolution: SRCNN, SRResNet, and a generic LightningCLI training stack."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -76,6 +76,9 @@ sisr = "sisr.cli:main"
 homepage = "https://github.com/YeapJieShen/single-image-super-resolution"
 repository = "https://github.com/YeapJieShen/single-image-super-resolution"
 issues = "https://github.com/YeapJieShen/single-image-super-resolution/issues"
+
+[tool.hatch.version]
+path = "sisr/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sisr"]
