@@ -452,3 +452,36 @@ def test_saved_hparams_contain_processor_name():
     )
     # Lightning's self.hparams is a flat dict after the _flatten_hparams step.
     assert lit.hparams.get("processor") == "RGBProcessor"
+
+
+# ---------------------------------------------------------------------------
+# predict_rgb public inference seam (P2.1)
+# ---------------------------------------------------------------------------
+
+def test_predict_rgb_returns_sr_and_hr_pair(srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch):
+    lr, hr = rgb_lr_hr_batch
+    sr_rgb, hr_cropped = srcnn_rgb_lit.predict_rgb(lr, hr)
+    # SRCNN with valid padding: 33 -> 21; HR center-cropped to match.
+    assert sr_rgb.shape == (2, 3, 21, 21)
+    assert hr_cropped.shape == (2, 3, 21, 21)
+
+
+def test_predict_rgb_matches_step_forward_path(srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch):
+    """predict_rgb must produce the exact sr_rgb / hr_cropped that _step
+    returns — both route through the single _forward_sr core, so the training
+    and benchmark-logging paths cannot diverge."""
+    lr, hr = rgb_lr_hr_batch
+    _, _, _, step_sr, step_hr = srcnn_rgb_lit._step((lr, hr))
+    pred_sr, pred_hr = srcnn_rgb_lit.predict_rgb(lr, hr)
+    torch.testing.assert_close(pred_sr, step_sr)
+    torch.testing.assert_close(pred_hr, step_hr)
+
+
+def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightning, rgb_lr_hr_batch):
+    """Same invariant on the Y-channel path (reconstruct stitches SR-Y with
+    bicubic Cb/Cr) — the reconstructed RGB must be identical across paths."""
+    lr, hr = rgb_lr_hr_batch
+    _, _, _, step_sr, step_hr = srcnn_y_lit._step((lr, hr))
+    pred_sr, pred_hr = srcnn_y_lit.predict_rgb(lr, hr)
+    torch.testing.assert_close(pred_sr, step_sr)
+    torch.testing.assert_close(pred_hr, step_hr)

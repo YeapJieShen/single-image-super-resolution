@@ -526,3 +526,68 @@ def test_benchmark_collect_batch_routes_through_processor():
     assert "RGB" in psnr_dict
     assert "YCbCr" in psnr_dict
     assert isinstance(ssim, float)
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkImageLogger consumes the public predict_rgb seam + SRDataset (P2.1)
+# ---------------------------------------------------------------------------
+
+def test_benchmark_collect_batch_routes_through_predict_rgb():
+    """_collect_batch must call the public pl_module.predict_rgb, and the
+    buffered SR/HR must equal its output — proving no re-implemented, divergent
+    forward path remains in the callback."""
+    from unittest.mock import MagicMock
+
+    pl_module = _make_real_pl_module()  # SRCNN + RGBProcessor, crop_border=0
+    batch = (torch.rand(2, 3, 16, 16), torch.rand(2, 3, 16, 16))
+    with torch.no_grad():
+        ref_sr, ref_hr = pl_module.predict_rgb(*batch)
+
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=2, name="Set5")
+    trainer = SimpleNamespace(
+        val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],
+    )
+    cb.on_validation_batch_end(
+        trainer=trainer, pl_module=pl_module, outputs=None,
+        batch=batch, batch_idx=0, dataloader_idx=1,
+    )
+
+    spy.assert_called_once()
+    call_args, _ = spy.call_args
+    torch.testing.assert_close(call_args[0], batch[0])
+    torch.testing.assert_close(call_args[1], batch[1])
+    # Buffered SR/HR (uncropped, crop_border=0) match the public forward output.
+    _, _, sr0, hr0, _, _ = cb._buffer["Set5"][0]
+    torch.testing.assert_close(sr0, ref_sr[0].cpu())
+    torch.testing.assert_close(hr0, ref_hr[0].cpu())
+
+
+def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir: Path):
+    """The callback resolves filenames from a real SRDataset's declared
+    .img_paths contract (not a duck-typed attr)."""
+    from sisr.datasets.base import SRDataset
+    from sisr.datasets.srresnet import ValidationDataset
+
+    ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
+    assert isinstance(ds, SRDataset)
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = _make_real_pl_module()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    trainer = SimpleNamespace(
+        val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],
+    )
+    batch = (torch.rand(2, 3, 16, 16), torch.rand(2, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer, pl_module=pl_module, outputs=None,
+        batch=batch, batch_idx=0, dataloader_idx=1,
+    )
+    fnames = [entry[0] for entry in cb._buffer["Set5"]]
+    assert fnames == [p.stem for p in ds.img_paths[:2]]  # e.g. ["img_00", "img_01"]
