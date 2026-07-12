@@ -119,6 +119,11 @@ class TrainDataset(torch.utils.data.Dataset):
             build.  Defaults to ``False``.
         cache_dir (str | Path | None): Directory in which to store the
             LMDB cache.  Defaults to ``img_dir / '.lmdb_cache'``.
+        build_num_workers (int | None): Number of worker processes for the
+            one-time LMDB build.  ``None`` (default) uses
+            ``min(os.cpu_count() or 1, num_images)``; a value that resolves to
+            ``<= 1`` effective workers runs an inline, no-subprocess build.
+            Only affects cache construction, not data loading.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``.
@@ -133,6 +138,7 @@ class TrainDataset(torch.utils.data.Dataset):
         blur_sigma: float = 1.0,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
+        build_num_workers: int | None = None,
     ):
         super().__init__()
 
@@ -141,6 +147,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.stride = stride
         self.scale = scale
         self.blur_sigma = blur_sigma
+        self.build_num_workers = build_num_workers
 
         self.img_paths = sorted(
             [p for p in self.img_dir.glob('*.*') if p.is_file()])
@@ -237,7 +244,7 @@ class TrainDataset(torch.utils.data.Dataset):
             items=self.img_paths,
             process_fn=_process_subimages,
             process_args=process_args,
-            num_workers=8,
+            num_workers=self.build_num_workers,
             desc="Building LMDB cache",
         )
 

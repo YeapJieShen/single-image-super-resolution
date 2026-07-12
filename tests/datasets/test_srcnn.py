@@ -118,6 +118,20 @@ def test_train_dataset_rejects_channels_param(tiny_rgb_image_dir: Path):
         _make_train(tiny_rgb_image_dir, channels="L", subimg_size=20, stride=8)
 
 
+def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Path):
+    """build_num_workers=1 must thread through to an inline LMDB build (no
+    ProcessPoolExecutor), so the one-time build is safe inside a test/xdist
+    worker instead of nesting an 8-process pool."""
+    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+        ds = _make_train(
+            tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
+    mock_pool.assert_not_called()
+    assert len(ds) > 0
+    lr, hr = ds[0]
+    assert lr.shape == (3, 20, 20)
+    assert hr.shape == (3, 20, 20)
+
+
 # ---------------------------------------------------------------------------
 # ValidationDataset
 # ---------------------------------------------------------------------------
