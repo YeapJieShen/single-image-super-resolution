@@ -12,16 +12,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  test-matrix:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
@@ -29,16 +34,26 @@ jobs:
       - name: Run tests with coverage
         run: pytest --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
       - name: Upload coverage to Codecov
-        if: ${{ env.CODECOV_TOKEN != '' }}
+        if: ${{ env.CODECOV_TOKEN != '' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ env.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: true
       - name: Upload coverage artifact (fallback)
-        if: always()
+        if: ${{ always() && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: coverage.xml
           retention-days: 14
+
+  # Stable required-check context: green only if every matrix leg passed
+  # (legs report as "test-matrix (os, ver)", which are not fixed contexts).
+  test:
+    needs: test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix legs to pass
+        run: '[ "${{ needs.test-matrix.result }}" = "success" ]'
