@@ -34,21 +34,17 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-# Abstract runtime dependencies with compatible lower bounds. The CUDA-built
-# torch / torchvision wheels live on PyTorch's own index (not PyPI), so users
-# who need GPU support install them from that index first; `pip install .`
-# then sees torch already satisfied and resolves everything else from PyPI.
 dependencies = [
     "torch>=2.4",
     "torchvision>=0.19",
     "lightning>=2.4",
     "torchmetrics>=1.4",
-    "jsonargparse[signatures]>=4.27",  # required by lightning's LightningCLI
+    "jsonargparse[signatures]>=4.27",
     "lmdb>=1.4",
     "pillow>=10",
     "numpy>=1.26",
     "tqdm>=4.66",
-    "tensorboard>=2.16",  # default logger in the experiment templates
+    "tensorboard>=2.16",
     # AGPL-3.0; provides A.Compose, A.GaussianBlur, A.Resize, A.RandomCrop, A.ToFloat, and albumentations.pytorch.ToTensorV2.
     # Capped at <=2.1.0 to stay on albucore<0.1.0 (simsimd-backed). albucore 0.1.0 switched its native
     # backend to numkong, whose .pyd depends on libomp140.x86_64.dll (LLVM OpenMP runtime, not bundled

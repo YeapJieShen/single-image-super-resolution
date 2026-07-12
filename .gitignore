@@ -1,24 +1,14 @@
 # Extra files to ignore
 data
-cache/
 .lmdb_cache/
-lightning_logs/
-checkpoints/
 experiments/
 templates/*
 !templates/*template*
-
-# Old notebook-era artifacts (root-anchored so they don't match the
-# sisr/models package): trained checkpoints, prototype notebooks, TB logs
-/models/
-/notebooks/
-/runs/
 
 # Claude's local working notes (codebase index, triage, session history)
 .claude/
 
 # LLM agentic coding artifacts (brainstorming specs, implementation plans).
-# Same rationale as .claude/ — kept off the codebase's git tracking.
 docs/superpowers/
 
 # Byte-compiled / optimized / DLL files
