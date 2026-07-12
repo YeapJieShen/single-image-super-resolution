@@ -9,7 +9,7 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 import torch
 import torchvision
-import torchmetrics
+import torchmetrics.functional
 import lightning
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from typing import Any
@@ -114,10 +114,6 @@ class SRLightning(lightning.LightningModule):
                 metric_keys.extend(self._CS_CHANNEL_NAMES[cs])
             metric_keys.append(cs)
         self._psnr_keys = metric_keys
-        self.val_metrics = torchmetrics.MetricCollection({
-            **{f'psnr({k})': torchmetrics.image.PeakSignalNoiseRatio(data_range=1.0) for k in metric_keys},
-            'ssim': torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1.0),
-        })
 
     @staticmethod
     def _flatten_hparams(hparams: dict[str, Any], sep: str = '/') -> dict:
@@ -340,12 +336,14 @@ class SRLightning(lightning.LightningModule):
         for key in self._psnr_keys:
             sr_t, hr_t = psnr_tensors[key]
             self.log(
-                f'val_psnr({key})', self.val_metrics[f'psnr({key})'](sr_t, hr_t),
+                f'val_psnr({key})',
+                torchmetrics.functional.image.peak_signal_noise_ratio(sr_t, hr_t, data_range=1.0),
                 prog_bar=(key == primary),
                 on_step=False, add_dataloader_idx=False,
             )
         self.log(
-            'val_ssim', self.val_metrics['ssim'](sr, hr_cropped),
+            'val_ssim',
+            torchmetrics.functional.image.structural_similarity_index_measure(sr, hr_cropped, data_range=1.0),
             prog_bar=True, on_step=False, add_dataloader_idx=False,
         )
 
