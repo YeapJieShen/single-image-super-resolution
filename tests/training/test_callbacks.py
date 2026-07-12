@@ -18,10 +18,10 @@ from sisr.training import (
     WeightHistogramLogger,
 )
 
-
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
 # ---------------------------------------------------------------------------
+
 
 def test_benchmark_setup_auto_discovers_dataset_names():
     cb = BenchmarkImageLogger()
@@ -60,6 +60,7 @@ def test_benchmark_setup_datamodule_without_test_names_is_safe():
 # BenchmarkImageLogger._bicubic_to
 # ---------------------------------------------------------------------------
 
+
 def test_bicubic_to_returns_target_shape():
     """LR (3, 4, 4) -> (3, 16, 16) for a 4x upscaling model."""
     lr = torch.rand(3, 4, 4)
@@ -81,9 +82,13 @@ def test_bicubic_to_matches_torch_interpolate_bicubic():
     """Lock the helper to bicubic mode (not bilinear/nearest)."""
     torch.manual_seed(0)
     lr = torch.rand(3, 4, 4)
-    expected = torch.nn.functional.interpolate(
-        lr.unsqueeze(0), size=(16, 16), mode="bicubic", align_corners=False
-    ).squeeze(0).clamp(0.0, 1.0)
+    expected = (
+        torch.nn.functional.interpolate(
+            lr.unsqueeze(0), size=(16, 16), mode="bicubic", align_corners=False
+        )
+        .squeeze(0)
+        .clamp(0.0, 1.0)
+    )
     out = BenchmarkImageLogger._bicubic_to(lr, (16, 16))
     torch.testing.assert_close(out, expected)
 
@@ -91,6 +96,7 @@ def test_bicubic_to_matches_torch_interpolate_bicubic():
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger._pad_to_match
 # ---------------------------------------------------------------------------
+
 
 def test_pad_to_match_no_op_when_shapes_match():
     img = torch.zeros(3, 8, 8)
@@ -133,6 +139,7 @@ def test_pad_to_match_off_by_one_both_dims():
 # ---------------------------------------------------------------------------
 # GradNormLogger
 # ---------------------------------------------------------------------------
+
 
 def _make_gradnorm_pl_module():
     """Stub LightningModule with parameters that have non-zero grads."""
@@ -181,6 +188,7 @@ def test_grad_norm_logger_handles_none_grads():
 # WeightHistogramLogger
 # ---------------------------------------------------------------------------
 
+
 def test_weight_histogram_logger_skips_off_cadence():
     cb = WeightHistogramLogger(log_every_n_steps=10)
     trainer = SimpleNamespace(global_step=7, loggers=[])
@@ -200,6 +208,7 @@ def test_weight_histogram_logger_skips_when_no_tb_logger():
 # ---------------------------------------------------------------------------
 # SRCheckpoint
 # ---------------------------------------------------------------------------
+
 
 def test_srcheckpoint_filename_pattern():
     """monitor_metric='val_psnr(RGB)' -> filename pattern uses that metric."""
@@ -227,6 +236,7 @@ def test_srcheckpoint_custom_filename_prefix():
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger validation/test hook bodies (mock-driven, no Trainer)
 # ---------------------------------------------------------------------------
+
 
 def _make_real_pl_module() -> SRLightning:
     """Real SRLightning with a small SRCNN — needed because the callback
@@ -279,7 +289,10 @@ def test_benchmark_validation_batch_end_collects_for_test_loader():
 
     ds = _stub_dataset_with_img_paths(n=2, name="Set5")
     trainer = SimpleNamespace(
-        val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],  # idx 0 = primary, idx 1 = Set5
+        val_dataloaders=[
+            _stub_dataloader(None),
+            _stub_dataloader(ds),
+        ],  # idx 0 = primary, idx 1 = Set5
     )
     batch = (torch.rand(2, 3, 16, 16), torch.rand(2, 3, 16, 16))
     cb.on_validation_batch_end(
@@ -329,14 +342,21 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     for the per-image psnr + ssim. The old test only checked it didn't raise, so
     a silently-skipped emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
+
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     # SRCNN-style: LR already at HR size (4x4). One image, one psnr key.
     cb._buffer["Set5"] = [
-        ("img_0", torch.rand(3, 4, 4), torch.rand(3, 4, 4), torch.rand(3, 4, 4),
-         {"RGB": 30.0}, 0.9),
+        (
+            "img_0",
+            torch.rand(3, 4, 4),
+            torch.rand(3, 4, 4),
+            torch.rand(3, 4, 4),
+            {"RGB": 30.0},
+            0.9,
+        ),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment  # materialize the SummaryWriter before wrapping
@@ -352,7 +372,7 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     add_image.assert_called_once()
     tag, strip = add_image.call_args.args[0], add_image.call_args.args[1]
     assert tag == "Set5/img_0"
-    assert strip.ndim == 3 and strip.shape[0] == 3   # (C, H, W) triptych
+    assert strip.ndim == 3 and strip.shape[0] == 3  # (C, H, W) triptych
     # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
     assert scalar_tags == ["Set5_psnr(RGB)/img_0", "Set5_ssim/img_0"]
@@ -402,14 +422,21 @@ def test_benchmark_image_strips_upsample_lr_to_hr_size(tmp_path: Path, monkeypat
     with a panel taller than the LR (not crash make_grid on a size mismatch, and
     not log at LR size). The old test only asserted it didn't raise."""
     import lightning.pytorch.loggers as pl_loggers
+
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     # LR 4x4, SR and HR 16x16 (x4 model).
     cb._buffer["Set5"] = [
-        ("img_0", torch.rand(3, 4, 4), torch.rand(3, 16, 16), torch.rand(3, 16, 16),
-         {"RGB": 30.0}, 0.9),
+        (
+            "img_0",
+            torch.rand(3, 4, 4),
+            torch.rand(3, 16, 16),
+            torch.rand(3, 16, 16),
+            {"RGB": 30.0},
+            0.9,
+        ),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment
@@ -440,8 +467,12 @@ def test_benchmark_test_batch_end_collects_with_zero_indexed_mapping():
     )
     batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
     cb.on_test_batch_end(
-        trainer=trainer, pl_module=pl_module, outputs=None,
-        batch=batch, batch_idx=0, dataloader_idx=1,
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
     )
     assert len(cb._buffer["Set14"]) == 1
     assert len(cb._buffer["Set5"]) == 0
@@ -465,18 +496,24 @@ def test_benchmark_test_epoch_end_logs_means():
 # WeightHistogramLogger on-cadence path
 # ---------------------------------------------------------------------------
 
-def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(tmp_path: Path, monkeypatch):
+
+def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(
+    tmp_path: Path, monkeypatch
+):
     """On-cadence, the logger must call experiment.add_histogram exactly once for
     the single `model.`-prefixed parameter (the non-model param is filtered out),
     with the prefix-grouped tag. The old test only checked it didn't raise, so a
     broken `model.` filter or a missing emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
+
     cb = WeightHistogramLogger(log_every_n_steps=1)
     pl_module = MagicMock()
-    pl_module.named_parameters = MagicMock(return_value=[
-        ("model.feat.0.weight", torch.nn.Parameter(torch.rand(4, 3, 3, 3))),
-        ("non_model_param", torch.nn.Parameter(torch.rand(4))),  # filtered out
-    ])
+    pl_module.named_parameters = MagicMock(
+        return_value=[
+            ("model.feat.0.weight", torch.nn.Parameter(torch.rand(4, 3, 3, 3))),
+            ("non_model_param", torch.nn.Parameter(torch.rand(4))),  # filtered out
+        ]
+    )
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment
     add_histogram = MagicMock(wraps=experiment.add_histogram)
@@ -494,6 +531,7 @@ def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(tmp_p
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger crop_border migration to eval_config
 # ---------------------------------------------------------------------------
+
 
 def test_crop_border_init_arg_rejected():
     """crop_border was dropped from BenchmarkImageLogger; now lives on eval_config."""
@@ -523,8 +561,12 @@ def test_benchmark_collect_batch_crops_per_eval_config():
     # 16x16 input; after crop_border=3 sides, the inner 10x10 region drives PSNR/SSIM.
     batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
     cb.on_validation_batch_end(
-        trainer=trainer, pl_module=pl_module, outputs=None,
-        batch=batch, batch_idx=0, dataloader_idx=1,
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
     _, _, _, _, psnr_dict, ssim = cb._buffer["Set5"][0]
@@ -555,8 +597,12 @@ def test_benchmark_collect_batch_routes_through_processor():
     # Batch is 3-channel RGB (dataset-format); the processor must extract Y before the model.
     batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
     cb.on_validation_batch_end(
-        trainer=trainer, pl_module=pl_module, outputs=None,
-        batch=batch, batch_idx=0, dataloader_idx=1,
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
     _, lr_cached, sr_cached, hr_cached, psnr_dict, ssim = cb._buffer["Set5"][0]
@@ -572,6 +618,7 @@ def test_benchmark_collect_batch_routes_through_processor():
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger consumes the public predict_rgb seam + SRDataset (P2.1)
 # ---------------------------------------------------------------------------
+
 
 def test_benchmark_collect_batch_routes_through_predict_rgb():
     """_collect_batch must call the public pl_module.predict_rgb, and the
@@ -595,8 +642,12 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
         val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)],
     )
     cb.on_validation_batch_end(
-        trainer=trainer, pl_module=pl_module, outputs=None,
-        batch=batch, batch_idx=0, dataloader_idx=1,
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
     )
 
     spy.assert_called_once()
@@ -627,8 +678,12 @@ def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir
     )
     batch = (torch.rand(2, 3, 16, 16), torch.rand(2, 3, 16, 16))
     cb.on_validation_batch_end(
-        trainer=trainer, pl_module=pl_module, outputs=None,
-        batch=batch, batch_idx=0, dataloader_idx=1,
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
     )
     fnames = [entry[0] for entry in cb._buffer["Set5"]]
     assert fnames == [p.stem for p in ds.img_paths[:2]]  # e.g. ["img_00", "img_01"]

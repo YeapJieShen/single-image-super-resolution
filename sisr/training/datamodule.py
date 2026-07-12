@@ -6,6 +6,7 @@ only run for the stages that need them. Test sets are surfaced through
 *both* :meth:`val_dataloader` (for ``cli fit`` monitoring) and
 :meth:`test_dataloader` (for ``cli test --ckpt_path`` final eval).
 """
+
 from typing import Any
 
 import lightning
@@ -64,7 +65,7 @@ class SRDataModule(lightning.LightningDataModule):
         self._val_spec = val_dataset
         self._test_specs = test_datasets or {}
         self._train_dl_kwargs = train_dataloader_kwargs or {}
-        self._val_dl_kwargs = val_dataloader_kwargs or {'batch_size': 1, 'num_workers': 1}
+        self._val_dl_kwargs = val_dataloader_kwargs or {"batch_size": 1, "num_workers": 1}
         self._test_dl_kwargs = test_dataloader_kwargs or self._val_dl_kwargs
 
         self._train_ds: Dataset | None = None
@@ -94,14 +95,13 @@ class SRDataModule(lightning.LightningDataModule):
                 ``'test'``, or ``None`` (for all). Determines which
                 datasets get instantiated.
         """
-        if stage in ('fit', None) and self._train_ds is None:
+        if stage in ("fit", None) and self._train_ds is None:
             self._train_ds = instantiate_class((), self._train_spec)
-        if stage in ('fit', 'validate', 'test', None) and not self._test_ds and self._test_specs:
+        if stage in ("fit", "validate", "test", None) and not self._test_ds and self._test_specs:
             self._test_ds = {
-                name: instantiate_class((), spec)
-                for name, spec in self._test_specs.items()
+                name: instantiate_class((), spec) for name, spec in self._test_specs.items()
             }
-        if stage in ('fit', 'validate', None) and self._val_ds is None:
+        if stage in ("fit", "validate", None) and self._val_ds is None:
             self._val_ds = instantiate_class((), self._val_spec)
 
     def train_dataloader(self) -> DataLoader:
@@ -140,6 +140,5 @@ class SRDataModule(lightning.LightningDataModule):
             insertion order. Empty when no test sets are configured.
         """
         return [
-            DataLoader(ds, shuffle=False, **self._test_dl_kwargs)
-            for ds in self._test_ds.values()
+            DataLoader(ds, shuffle=False, **self._test_dl_kwargs) for ds in self._test_ds.values()
         ]

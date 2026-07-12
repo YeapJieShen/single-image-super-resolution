@@ -1,4 +1,5 @@
 """Packaging-contract checks that don't need the app imported."""
+
 import re
 import tomllib
 from pathlib import Path

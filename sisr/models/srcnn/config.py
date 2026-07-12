@@ -8,6 +8,7 @@ classes via ``class_path`` to inherit defaults.
 Reference: Image Super-Resolution Using Deep Convolutional Networks
 (https://arxiv.org/pdf/1501.00092).
 """
+
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -41,10 +42,8 @@ class SRCNNTrainingConfig(SRTrainingConfig):
             to deviate.
     """
 
-    layer_lrs: list[float] | None = field(
-        default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5]
-    )
-    init_strategy: Literal['default', 'paper'] = 'paper'
+    layer_lrs: list[float] | None = field(default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5])
+    init_strategy: Literal["default", "paper"] = "paper"
 
 
 @dataclass
@@ -63,4 +62,4 @@ class SRCNNEvalConfig(SREvalConfig):
     """
 
     crop_border: int = 3
-    psnr_channels: list[str] = field(default_factory=lambda: ['RGB', 'YCbCr'])
+    psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "YCbCr"])

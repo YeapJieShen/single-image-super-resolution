@@ -7,21 +7,20 @@ import pytest
 import torch
 import torchmetrics
 
-from sisr.models.base import SRModel
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import (
     RGBProcessor,
     SRProcessor,
-    YChannelProcessor,
     YCbCrProcessor,
+    YChannelProcessor,
 )
 from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
-
 
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def srcnn_rgb_lit() -> SRLightning:
@@ -61,6 +60,7 @@ def rgb_lr_hr_batch() -> tuple[torch.Tensor, torch.Tensor]:
 # ---------------------------------------------------------------------------
 # forward + step
 # ---------------------------------------------------------------------------
+
 
 def test_forward_delegates_to_model(srcnn_rgb_lit: SRLightning):
     x = torch.zeros(1, 3, 33, 33)
@@ -128,6 +128,7 @@ def test_step_ycbcr_path():
 # ---------------------------------------------------------------------------
 # configure_optimizers
 # ---------------------------------------------------------------------------
+
 
 def test_configure_optimizers_uniform(srcnn_rgb_lit: SRLightning):
     out = srcnn_rgb_lit.configure_optimizers()
@@ -202,13 +203,14 @@ def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
 
 def test_configure_optimizers_no_scheduler_returns_bare(srcnn_rgb_lit: SRLightning):
     out = srcnn_rgb_lit.configure_optimizers()
-    assert not isinstance(out, (tuple, list)), "single optimizer when no scheduler"
+    assert not isinstance(out, tuple | list), "single optimizer when no scheduler"
     assert isinstance(out, torch.optim.Optimizer)
 
 
 # ---------------------------------------------------------------------------
 # test_step / build_psnr_tensors / flatten_hparams
 # ---------------------------------------------------------------------------
+
 
 def test_test_step_is_no_op(srcnn_rgb_lit: SRLightning):
     """test_step exists so Lightning iterates test_dataloaders; the body is a no-op."""
@@ -261,12 +263,14 @@ def test_build_psnr_tensors_ycbcr_does_conversion():
 
 
 def test_flatten_hparams_handles_nested():
-    flat = SRLightning._flatten_hparams({
-        "a": 1,
-        "b": {"x": 2, "y": [3, 4]},
-        "c": None,             # None values dropped
-        "d": SRCNN,            # class -> __name__
-    })
+    flat = SRLightning._flatten_hparams(
+        {
+            "a": 1,
+            "b": {"x": 2, "y": [3, 4]},
+            "c": None,  # None values dropped
+            "d": SRCNN,  # class -> __name__
+        }
+    )
     assert flat == {
         "a": 1,
         "b/x": 2,
@@ -316,7 +320,7 @@ def test_base_training_config_skips_reset_parameters():
     SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),    # init_strategy='default' by default
+        training_config=SRTrainingConfig(),  # init_strategy='default' by default
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -327,6 +331,7 @@ def test_base_training_config_skips_reset_parameters():
 # on_train_start hook
 # ---------------------------------------------------------------------------
 
+
 def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning):
     """The hook calls TensorBoardLogger.log_hyperparams once with val metrics dict."""
     tb = MagicMock(spec=lightning.pytorch.loggers.TensorBoardLogger)
@@ -336,11 +341,11 @@ def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning
 
     tb.log_hyperparams.assert_called_once()
     args, kwargs = tb.log_hyperparams.call_args
-    params_arg = args[0] if args else kwargs.get('params')
-    metrics_arg = args[1] if len(args) > 1 else kwargs.get('metrics')
+    params_arg = args[0] if args else kwargs.get("params")
+    metrics_arg = args[1] if len(args) > 1 else kwargs.get("metrics")
 
-    expected_metrics = {f'val_psnr({k})': 0.0 for k in srcnn_rgb_lit._psnr_keys}
-    expected_metrics['val_ssim'] = 0.0
+    expected_metrics = {f"val_psnr({k})": 0.0 for k in srcnn_rgb_lit._psnr_keys}
+    expected_metrics["val_ssim"] = 0.0
 
     assert params_arg == srcnn_rgb_lit.hparams
     assert metrics_arg == expected_metrics
@@ -379,9 +384,10 @@ def test_on_train_start_multiple_tb_loggers_each_receive_call(srcnn_rgb_lit: SRL
 # new: isinstance guards and processor flow
 # ---------------------------------------------------------------------------
 
+
 def test_srlightning_rejects_non_srmodel():
     """SRLightning(model=<plain nn.Module>) raises TypeError with a readable message."""
-    model = torch.nn.Conv2d(3, 3, 1)              # plain nn.Module, not SRModel
+    model = torch.nn.Conv2d(3, 3, 1)  # plain nn.Module, not SRModel
     with pytest.raises(TypeError, match="SRModel subclass"):
         SRLightning(
             model=model,
@@ -396,7 +402,7 @@ def test_srlightning_rejects_non_srprocessor():
     with pytest.raises(TypeError, match="SRProcessor subclass"):
         SRLightning(
             model=model,
-            processor=object(),                    # not an SRProcessor
+            processor=object(),  # not an SRProcessor
             optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
         )
 
@@ -459,6 +465,7 @@ def test_saved_hparams_contain_processor_name():
 # predict_rgb public inference seam (P2.1)
 # ---------------------------------------------------------------------------
 
+
 def test_predict_rgb_returns_sr_and_hr_pair(srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch):
     lr, hr = rgb_lr_hr_batch
     sr_rgb, hr_cropped = srcnn_rgb_lit.predict_rgb(lr, hr)
@@ -492,6 +499,7 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
 # P2.2 — no dead stateful metric accumulator
 # ---------------------------------------------------------------------------
 
+
 def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
     """Regression (P2.2): PSNR/SSIM are computed via torchmetrics.functional,
     so SRLightning registers no stateful torchmetrics.Metric accumulators that
@@ -505,6 +513,7 @@ def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
 # ---------------------------------------------------------------------------
 # P2.4 — nested config dataclasses expand into HParams columns
 # ---------------------------------------------------------------------------
+
 
 def test_hparams_expand_nested_config_fields():
     """Regression (P2.4): training_config/eval_config dataclasses expand into
@@ -530,6 +539,7 @@ def test_hparams_expand_nested_config_fields():
 # P2.6 — val PSNR is the per-image mean, invariant to batch size
 # ---------------------------------------------------------------------------
 
+
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
     """Regression (P2.6): PSNR for a batch equals the mean of the per-image
     PSNRs (SR-standard reduction, invariant to val batch_size), not the
@@ -537,15 +547,15 @@ def test_val_psnr_is_per_image_mean_not_batch_pooled():
     from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_fn
 
     g = torch.Generator().manual_seed(1)
-    hr = torch.rand(2, 3, 8, 8, generator=g) * 0.8   # keep values in [0, 0.8]
+    hr = torch.rand(2, 3, 8, 8, generator=g) * 0.8  # keep values in [0, 0.8]
     sr = hr.clone()
-    sr[0] = sr[0] + 0.01                             # image 0: small error
-    sr[1] = sr[1] + 0.15                             # image 1: larger error
+    sr[0] = sr[0] + 0.01  # image 0: small error
+    sr[1] = sr[1] + 0.15  # image 1: larger error
 
-    per_image = torch.stack([
-        psnr_fn(sr[i:i + 1], hr[i:i + 1], data_range=1.0) for i in range(2)
-    ]).mean()
-    pooled = psnr_fn(sr, hr, data_range=1.0)          # dim=None -> pools the batch
+    per_image = torch.stack(
+        [psnr_fn(sr[i : i + 1], hr[i : i + 1], data_range=1.0) for i in range(2)]
+    ).mean()
+    pooled = psnr_fn(sr, hr, data_range=1.0)  # dim=None -> pools the batch
 
     batch_val = SRLightning._mean_psnr(sr, hr)
     assert torch.allclose(batch_val, per_image, atol=1e-5)

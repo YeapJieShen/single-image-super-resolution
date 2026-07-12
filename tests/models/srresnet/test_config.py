@@ -1,4 +1,5 @@
 """Defaults, subclass, and isolation tests for SRResNet's paper-faithful configs."""
+
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.training import SREvalConfig, SRTrainingConfig
 
@@ -10,7 +11,7 @@ def test_srresnet_training_config_paper_defaults():
     assert cfg.init_strategy == "default"
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
-    assert cfg.layer_lrs is None              # SRResNet has BatchNorm/PReLU; layer_lrs would error
+    assert cfg.layer_lrs is None  # SRResNet has BatchNorm/PReLU; layer_lrs would error
 
 
 def test_srresnet_eval_config_paper_defaults():

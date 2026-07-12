@@ -17,6 +17,7 @@ overrides individual fields with ``init_args``.
 The colorspace the model trains in is no longer a string field here; it is
 expressed by the choice of processor (see :mod:`sisr.processors`).
 """
+
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -56,7 +57,7 @@ class SRTrainingConfig:
 
     layer_lrs: list[float] | None = None
     example_input_shape: tuple[int, ...] | None = None
-    init_strategy: Literal['default', 'paper'] = 'default'
+    init_strategy: Literal["default", "paper"] = "default"
     init_mean: float = 0.0
     init_std: float = 0.01
 
@@ -82,7 +83,7 @@ class SREvalConfig:
     """
 
     crop_border: int = 0
-    psnr_channels: list[str] = field(default_factory=lambda: ['RGB'])
+    psnr_channels: list[str] = field(default_factory=lambda: ["RGB"])
     separate_psnr: bool = False
 
     def __post_init__(self) -> None:
@@ -92,7 +93,7 @@ class SREvalConfig:
             ValueError: If any entry is not a supported colorspace
                 (``'RGB'`` or ``'YCbCr'``).
         """
-        valid = ('RGB', 'YCbCr')
+        valid = ("RGB", "YCbCr")
         invalid = [c for c in self.psnr_channels if c not in valid]
         if invalid:
             raise ValueError(

@@ -7,6 +7,7 @@ glob + empty-directory guard), the RGB image load, and the AlbumentationsX
 ``.img_paths`` filename contract that :class:`~sisr.training.SRDataModule`
 and :class:`~sisr.training.callbacks.BenchmarkImageLogger` rely on.
 """
+
 import abc
 from pathlib import Path
 
@@ -34,9 +35,19 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
             consumed by the datamodule and the benchmark logger.
     """
 
-    IMAGE_EXTENSIONS: frozenset[str] = frozenset({
-        '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.ppm', '.pgm',
-    })
+    IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+        {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".webp",
+            ".ppm",
+            ".pgm",
+        }
+    )
 
     img_dir: Path
     img_paths: list[Path]
@@ -57,7 +68,8 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         """
         self.img_dir = Path(img_dir)
         self.img_paths = sorted(
-            p for p in self.img_dir.iterdir()
+            p
+            for p in self.img_dir.iterdir()
             if p.is_file() and p.suffix.lower() in self.IMAGE_EXTENSIONS
         )
         if not self.img_paths:
@@ -73,7 +85,7 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         Returns:
             The decoded image as an HWC uint8 RGB ``numpy`` array.
         """
-        return np.array(Image.open(path).convert('RGB'))
+        return np.array(Image.open(path).convert("RGB"))
 
     @staticmethod
     def _to_tensor_transform() -> A.Compose:

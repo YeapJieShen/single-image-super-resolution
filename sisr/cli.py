@@ -18,6 +18,7 @@ Top-level ``matmul_precision:`` (``'highest' | 'high' | 'medium'``) calls
 :func:`torch.set_float32_matmul_precision` once at startup. Set to ``'high'``
 on Ampere+ GPUs to enable TF32 matmul kernels.
 """
+
 import sys
 from typing import Literal
 
@@ -55,7 +56,7 @@ class SRLightningCLI(LightningCLI):
         parser.add_lr_scheduler_args(link_to="model.lr_scheduler")
         parser.add_argument(
             "--matmul_precision",
-            type=Literal['highest', 'high', 'medium'] | None,
+            type=Literal["highest", "high", "medium"] | None,
             default=None,
             help=(
                 "If set, calls torch.set_float32_matmul_precision(<value>) "
@@ -82,16 +83,17 @@ def main() -> None:
     so it also runs under the console-script path, which bypasses
     ``__main__``.
     """
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         from multiprocessing import freeze_support
+
         freeze_support()
     SRLightningCLI(
         model_class=SRLightning,
         datamodule_class=SRDataModule,
-        save_config_kwargs={'overwrite': True},
+        save_config_kwargs={"overwrite": True},
         auto_configure_optimizers=False,
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

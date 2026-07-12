@@ -7,13 +7,15 @@ in :class:`~sisr.training.config.SRTrainingConfig` /
 itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 :class:`~sisr.cli.SRLightningCLI`.
 """
+
 import dataclasses
-import torch
-import torchvision
-import torchmetrics.functional
-import lightning
-from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from typing import Any
+
+import lightning
+import torch
+import torchmetrics.functional
+import torchvision
+from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 
 from ..models.base import SRModel
 from ..processors import SRProcessor
@@ -53,8 +55,8 @@ class SRLightning(lightning.LightningModule):
     """
 
     _CS_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
-        'RGB':   ('R', 'G', 'B'),
-        'YCbCr': ('Y', 'Cb', 'Cr'),
+        "RGB": ("R", "G", "B"),
+        "YCbCr": ("Y", "Cb", "Cr"),
     }
 
     def __init__(
@@ -82,7 +84,9 @@ class SRLightning(lightning.LightningModule):
                 f"SRProcessor."
             )
 
-        self.save_hyperparameters(ignore=['model', 'processor', 'criterion', 'optimizer', 'lr_scheduler'])
+        self.save_hyperparameters(
+            ignore=["model", "processor", "criterion", "optimizer", "lr_scheduler"]
+        )
 
         self.model = model
         self.processor = processor
@@ -92,7 +96,7 @@ class SRLightning(lightning.LightningModule):
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
-        if self.training_config.init_strategy == 'paper':
+        if self.training_config.init_strategy == "paper":
             model.reset_parameters(
                 mean=self.training_config.init_mean,
                 std=self.training_config.init_std,
@@ -100,14 +104,16 @@ class SRLightning(lightning.LightningModule):
 
         # Merge model.hparams + processor identity into Lightning hparams for TensorBoard HParams.
         # Configs are expanded via dataclasses.asdict so each field becomes its own HParams column.
-        self._hparams = self._flatten_hparams({
-            **self._hparams,
-            'training_config': dataclasses.asdict(self.training_config),
-            'eval_config': dataclasses.asdict(self.eval_config),
-            'model': model.hparams,
-            'processor': type(processor).__name__,
-            'criterion': type(self.criterion).__name__,
-        })
+        self._hparams = self._flatten_hparams(
+            {
+                **self._hparams,
+                "training_config": dataclasses.asdict(self.training_config),
+                "eval_config": dataclasses.asdict(self.eval_config),
+                "model": model.hparams,
+                "processor": type(processor).__name__,
+                "criterion": type(self.criterion).__name__,
+            }
+        )
 
         if self.training_config.example_input_shape is not None:
             self.example_input_array = torch.zeros(1, *self.training_config.example_input_shape)
@@ -120,7 +126,7 @@ class SRLightning(lightning.LightningModule):
         self._psnr_keys = metric_keys
 
     @staticmethod
-    def _flatten_hparams(hparams: dict[str, Any], sep: str = '/') -> dict:
+    def _flatten_hparams(hparams: dict[str, Any], sep: str = "/") -> dict:
         """Recursively flatten nested hparams dicts/lists for clean TensorBoard HParams columns.
 
         None values are dropped (they add noise without aiding comparison).
@@ -144,10 +150,10 @@ class SRLightning(lightning.LightningModule):
             elif isinstance(obj, dict):
                 for k, v in obj.items():
                     _recurse(v, f"{prefix}{sep}{k}")
-            elif isinstance(obj, (list, tuple)):
+            elif isinstance(obj, list | tuple):
                 for i, v in enumerate(obj):
                     _recurse(v, f"{prefix}{sep}{i}")
-            elif isinstance(obj, (bool, int, float, str)):
+            elif isinstance(obj, bool | int | float | str):
                 result[prefix] = obj
             else:
                 result[prefix] = str(obj)
@@ -176,19 +182,19 @@ class SRLightning(lightning.LightningModule):
         keys = set(self._psnr_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
-        if keys & {'RGB', 'R', 'G', 'B'}:
-            tensors['RGB'] = (sr, hr)
-            tensors['R']   = (sr[:, 0:1], hr[:, 0:1])
-            tensors['G']   = (sr[:, 1:2], hr[:, 1:2])
-            tensors['B']   = (sr[:, 2:3], hr[:, 2:3])
+        if keys & {"RGB", "R", "G", "B"}:
+            tensors["RGB"] = (sr, hr)
+            tensors["R"] = (sr[:, 0:1], hr[:, 0:1])
+            tensors["G"] = (sr[:, 1:2], hr[:, 1:2])
+            tensors["B"] = (sr[:, 2:3], hr[:, 2:3])
 
-        if keys & {'YCbCr', 'Y', 'Cb', 'Cr'}:
+        if keys & {"YCbCr", "Y", "Cb", "Cr"}:
             sr_ycc = rgb_to_ycbcr(sr)
             hr_ycc = rgb_to_ycbcr(hr)
-            tensors['YCbCr'] = (sr_ycc, hr_ycc)
-            tensors['Y']     = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
-            tensors['Cb']    = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])
-            tensors['Cr']    = (sr_ycc[:, 2:3], hr_ycc[:, 2:3])
+            tensors["YCbCr"] = (sr_ycc, hr_ycc)
+            tensors["Y"] = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
+            tensors["Cb"] = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])
+            tensors["Cr"] = (sr_ycc[:, 2:3], hr_ycc[:, 2:3])
 
         return tensors
 
@@ -209,7 +215,7 @@ class SRLightning(lightning.LightningModule):
             Scalar tensor — the batch mean of the per-image PSNRs.
         """
         return torchmetrics.functional.image.peak_signal_noise_ratio(
-            sr, hr, data_range=1.0, dim=(1, 2, 3), reduction='elementwise_mean'
+            sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -280,9 +286,9 @@ class SRLightning(lightning.LightningModule):
         _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
         return sr_rgb, hr_cropped
 
-    def _step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+    def _step(
+        self, batch: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Shared forward + loss for training and validation steps.
 
         The processor handles all colorspace conversion; loss is computed in
@@ -307,7 +313,9 @@ class SRLightning(lightning.LightningModule):
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 
-    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         """Compute training loss for one batch and log it.
 
         Delegates the forward + colorspace + loss pipeline to :meth:`_step`
@@ -323,7 +331,7 @@ class SRLightning(lightning.LightningModule):
             Scalar loss tensor for the optimizer.
         """
         loss, *_ = self._step(batch)
-        self.log('train_loss', loss, prog_bar=True, on_step=True)
+        self.log("train_loss", loss, prog_bar=True, on_step=True)
         return loss
 
     def validation_step(
@@ -355,20 +363,25 @@ class SRLightning(lightning.LightningModule):
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
-        self.log('val_loss', loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
+        self.log("val_loss", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
         primary = self.eval_config.psnr_channels[0]
         for key in self._psnr_keys:
             sr_t, hr_t = psnr_tensors[key]
             self.log(
-                f'val_psnr({key})',
+                f"val_psnr({key})",
                 self._mean_psnr(sr_t, hr_t),
                 prog_bar=(key == primary),
-                on_step=False, add_dataloader_idx=False,
+                on_step=False,
+                add_dataloader_idx=False,
             )
         self.log(
-            'val_ssim',
-            torchmetrics.functional.image.structural_similarity_index_measure(sr, hr_cropped, data_range=1.0),
-            prog_bar=True, on_step=False, add_dataloader_idx=False,
+            "val_ssim",
+            torchmetrics.functional.image.structural_similarity_index_measure(
+                sr, hr_cropped, data_range=1.0
+            ),
+            prog_bar=True,
+            on_step=False,
+            add_dataloader_idx=False,
         )
 
     def on_train_start(self) -> None:
@@ -381,14 +394,15 @@ class SRLightning(lightning.LightningModule):
         logged by :meth:`validation_step`.
         """
         tb_loggers = [
-            l for l in self.loggers
-            if isinstance(l, lightning.pytorch.loggers.TensorBoardLogger)
+            logger
+            for logger in self.loggers
+            if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
         ]
         if not tb_loggers:
             return
         metrics = {
-            **{f'val_psnr({k})': 0.0 for k in self._psnr_keys},
-            'val_ssim': 0.0,
+            **{f"val_psnr({k})": 0.0 for k in self._psnr_keys},
+            "val_ssim": 0.0,
         }
         for tb in tb_loggers:
             tb.log_hyperparams(self.hparams, metrics)
@@ -445,7 +459,8 @@ class SRLightning(lightning.LightningModule):
                 )
             conv_params = {id(p) for layer in conv_layers for p in layer.parameters()}
             other = [
-                n for n, p in self.model.named_parameters()
+                n
+                for n, p in self.model.named_parameters()
                 if p.requires_grad and id(p) not in conv_params
             ]
             if other:
@@ -455,8 +470,8 @@ class SRLightning(lightning.LightningModule):
                     f"non-Conv layers (BatchNorm, PReLU, etc.)."
                 )
             param_groups = [
-                {'params': list(layer.parameters()), 'lr': lr}
-                for layer, lr in zip(conv_layers, lrs)
+                {"params": list(layer.parameters()), "lr": lr}
+                for layer, lr in zip(conv_layers, lrs, strict=False)
             ]
             optimizer = self.optimizer(param_groups)
 

@@ -1,7 +1,8 @@
 """Behavior tests for YCbCrProcessor — full YCbCr convert."""
+
 import torch
 
-from sisr.processors import YCbCrProcessor, SRProcessor
+from sisr.processors import SRProcessor, YCbCrProcessor
 from sisr.utils import rgb_to_ycbcr
 
 

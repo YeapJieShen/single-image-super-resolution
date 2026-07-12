@@ -9,16 +9,17 @@ Lightning or model code.
 :class:`~sisr.datasets.srcnn.TrainDataset` to persist precomputed
 LR/HR sub-image pairs.
 """
+
 import os
 import shutil
-import lmdb
-import torch
+from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
-from tqdm.auto import tqdm
-from collections.abc import Callable, Sequence
 from typing import Any
 
+import lmdb
+import torch
+from tqdm.auto import tqdm
 
 # BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
 # Both colorspaces are normalised to [0, 1]. Cb and Cr have a +0.5 offset on
@@ -27,13 +28,13 @@ from typing import Any
 # of BT.601 — distinct from the studio-range variant which scales Y to
 # [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
 
-_RGB_TO_Y  = (0.299, 0.587, 0.114)
-_RGB_TO_CB = (-0.169, -0.331, 0.500)   # output offset +0.5
-_RGB_TO_CR = (0.500, -0.419, -0.081)   # output offset +0.5
-_YCBCR_TO_R = 1.402                     # cr coefficient
-_YCBCR_TO_G_CB = -0.344                 # cb coefficient
-_YCBCR_TO_G_CR = -0.714                 # cr coefficient
-_YCBCR_TO_B = 1.772                     # cb coefficient
+_RGB_TO_Y = (0.299, 0.587, 0.114)
+_RGB_TO_CB = (-0.169, -0.331, 0.500)  # output offset +0.5
+_RGB_TO_CR = (0.500, -0.419, -0.081)  # output offset +0.5
+_YCBCR_TO_R = 1.402  # cr coefficient
+_YCBCR_TO_G_CB = -0.344  # cb coefficient
+_YCBCR_TO_G_CR = -0.714  # cr coefficient
+_YCBCR_TO_B = 1.772  # cb coefficient
 
 
 def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
@@ -48,7 +49,7 @@ def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
         ``[0, 1]`` with Cb/Cr offset by +0.5.
     """
     r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
-    y  = _RGB_TO_Y[0]  * r + _RGB_TO_Y[1]  * g + _RGB_TO_Y[2]  * b
+    y = _RGB_TO_Y[0] * r + _RGB_TO_Y[1] * g + _RGB_TO_Y[2] * b
     cb = _RGB_TO_CB[0] * r + _RGB_TO_CB[1] * g + _RGB_TO_CB[2] * b + 0.5
     cr = _RGB_TO_CR[0] * r + _RGB_TO_CR[1] * g + _RGB_TO_CR[2] * b + 0.5
     return torch.cat([y, cb, cr], dim=1)
@@ -116,10 +117,10 @@ class LMDBCacheBuildContext:
 
         Args:
             items (Sequence[Any]): One item per job (e.g. a list of image paths).
-            process_fn (Callable[..., list[tuple[str, bytes]]]): Top-level callable invoked per item.  Receives
-                ``(item, *extra_args)`` and returns keyed pairs.
-            process_args (Sequence[Sequence[Any]], optional): Per-item extra arguments for *process_fn*.
-                If ``None``, each job calls ``process_fn(item)``.
+            process_fn (Callable[..., list[tuple[str, bytes]]]): Top-level callable invoked per
+                item.  Receives ``(item, *extra_args)`` and returns keyed pairs.
+            process_args (Sequence[Sequence[Any]], optional): Per-item extra arguments for
+                *process_fn*. If ``None``, each job calls ``process_fn(item)``.
                 If provided, must have the same length as *items* and
                 each element is unpacked as positional args.
             num_workers (int | None): Maximum number of parallel worker
@@ -202,8 +203,8 @@ class LMDBCache:
         map_size (int): Maximum size of the LMDB database in bytes.
         metadata (dict[str, str] | None): Extra key-value pairs to persist alongside the data
             (e.g. ``{'channels': '3', 'subimg_size': '33'}``).
-        build_fn (Callable[[LMDBCacheBuildContext], None] | None): A callable that populates the database.  It receives
-            a single :class:`LMDBCacheBuildContext` argument exposing
+        build_fn (Callable[[LMDBCacheBuildContext], None] | None): A callable that populates the
+            database.  It receives a single :class:`LMDBCacheBuildContext` argument exposing
             a ``write_batch`` helper and an ``env`` handle.  If
             ``None`` and no valid cache is found, a ``RuntimeError``
             is raised.
@@ -223,7 +224,7 @@ class LMDBCache:
     ):
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._lmdb_path = self._cache_dir / f'{name}_{checksum[:16]}'
+        self._lmdb_path = self._cache_dir / f"{name}_{checksum[:16]}"
         self._length = length
         self._metadata = metadata or {}
         self._env: lmdb.Environment | None = None
@@ -231,8 +232,7 @@ class LMDBCache:
         if not self._try_load(checksum):
             if build_fn is None:
                 raise RuntimeError(
-                    f"No valid LMDB cache found at {self._lmdb_path} "
-                    "and no build_fn was provided."
+                    f"No valid LMDB cache found at {self._lmdb_path} and no build_fn was provided."
                 )
             self._build(checksum, length, map_size, build_fn, use_tqdm)
 
@@ -265,8 +265,7 @@ class LMDBCache:
             A read-only LMDB environment.
         """
         if self._env is None:
-            self._env = lmdb.open(
-                str(self._lmdb_path), readonly=True, lock=False)
+            self._env = lmdb.open(str(self._lmdb_path), readonly=True, lock=False)
         return self._env
 
     def get(self, key: str) -> bytes | None:
@@ -317,11 +316,11 @@ class LMDBCache:
         try:
             env = lmdb.open(str(self._lmdb_path), readonly=True, lock=False)
             with env.begin(write=False) as txn:
-                stored = txn.get(b'__checksum__')
+                stored = txn.get(b"__checksum__")
                 if stored is None or stored.decode() != checksum:
                     env.close()
                     return False
-                self._length = int(txn.get(b'__length__').decode())
+                self._length = int(txn.get(b"__length__").decode())
             env.close()
             return True
         except (lmdb.Error, OSError):
@@ -347,9 +346,10 @@ class LMDBCache:
             checksum (str): The checksum to store for future validation.
             length (int): The number of entries that will be stored.
             map_size (int): The maximum size of the LMDB database in bytes.
-            build_fn (Callable[[LMDBCacheBuildContext], None]): A callable that populates the database.  It receives
-                a single :class:`LMDBCacheBuildContext` argument exposing
-                a ``write_batch`` helper and an ``env`` handle. Must populate the database with exactly *length* entries.
+            build_fn (Callable[[LMDBCacheBuildContext], None]): A callable that populates the
+                database.  It receives a single :class:`LMDBCacheBuildContext` argument exposing
+                a ``write_batch`` helper and an ``env`` handle. Must populate the database with
+                exactly *length* entries.
             use_tqdm (bool): Whether to display a progress bar during the build.
         """
         if self._lmdb_path.exists():
@@ -362,10 +362,10 @@ class LMDBCache:
 
         # Write metadata — __checksum__ last for incomplete-build detection
         txn = env.begin(write=True)
-        txn.put(b'__length__', str(length).encode())
+        txn.put(b"__length__", str(length).encode())
         for k, v in self._metadata.items():
-            txn.put(f'__{k}__'.encode(), str(v).encode())
-        txn.put(b'__checksum__', checksum.encode())
+            txn.put(f"__{k}__".encode(), str(v).encode())
+        txn.put(b"__checksum__", checksum.encode())
         txn.commit()
         env.close()
 

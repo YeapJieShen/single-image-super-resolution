@@ -143,7 +143,7 @@ def test_forward_multilayer_mapping_builds_extra_conv_and_preserves_shape():
     model = SRCNN(
         num_channels=3,
         num_filters=(64, 32, 16),
-        kernel_sizes=(9, 1, 3, 5),   # len == len(num_filters) + 1
+        kernel_sizes=(9, 1, 3, 5),  # len == len(num_filters) + 1
         padding="same",
     )
     n_convs = sum(1 for m in model.modules() if isinstance(m, torch.nn.Conv2d))

@@ -11,6 +11,7 @@ the metric names actually logged, and the module -> datamodule ->
 and the strict ``filterwarnings=error`` config turns it into a failure unless
 the scoped ignore in ``pyproject.toml`` is in place.
 """
+
 import functools
 from pathlib import Path
 
@@ -71,9 +72,7 @@ def _make_datamodule(image_dir: Path) -> SRDataModule:
 # lightning PossibleUserWarnings — config/environment noise, not a library-health
 # signal. Silence them for THIS test only so the strict global filter stays honest
 # and the test fails specifically on the real FutureWarning when the filter is stale.
-@pytest.mark.filterwarnings(
-    "ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning"
-)
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
 def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
     tiny_rgb_image_dir: Path,
 ):

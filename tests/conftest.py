@@ -1,4 +1,5 @@
 """Shared pytest fixtures for the sisr test suite."""
+
 from pathlib import Path
 
 import numpy as np
