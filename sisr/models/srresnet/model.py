@@ -116,6 +116,7 @@ class SRResNet(SRModel):
         super().__init__()
 
         self._check_scale(scale)
+        self._check_architecture(kernel_sizes, num_residual_blocks)
 
         self._hparams = {
             "scale": scale,
@@ -173,6 +174,34 @@ class SRResNet(SRModel):
             raise ValueError(f"scale must be a positive integer. Got {scale}.")
         if (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
+
+    def _check_architecture(self, kernel_sizes: tuple[int, ...], num_residual_blocks: int):
+        """Validates the architecture parameters for the SRResNet model.
+
+        Args:
+            kernel_sizes (tuple[int, ...]): Kernel sizes for the head, residual,
+                and tail convolutional layers.
+            num_residual_blocks (int): Number of residual blocks in the network.
+
+        Raises:
+            ValueError: If kernel_sizes is not a length-3 tuple of positive
+                integers, or if num_residual_blocks is not a positive integer.
+        """
+        if not isinstance(kernel_sizes, tuple):
+            raise ValueError(f"kernel_sizes must be a tuple. Got {type(kernel_sizes)}.")
+        if len(kernel_sizes) != 3:
+            raise ValueError(
+                f"kernel_sizes must have exactly 3 elements for the head, residual, "
+                f"and tail layers. Got {kernel_sizes}."
+            )
+        if any(k < 1 for k in kernel_sizes):
+            raise ValueError(
+                f"All elements in kernel_sizes must be positive integers. Got {kernel_sizes}."
+            )
+        if num_residual_blocks < 1:
+            raise ValueError(
+                f"num_residual_blocks must be a positive integer. Got {num_residual_blocks}."
+            )
 
     def forward(
         self,
