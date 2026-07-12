@@ -7,6 +7,7 @@ in :class:`~sisr.training.config.SRTrainingConfig` /
 itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 :class:`~sisr.cli.SRLightningCLI`.
 """
+import dataclasses
 import torch
 import torchvision
 import torchmetrics.functional
@@ -98,8 +99,11 @@ class SRLightning(lightning.LightningModule):
             )
 
         # Merge model.hparams + processor identity into Lightning hparams for TensorBoard HParams.
+        # Configs are expanded via dataclasses.asdict so each field becomes its own HParams column.
         self._hparams = self._flatten_hparams({
             **self._hparams,
+            'training_config': dataclasses.asdict(self.training_config),
+            'eval_config': dataclasses.asdict(self.eval_config),
             'model': model.hparams,
             'processor': type(processor).__name__,
             'criterion': type(self.criterion).__name__,

@@ -500,3 +500,27 @@ def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
     assert stateful == [], (
         f"expected no stateful torchmetrics.Metric accumulators; found {stateful}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P2.4 — nested config dataclasses expand into HParams columns
+# ---------------------------------------------------------------------------
+
+def test_hparams_expand_nested_config_fields():
+    """Regression (P2.4): training_config/eval_config dataclasses expand into
+    individual HParams columns (via dataclasses.asdict) using the '/' separator,
+    instead of a single stringified blob under the bare key."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=7),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    flat = dict(lit.hparams)
+    assert flat.get("eval_config/crop_border") == 7
+    assert flat.get("training_config/init_strategy") == "default"
+    # regression guard: no stringified dataclass blob under the bare key
+    assert "eval_config" not in flat
+    assert "training_config" not in flat
