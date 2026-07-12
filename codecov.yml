@@ -1,0 +1,15 @@
+# Codecov status thresholds. The hard local floor is enforced separately by
+# `pytest --cov-fail-under=90` in .github/workflows/test.yml; these thresholds
+# only tune Codecov's own project/patch checks so small fluctuations (e.g. the
+# win32-only freeze_support branch, counted on Windows but not Ubuntu runners)
+# do not fail a PR.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%
