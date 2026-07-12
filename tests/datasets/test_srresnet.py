@@ -11,13 +11,37 @@ from sisr.datasets.srresnet import TrainDataset, ValidationDataset
 # ---------------------------------------------------------------------------
 
 def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
+    """LR must be the cv2 INTER_CUBIC downscale of the SAME HR crop the item
+    returned — not merely a (3, h/scale, w/scale) tensor in [0, 1]. Recovers the
+    returned HR crop as uint8 and re-runs the dataset's own LR pipeline as the
+    reference; the crop is random, but LR and HR come from one call, so the
+    reference is exact. A regression to bilinear/nearest downscaling fails here."""
+    import cv2
+    import numpy as np
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+
     ds = TrainDataset(img_dir=tiny_rgb_image_dir, scale=4, hr_crop_size=16)
     lr, hr = ds[0]
+
+    # Shape / dtype / range (retained smoke coverage).
     assert hr.shape == (3, 16, 16)
     assert lr.shape == (3, 4, 4)  # 16 // 4
     assert lr.dtype == torch.float32 and hr.dtype == torch.float32
     assert 0.0 <= lr.min() <= lr.max() <= 1.0
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
+
+    # Reference: recover the HR crop as uint8 HWC and re-run the dataset's own
+    # LR pipeline (A.Resize INTER_CUBIC -> ToFloat -> ToTensorV2).
+    hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+    lr_size = 16 // 4
+    ref_pipeline = A.Compose([
+        A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
+        A.ToFloat(max_value=255.0),
+        ToTensorV2(),
+    ])
+    lr_expected = ref_pipeline(image=hr_uint8)["image"]
+    torch.testing.assert_close(lr, lr_expected, atol=1e-6, rtol=0)
 
 
 def test_train_dataset_len_scales_with_crops_per_image(tiny_rgb_image_dir: Path):
