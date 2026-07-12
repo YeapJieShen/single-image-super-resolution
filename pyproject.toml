@@ -64,6 +64,9 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
+    # tests/test_cli.py parses/emits config YAML directly; PyYAML otherwise
+    # resolves only transitively (via jsonargparse/lightning), which is fragile.
+    "pyyaml>=6",
 ]
 
 [project.scripts]
