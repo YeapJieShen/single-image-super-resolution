@@ -524,3 +524,29 @@ def test_hparams_expand_nested_config_fields():
     # regression guard: no stringified dataclass blob under the bare key
     assert "eval_config" not in flat
     assert "training_config" not in flat
+
+
+# ---------------------------------------------------------------------------
+# P2.6 — val PSNR is the per-image mean, invariant to batch size
+# ---------------------------------------------------------------------------
+
+def test_val_psnr_is_per_image_mean_not_batch_pooled():
+    """Regression (P2.6): PSNR for a batch equals the mean of the per-image
+    PSNRs (SR-standard reduction, invariant to val batch_size), not the
+    batch-pooled PSNR that a default-dim PeakSignalNoiseRatio would give."""
+    from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_fn
+
+    g = torch.Generator().manual_seed(1)
+    hr = torch.rand(2, 3, 8, 8, generator=g) * 0.8   # keep values in [0, 0.8]
+    sr = hr.clone()
+    sr[0] = sr[0] + 0.01                             # image 0: small error
+    sr[1] = sr[1] + 0.15                             # image 1: larger error
+
+    per_image = torch.stack([
+        psnr_fn(sr[i:i + 1], hr[i:i + 1], data_range=1.0) for i in range(2)
+    ]).mean()
+    pooled = psnr_fn(sr, hr, data_range=1.0)          # dim=None -> pools the batch
+
+    batch_val = SRLightning._mean_psnr(sr, hr)
+    assert torch.allclose(batch_val, per_image, atol=1e-5)
+    assert not torch.allclose(batch_val, pooled, atol=1e-3)

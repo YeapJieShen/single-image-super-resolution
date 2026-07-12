@@ -192,6 +192,26 @@ class SRLightning(lightning.LightningModule):
 
         return tensors
 
+    @staticmethod
+    def _mean_psnr(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
+        """Mean of the per-image PSNRs across the batch (SR-standard reduction).
+
+        Scores each image independently (``dim=(1, 2, 3)``) before the batch
+        mean, so the result is invariant to the val ``batch_size``. This differs
+        from pooling the whole batch into one PSNR — the deviation a stateful
+        ``PeakSignalNoiseRatio`` with default ``dim`` would introduce.
+
+        Args:
+            sr: SR tensor of shape ``(B, C, H, W)`` in ``[0, 1]``.
+            hr: HR tensor of the same shape.
+
+        Returns:
+            Scalar tensor — the batch mean of the per-image PSNRs.
+        """
+        return torchmetrics.functional.image.peak_signal_noise_ratio(
+            sr, hr, data_range=1.0, dim=(1, 2, 3), reduction='elementwise_mean'
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the wrapped SR model on ``x`` and return its raw output.
 
@@ -341,7 +361,7 @@ class SRLightning(lightning.LightningModule):
             sr_t, hr_t = psnr_tensors[key]
             self.log(
                 f'val_psnr({key})',
-                torchmetrics.functional.image.peak_signal_noise_ratio(sr_t, hr_t, data_range=1.0),
+                self._mean_psnr(sr_t, hr_t),
                 prog_bar=(key == primary),
                 on_step=False, add_dataloader_idx=False,
             )
