@@ -464,7 +464,7 @@ class GradNormLogger(Callback):
         total_norm_sq = 0.0
         for p in pl_module.parameters():
             if p.grad is not None:
-                total_norm_sq += p.grad.data.norm(2).item() ** 2
+                total_norm_sq += p.grad.detach().norm(2).item() ** 2
         total_norm = math.sqrt(total_norm_sq)
 
         pl_module.log("grad_norm", total_norm, on_step=True, on_epoch=False)

@@ -184,6 +184,28 @@ def test_grad_norm_logger_handles_none_grads():
     assert args[1] == 0.0
 
 
+def test_grad_norm_logger_uses_grad_detach_not_grad_data():
+    """P5.3: gradient-norm accumulation must read gradients via
+    ``p.grad.detach()``, not the legacy ``p.grad.data`` attribute — and must
+    still compute the correct L2 norm. The source check gives the red->green
+    signal (``.grad.data`` does not raise a Python warning on the pinned torch,
+    so a warnings-based assert cannot go red); the numeric check confirms
+    behaviour is unchanged."""
+    import inspect
+
+    src = inspect.getsource(GradNormLogger.on_after_backward)
+    assert ".grad.data" not in src
+    assert "p.grad.detach()" in src
+
+    cb = GradNormLogger(log_every_n_steps=1)
+    trainer = SimpleNamespace(global_step=1)
+    pl_module = _make_gradnorm_pl_module()
+    cb.on_after_backward(trainer, pl_module)
+    args, _ = pl_module.log.call_args
+    assert args[0] == "grad_norm"
+    assert args[1] == pytest.approx(10.0)
+
+
 # ---------------------------------------------------------------------------
 # WeightHistogramLogger
 # ---------------------------------------------------------------------------
