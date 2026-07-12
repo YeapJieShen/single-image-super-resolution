@@ -73,7 +73,7 @@ class SRDataModule(lightning.LightningDataModule):
         self._test_ds: dict[str, Dataset] = {}
 
     @property
-    def test_names(self) -> list:
+    def test_names(self) -> list[str]:
         """Ordered list of test dataset names — drives BenchmarkImageLogger auto-discovery.
 
         Returns:
@@ -116,7 +116,7 @@ class SRDataModule(lightning.LightningDataModule):
         """
         return DataLoader(self._train_ds, shuffle=True, **self._train_dl_kwargs)
 
-    def val_dataloader(self) -> list:
+    def val_dataloader(self) -> list[DataLoader]:
         """Primary validation loader followed by every test loader.
 
         Index 0 is the held-out primary val set; indices 1+ are the test
@@ -132,7 +132,7 @@ class SRDataModule(lightning.LightningDataModule):
             loaders.append(DataLoader(ds, shuffle=False, **self._test_dl_kwargs))
         return loaders
 
-    def test_dataloader(self) -> list:
+    def test_dataloader(self) -> list[DataLoader]:
         """Test loaders only — for ``cli test --ckpt_path <path>`` final eval.
 
         Returns:

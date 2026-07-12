@@ -16,6 +16,7 @@ import torch
 import torchmetrics.functional
 import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..models.base import SRModel
 from ..processors import SRProcessor
@@ -425,7 +426,7 @@ class SRLightning(lightning.LightningModule):
         """
         return None
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build optimizer (and optional scheduler) from top-level YAML.
 
         Uniform LR by default — ``self.optimizer(self.parameters())``

@@ -10,7 +10,7 @@ class SRModel(nn.Module, abc.ABC):
     """Abstract base for SR architectures.
 
     Subclasses must populate ``self._hparams`` in ``__init__`` and
-    implement :meth:`forward`. ``reset_parameters`` is a no-op by default;
+    implement ``forward``. ``reset_parameters`` is a no-op by default;
     override it for paper-faithful weight init schemes.
     """
 
@@ -28,9 +28,9 @@ class SRModel(nn.Module, abc.ABC):
     def reset_parameters(self, **kwargs) -> None:
         """Optional paper-style weight init. Default: no-op (kwargs ignored).
 
-        Subclasses may declare specific kwargs (e.g. :class:`SRCNN`'s ``mean`` /
+        Subclasses may declare specific kwargs (e.g. ``SRCNN``'s ``mean`` /
         ``std``). The base accepts ``**kwargs`` so callers like
-        :class:`~sisr.training.SRLightning` can pass paper-init options
+        ``SRLightning`` can pass paper-init options
         polymorphically without knowing the subclass signature — models that
         don't override absorb the kwargs as no-ops.
         """
