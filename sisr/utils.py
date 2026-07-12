@@ -12,7 +12,7 @@ LR/HR sub-image pairs.
 import shutil
 import lmdb
 import torch
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 from tqdm.auto import tqdm
 from collections.abc import Callable, Sequence
@@ -132,7 +132,7 @@ class LMDBCacheBuildContext:
             pbar = tqdm(total=len(items), desc=desc, unit="item")
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            pending: dict[Any, int] = {}
+            pending: set[Future] = set()
 
             def _submit():
                 nonlocal next_submit
@@ -140,23 +140,20 @@ class LMDBCacheBuildContext:
                     args = (items[next_submit],)
                     if process_args is not None:
                         args = args + tuple(process_args[next_submit])
-                    f = executor.submit(process_fn, *args)
-                    pending[f] = next_submit
+                    pending.add(executor.submit(process_fn, *args))
                     next_submit += 1
 
-            for _ in range(min(num_workers, len(items))):
+            for _ in range(num_workers):
                 _submit()
 
             while pending:
-                done = next(iter(as_completed(pending)))
-                pending.pop(done)
-
-                self.write_batch(done.result())
-
-                if pbar is not None:
-                    pbar.update(1)
-
-                _submit()
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending.discard(future)
+                    self.write_batch(future.result())
+                    if pbar is not None:
+                        pbar.update(1)
+                    _submit()
 
         if pbar is not None:
             pbar.close()
