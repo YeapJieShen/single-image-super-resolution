@@ -255,6 +255,13 @@ def test_srcheckpoint_custom_filename_prefix():
     assert ckpt.filename.startswith("myrun-")
 
 
+def test_srcheckpoint_default_filename_prefix_is_neutral_sr():
+    """P5.5: the generic checkpoint's default prefix must be arch-neutral 'sr',
+    not the SRCNN-specific 'srcnn'."""
+    ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
+    assert ckpt.filename.startswith("sr-")
+
+
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger validation/test hook bodies (mock-driven, no Trainer)
 # ---------------------------------------------------------------------------

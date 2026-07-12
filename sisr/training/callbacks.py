@@ -540,7 +540,7 @@ class SRCheckpoint(ModelCheckpoint):
             Defaults to ``3``.
         dirpath (str | None): Directory to save checkpoints.
         filename_prefix (str): Prefix for checkpoint filenames.
-            Defaults to ``"srcnn"``.
+            Defaults to ``"sr"``.
         **kwargs: Extra keyword arguments forwarded to
             :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
     """
@@ -550,7 +550,7 @@ class SRCheckpoint(ModelCheckpoint):
         monitor_metric: str = "val_psnr(RGB)",
         save_top_k: int = 3,
         dirpath: str | None = None,
-        filename_prefix: str = "srcnn",
+        filename_prefix: str = "sr",
         mode: str = "max",
         **kwargs: Any,
     ):
