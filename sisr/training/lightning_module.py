@@ -210,6 +210,56 @@ class SRLightning(lightning.LightningModule):
         """
         return self.model(x)
 
+    def _forward_sr(
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Canonical SR forward: extract → model → reconstruct → crop HR.
+
+        The single source of truth for the forward pipeline. Shared by
+        :meth:`_step` (which also needs the model-space output for the loss)
+        and :meth:`predict_rgb` (the public scoring seam), so the training and
+        benchmark-logging paths cannot silently diverge.
+
+        Args:
+            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
+                ``(B, 3, H, W)``.
+            hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
+
+        Returns:
+            ``(sr_model_out, sr_rgb, hr_cropped)`` — the raw model output in
+            the model IO colorspace, the reconstructed SR RGB, and HR
+            center-cropped to the SR spatial size.
+        """
+        model_input = self.processor.extract(lr_img)
+        sr_model_out = self.model(model_input)
+        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
+        return sr_model_out, sr_rgb, hr_cropped
+
+    def predict_rgb(
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the SR forward and return spatially-aligned SR / HR RGB tensors.
+
+        Public scoring seam consumed by the training path (via :meth:`_step`)
+        and by :class:`~sisr.training.callbacks.BenchmarkImageLogger`, so
+        neither re-implements the ``extract → model → reconstruct →
+        center_crop`` pipeline nor reaches into ``.model`` / ``.processor``.
+        Gradient tracking follows the caller's context — wrap in
+        ``torch.no_grad()`` for pure inference.
+
+        Args:
+            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
+                ``(B, 3, H, W)``.
+            hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
+
+        Returns:
+            ``(sr_rgb, hr_cropped)`` — SR RGB and HR center-cropped to the SR
+            spatial size, both RGB ``float32``.
+        """
+        _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
+        return sr_rgb, hr_cropped
+
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -231,11 +281,7 @@ class SRLightning(lightning.LightningModule):
         """
         lr_img, hr_img = batch
 
-        model_input = self.processor.extract(lr_img)
-        sr_model_out = self.model(model_input)
-        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
-
-        hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
+        sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
         hr_for_loss = self.processor.extract(hr_cropped)
         loss = self.criterion(sr_model_out, hr_for_loss)
 
