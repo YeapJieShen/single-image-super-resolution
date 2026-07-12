@@ -88,7 +88,12 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --import-mode=importlib"
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning:lightning.*",
-    "ignore::DeprecationWarning:lightning_utilities.*",
-    "ignore::PendingDeprecationWarning",
+    # Lightning 2.6.5 constructs torch 2.12's deprecated pytree `LeafSpec` at
+    # lightning/pytorch/utilities/_pytree.py:21, so any real Trainer loop emits a
+    # FutureWarning: "`isinstance(treespec, LeafSpec)` is deprecated, use
+    # `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.".
+    # Scoped to the lightning namespace + dated 2026-07-12; drop this once lightning
+    # stops calling torch's deprecated pytree API (track the next lightning/torch bump).
+    # Upstream: https://github.com/Lightning-AI/pytorch-lightning (pytree LeafSpec deprecation)
+    "ignore::FutureWarning:lightning.*",
 ]
