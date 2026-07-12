@@ -105,7 +105,7 @@ class LMDBCacheBuildContext:
         process_args: Sequence[Sequence[Any]] | None = None,
         num_workers: int | None = None,
         desc: str = "Building LMDB cache",
-    ):
+    ) -> None:
         """Processes *items* and writes the results to LMDB.
 
         The worker function *process_fn* must be a top-level (picklable)
@@ -339,7 +339,7 @@ class LMDBCache:
         map_size: int,
         build_fn: Callable[[LMDBCacheBuildContext], None],
         use_tqdm: bool,
-    ):
+    ) -> None:
         """Creates a fresh LMDB and delegates population to *build_fn*.
 
         Args:

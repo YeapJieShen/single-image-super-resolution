@@ -1,7 +1,7 @@
 """SRCNN-paper-faithful training and eval defaults.
 
-Subclassing :class:`SRTrainingConfig` / :class:`SREvalConfig` from
-:mod:`sisr.training.config` lets the SRCNN-paper recipe live alongside the
+Subclassing ``SRTrainingConfig`` / ``SREvalConfig`` from
+``sisr.training.config`` lets the SRCNN-paper recipe live alongside the
 model architecture, so an SRCNN experiment YAML only has to point at these
 classes via ``class_path`` to inherit defaults.
 
@@ -20,7 +20,7 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     """SRCNN-paper-faithful training defaults.
 
     The paper trains on the Y channel of YCbCr only (selected at the YAML
-    layer by pairing with :class:`~sisr.processors.YChannelProcessor`) and
+    layer by pairing with ``YChannelProcessor``) and
     uses a per-layer learning rate of ``1e-4`` for the feature-extraction
     and non-linear-mapping layers and ``1e-5`` for the reconstruction layer
     — i.e. the last layer learns 10× slower. Weight initialization follows
@@ -32,12 +32,12 @@ class SRCNNTrainingConfig(SRTrainingConfig):
         layer_lrs: Per-``Conv2d`` LRs ``[1e-4, 1e-4, 1e-5]`` matching the
             paper's recipe. Set to ``None`` to disable per-layer LRs.
         init_strategy: ``'paper'`` (default) triggers the Gaussian
-            init via :meth:`SRCNN.reset_parameters` in
-            :class:`~sisr.training.SRLightning`'s constructor;
+            init via ``SRCNN.reset_parameters`` in
+            ``SRLightning``'s constructor;
             ``'default'`` skips it and uses PyTorch's defaults.
         init_mean / init_std: Gaussian parameters used by
             ``init_strategy='paper'``; inherited from
-            :class:`~sisr.training.config.SRTrainingConfig` with defaults
+            ``SRTrainingConfig`` with defaults
             ``0.0`` / ``0.01`` matching the SRCNN paper. Override in YAML
             to deviate.
     """

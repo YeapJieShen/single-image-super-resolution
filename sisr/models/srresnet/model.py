@@ -211,10 +211,16 @@ class SRResNet(SRModel):
     ) -> torch.Tensor:
         """Forward pass of the SRResNet model.
 
+        clamp_output is a direct-call convenience for offline inference: the
+        SRLightning training and validation paths always call model(x) without
+        it, so clamping only takes effect on direct model(x, clamp_output=True)
+        calls used to clip the raw output into a displayable range.
+
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, in_out_channels, height, width).
-            clamp_output (bool): Whether to clamp the output values to a specified range.
-                Default is False.
+            clamp_output (bool): Whether to clamp the output to clamp_minmax. Only
+                honoured on direct model(x, clamp_output=True) calls; the SRLightning
+                pipeline never sets it. Default is False.
             clamp_minmax (tuple[float, float]): The minimum and maximum values for clamping
                 the output. Default is (0.0, 1.0).
 

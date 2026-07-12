@@ -2,10 +2,10 @@
 
 Split into two classes by lifecycle:
 
-* :class:`SRTrainingConfig` controls behaviour during ``cli fit`` — per-Conv2d
+* ``SRTrainingConfig`` controls behaviour during ``cli fit`` — per-Conv2d
   learning rates, paper-init knobs, and the example input shape used to log
   the model graph to TensorBoard.
-* :class:`SREvalConfig` controls validation/test metric computation —
+* ``SREvalConfig`` controls validation/test metric computation —
   boundary-pixel exclusion (``crop_border``) and which colorspaces PSNR is
   reported in.
 
@@ -15,7 +15,7 @@ Per-architecture defaults live in subclasses next to the model code (e.g.
 overrides individual fields with ``init_args``.
 
 The colorspace the model trains in is no longer a string field here; it is
-expressed by the choice of processor (see :mod:`sisr.processors`).
+expressed by the choice of processor (see ``sisr.processors``).
 """
 
 from dataclasses import dataclass, field
@@ -32,7 +32,7 @@ class SRTrainingConfig:
             ``None`` (default), training uses the optimizer's base ``lr``
             uniformly across all parameters.  Only valid for architectures
             where every trainable parameter lives in a ``Conv2d`` (no
-            BatchNorm / PReLU); :meth:`SRLightning.configure_optimizers`
+            BatchNorm / PReLU); ``SRLightning.configure_optimizers``
             raises ``ValueError`` otherwise.
 
         example_input_shape: Shape of a single input sample *excluding* the
@@ -41,7 +41,7 @@ class SRTrainingConfig:
             TensorBoard logger can capture the model graph.
 
         init_strategy: ``'paper'`` triggers a paper-faithful weight init via
-            :meth:`SRModel.reset_parameters` in :class:`SRLightning`'s constructor;
+            ``SRModel.reset_parameters`` in ``SRLightning``'s constructor;
             ``'default'`` (the default) skips it and uses PyTorch's defaults.
             Subclasses pin a paper-faithful default (e.g. ``SRCNNTrainingConfig``
             uses ``'paper'``).
