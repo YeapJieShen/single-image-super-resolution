@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import lightning
 import pytest
 import torch
+import torchmetrics
 
 from sisr.models.base import SRModel
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
@@ -485,3 +486,17 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
     pred_sr, pred_hr = srcnn_y_lit.predict_rgb(lr, hr)
     torch.testing.assert_close(pred_sr, step_sr)
     torch.testing.assert_close(pred_hr, step_hr)
+
+
+# ---------------------------------------------------------------------------
+# P2.2 — no dead stateful metric accumulator
+# ---------------------------------------------------------------------------
+
+def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
+    """Regression (P2.2): PSNR/SSIM are computed via torchmetrics.functional,
+    so SRLightning registers no stateful torchmetrics.Metric accumulators that
+    would grow unread and unreset across a validation run."""
+    stateful = [m for m in srcnn_y_lit.modules() if isinstance(m, torchmetrics.Metric)]
+    assert stateful == [], (
+        f"expected no stateful torchmetrics.Metric accumulators; found {stateful}"
+    )
