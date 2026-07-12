@@ -91,8 +91,10 @@ testpaths = ["tests"]
 # subdirs (e.g. tests/models/srcnn/test_model.py vs
 # tests/models/srresnet/test_model.py) without requiring __init__.py files.
 # -n 8 is the measured-clean xdist worker count; -n auto (=16 here) oversubscribed.
-# Capped so it merely time-slices on smaller CI runners.
-addopts = "-ra --strict-markers --import-mode=importlib -n 8"
+# Capped so it merely time-slices on smaller CI runners. --dist=loadscope keeps
+# same-module tests on one worker so module-scoped fixtures (e.g. the shared
+# SRCNN LMDB cache) build once instead of once per worker.
+addopts = "-ra --strict-markers --import-mode=importlib -n 8 --dist=loadscope"
 filterwarnings = [
     "error",
     # Lightning 2.6.5 constructs torch 2.12's deprecated pytree `LeafSpec` at
