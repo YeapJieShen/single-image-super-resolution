@@ -131,3 +131,25 @@ def test_hparams_architectural_only():
         padding=0,
     )
     assert set(model.hparams.keys()) == {"num_channels", "num_filters", "kernel_sizes", "padding"}
+
+
+def test_forward_multilayer_mapping_builds_extra_conv_and_preserves_shape():
+    """A 3-entry num_filters (64, 32, 16) exercises the mapping comprehension
+    for TWO hidden convs — every other valid config uses (64, 32) -> a single
+    mapping conv, so the loop over range(len(num_filters) - 1) is untested for
+    >1 layer. Asserts the deep net builds exactly 4 Conv2d (feat + 2 mapping +
+    recon), that `mapping` holds 2 of them, and that same padding preserves the
+    spatial size through the forward pass."""
+    model = SRCNN(
+        num_channels=3,
+        num_filters=(64, 32, 16),
+        kernel_sizes=(9, 1, 3, 5),   # len == len(num_filters) + 1
+        padding="same",
+    )
+    n_convs = sum(1 for m in model.modules() if isinstance(m, torch.nn.Conv2d))
+    assert n_convs == 4
+    # (64,32) would give a single mapping conv; (64,32,16) must give two.
+    assert sum(1 for m in model.mapping if isinstance(m, torch.nn.Conv2d)) == 2
+    x = torch.zeros(2, 3, 16, 16)
+    out = model(x)
+    assert out.shape == (2, 3, 16, 16)
