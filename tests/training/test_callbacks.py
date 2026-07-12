@@ -323,22 +323,39 @@ def test_benchmark_validation_epoch_end_logs_means():
     assert psnr_call.args[1] == pytest.approx(31.0)
 
 
-def test_benchmark_validation_epoch_end_logs_image_strips_when_on_interval(tmp_path: Path):
-    """When _val_run_count hits the log interval, image strips are emitted to
-    a TensorBoardLogger via experiment.add_image / add_scalar."""
+def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path: Path, monkeypatch):
+    """When on the log interval, _flush_buffer must actually call
+    experiment.add_image once (the bicubic|SR|HR strip) and experiment.add_scalar
+    for the per-image psnr + ssim. The old test only checked it didn't raise, so
+    a silently-skipped emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    # SRCNN-style: LR already at HR size (4x4). One image, one psnr key.
     cb._buffer["Set5"] = [
         ("img_0", torch.rand(3, 4, 4), torch.rand(3, 4, 4), torch.rand(3, 4, 4),
          {"RGB": 30.0}, 0.9),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    experiment = tb_logger.experiment  # materialize the SummaryWriter before wrapping
+    add_image = MagicMock(wraps=experiment.add_image)
+    add_scalar = MagicMock(wraps=experiment.add_scalar)
+    monkeypatch.setattr(experiment, "add_image", add_image)
+    monkeypatch.setattr(experiment, "add_scalar", add_scalar)
+
     trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
     cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
-    tb_logger.finalize("success")  # flush
+    tb_logger.finalize("success")
+
+    add_image.assert_called_once()
+    tag, strip = add_image.call_args.args[0], add_image.call_args.args[1]
+    assert tag == "Set5/img_0"
+    assert strip.ndim == 3 and strip.shape[0] == 3   # (C, H, W) triptych
+    # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
+    scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
+    assert scalar_tags == ["Set5_psnr(RGB)/img_0", "Set5_ssim/img_0"]
 
 
 def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path, monkeypatch):
@@ -379,10 +396,11 @@ def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path,
     torch.testing.assert_close(panels[2], hr)
 
 
-def test_benchmark_image_strips_handle_upscaling_sizes(tmp_path: Path):
-    """For an upscaling model (SRResNet) the LR is smaller than SR/HR; the
-    strip must bicubic-upsample LR to HR size rather than crash make_grid on
-    a size mismatch."""
+def test_benchmark_image_strips_upsample_lr_to_hr_size(tmp_path: Path, monkeypatch):
+    """For an upscaling model (SRResNet) LR (4x4) is smaller than SR/HR (16x16);
+    the strip must bicubic-upsample LR to HR size, so add_image is called once
+    with a panel taller than the LR (not crash make_grid on a size mismatch, and
+    not log at LR size). The old test only asserted it didn't raise."""
     import lightning.pytorch.loggers as pl_loggers
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
@@ -394,9 +412,20 @@ def test_benchmark_image_strips_handle_upscaling_sizes(tmp_path: Path):
          {"RGB": 30.0}, 0.9),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    experiment = tb_logger.experiment
+    add_image = MagicMock(wraps=experiment.add_image)
+    monkeypatch.setattr(experiment, "add_image", add_image)
+
     trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
     cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)  # must not raise
     tb_logger.finalize("success")
+
+    add_image.assert_called_once()
+    strip = add_image.call_args.args[1]
+    # make_grid pads each panel by 2px per side -> HR-sized panels give height
+    # 16 + 4 = 20; the point is it is upsampled to HR (>> the 4px LR).
+    assert strip.shape[-2] == 20
+    assert strip.shape[-2] > 4
 
 
 def test_benchmark_test_batch_end_collects_with_zero_indexed_mapping():
@@ -436,7 +465,11 @@ def test_benchmark_test_epoch_end_logs_means():
 # WeightHistogramLogger on-cadence path
 # ---------------------------------------------------------------------------
 
-def test_weight_histogram_logger_emits_on_cadence(tmp_path: Path):
+def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(tmp_path: Path, monkeypatch):
+    """On-cadence, the logger must call experiment.add_histogram exactly once for
+    the single `model.`-prefixed parameter (the non-model param is filtered out),
+    with the prefix-grouped tag. The old test only checked it didn't raise, so a
+    broken `model.` filter or a missing emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
     cb = WeightHistogramLogger(log_every_n_steps=1)
     pl_module = MagicMock()
@@ -445,9 +478,17 @@ def test_weight_histogram_logger_emits_on_cadence(tmp_path: Path):
         ("non_model_param", torch.nn.Parameter(torch.rand(4))),  # filtered out
     ])
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    experiment = tb_logger.experiment
+    add_histogram = MagicMock(wraps=experiment.add_histogram)
+    monkeypatch.setattr(experiment, "add_histogram", add_histogram)
+
     trainer = SimpleNamespace(global_step=1, loggers=[tb_logger])
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
     tb_logger.finalize("success")
+
+    add_histogram.assert_called_once()
+    # name.split('.', 2) -> ["model","feat","0.weight"]; tag = "model" + "." + "feat/0.weight"
+    assert add_histogram.call_args.args[0] == "model.feat/0.weight"
 
 
 # ---------------------------------------------------------------------------
