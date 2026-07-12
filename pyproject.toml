@@ -69,6 +69,7 @@ dev = [
     # tests/test_cli.py parses/emits config YAML directly; PyYAML otherwise
     # resolves only transitively (via jsonargparse/lightning), which is fragile.
     "pyyaml>=6",
+    "ruff>=0.9",
 ]
 
 [project.scripts]
@@ -106,3 +107,25 @@ filterwarnings = [
     # Upstream: https://github.com/Lightning-AI/pytorch-lightning (pytree LeafSpec deprecation)
     "ignore::FutureWarning:lightning.*",
 ]
+
+[tool.ruff]
+# Ruff owns lint + format for this project (INIT.1). line-length 100 matches the
+# code as written: 88 would reflow ~157 lines across every file, 100 only ~53
+# (mostly docstrings the formatter can't wrap). It governs both E501 and the
+# formatter's wrap width. target-version pins syntax so UP never rewrites below
+# our requires-python floor. Formatter runs with defaults (double quotes, which
+# already dominate the tree).
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# E,F: pycodestyle errors + pyflakes (unused imports/vars, undefined names).
+# I: import sorting. UP: pyupgrade (modern syntax for the py312 floor).
+# B: flake8-bugbear (likely-bug patterns, e.g. zip() without strict=).
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Re-export hubs import names purely to surface them under short class paths.
+# Names in __all__ are already treated as used; this documents the intent and
+# covers any future __init__.py that omits __all__.
+"__init__.py" = ["F401"]
