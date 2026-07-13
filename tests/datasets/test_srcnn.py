@@ -118,6 +118,46 @@ def test_train_dataset_rejects_channels_param(tiny_rgb_image_dir: Path):
         _make_train(tiny_rgb_image_dir, channels="L", subimg_size=20, stride=8)
 
 
+def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Path):
+    """build_num_workers=1 must thread through to an inline LMDB build (no
+    ProcessPoolExecutor), so the one-time build is safe inside a test/xdist
+    worker instead of nesting an 8-process pool."""
+    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+        ds = _make_train(
+            tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
+    mock_pool.assert_not_called()
+    assert len(ds) > 0
+    lr, hr = ds[0]
+    assert lr.shape == (3, 20, 20)
+    assert hr.shape == (3, 20, 20)
+
+
+def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
+    """_compute_offsets and the worker must derive the sliding-window grid from
+    one shared helper, so their patch counts can never silently disagree and
+    misalign the LMDB lr_/hr_ keys."""
+    from sisr.datasets.srcnn import _iter_patch_origins, _process_subimages
+
+    ds = _make_train(
+        tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
+    _, total = ds._compute_offsets()
+
+    # The worker's actual emitted pairs (one lr + one hr per patch) across every
+    # image must sum to exactly the offset total.
+    worker_total = 0
+    for i, path in enumerate(ds.img_paths):
+        pairs = _process_subimages(path, 20, 8, 2, 1.0, ds._img_offsets[i])
+        worker_total += len(pairs) // 2
+    assert worker_total == total
+
+    # And the helper enumerates the expected grid for the 36x36 fixture:
+    # crop 36 -> 36 (divisible by scale=2); (36-20)//8 + 1 = 3 positions per axis.
+    origins = list(_iter_patch_origins(36, 36, 2, 20, 8))
+    assert len(origins) == 9
+    assert origins[0] == (0, 0)
+    assert (16, 16) in origins
+
+
 # ---------------------------------------------------------------------------
 # ValidationDataset
 # ---------------------------------------------------------------------------

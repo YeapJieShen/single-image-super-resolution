@@ -9,10 +9,11 @@ Lightning or model code.
 :class:`~sisr.datasets.srcnn.TrainDataset` to persist precomputed
 LR/HR sub-image pairs.
 """
+import os
 import shutil
 import lmdb
 import torch
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 from tqdm.auto import tqdm
 from collections.abc import Callable, Sequence
@@ -101,17 +102,17 @@ class LMDBCacheBuildContext:
         items: Sequence[Any],
         process_fn: Callable[..., list[tuple[str, bytes]]],
         process_args: Sequence[Sequence[Any]] | None = None,
-        num_workers: int = 8,
+        num_workers: int | None = None,
         desc: str = "Building LMDB cache",
     ):
-        """Processes *items* in parallel and writes results to LMDB.
+        """Processes *items* and writes the results to LMDB.
 
-        Each item is submitted to a ``ProcessPoolExecutor``.  The worker
-        function *process_fn* must be a top-level (picklable) callable
-        that returns a list of ``(key, value_bytes)`` tuples.
-
-        A sliding window of *num_workers* in-flight jobs keeps workers
-        busy while the main process writes completed results.
+        The worker function *process_fn* must be a top-level (picklable)
+        callable returning a list of ``(key, value_bytes)`` tuples.  With more
+        than one effective worker a ``ProcessPoolExecutor`` runs a sliding
+        window of *num_workers* in-flight jobs while the main process writes
+        completed results; with ``<= 1`` effective worker the jobs run inline in
+        the calling process (no subprocess).
 
         Args:
             items (Sequence[Any]): One item per job (e.g. a list of image paths).
@@ -121,42 +122,59 @@ class LMDBCacheBuildContext:
                 If ``None``, each job calls ``process_fn(item)``.
                 If provided, must have the same length as *items* and
                 each element is unpacked as positional args.
-            num_workers (int): Maximum number of parallel worker processes.
+            num_workers (int | None): Maximum number of parallel worker
+                processes.  ``None`` resolves to ``min(os.cpu_count() or 1,
+                len(items))``.  When the effective count is ``<= 1`` (a single
+                core, a lone item, or an explicit ``1``) the build runs inline
+                with no ``ProcessPoolExecutor``.
             desc (str): Description shown in the ``tqdm`` progress bar.
         """
-        num_workers = min(num_workers, len(items))
+        n_items = len(items)
+        if num_workers is None:
+            num_workers = min(os.cpu_count() or 1, n_items)
+        num_workers = min(num_workers, n_items)
+
+        pbar = tqdm(total=n_items, desc=desc, unit="item") if self.use_tqdm else None
+
+        # Inline (no-pool) build. With <= 1 effective worker the
+        # ProcessPoolExecutor spawn/import cost — plus the hazard of nesting a
+        # pool inside a test/xdist worker — isn't worth it, so run jobs here.
+        if num_workers <= 1:
+            for i in range(n_items):
+                args = (items[i],)
+                if process_args is not None:
+                    args = args + tuple(process_args[i])
+                self.write_batch(process_fn(*args))
+                if pbar is not None:
+                    pbar.update(1)
+            if pbar is not None:
+                pbar.close()
+            return
+
         next_submit = 0
-
-        pbar = None
-        if self.use_tqdm:
-            pbar = tqdm(total=len(items), desc=desc, unit="item")
-
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            pending: dict[Any, int] = {}
+            pending: set[Future] = set()
 
             def _submit():
                 nonlocal next_submit
-                if next_submit < len(items):
+                if next_submit < n_items:
                     args = (items[next_submit],)
                     if process_args is not None:
                         args = args + tuple(process_args[next_submit])
-                    f = executor.submit(process_fn, *args)
-                    pending[f] = next_submit
+                    pending.add(executor.submit(process_fn, *args))
                     next_submit += 1
 
-            for _ in range(min(num_workers, len(items))):
+            for _ in range(num_workers):
                 _submit()
 
             while pending:
-                done = next(iter(as_completed(pending)))
-                pending.pop(done)
-
-                self.write_batch(done.result())
-
-                if pbar is not None:
-                    pbar.update(1)
-
-                _submit()
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending.discard(future)
+                    self.write_batch(future.result())
+                    if pbar is not None:
+                        pbar.update(1)
+                    _submit()
 
         if pbar is not None:
             pbar.close()

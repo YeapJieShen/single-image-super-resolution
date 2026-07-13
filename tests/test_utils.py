@@ -236,3 +236,74 @@ def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
     with patch("sisr.utils.lmdb.open", side_effect=ValueError("unexpected")):
         with pytest.raises(ValueError, match="unexpected"):
             cache._try_load("abc")
+
+
+# ---------------------------------------------------------------------------
+# LMDBCacheBuildContext.parallel_build
+# ---------------------------------------------------------------------------
+
+def _sq_process_fn(item: int) -> list[tuple[str, bytes]]:
+    """Top-level (picklable) worker: squares *item* into one keyed pair.
+
+    Must be module-level so ProcessPoolExecutor can pickle it on spawn platforms.
+    """
+    return [(f"n_{item}", str(item * item).encode())]
+
+
+def test_parallel_build_persists_every_submitted_item(tmp_path: Path):
+    """parallel_build must submit every item to the pool and persist each
+    worker's returned pairs — previously only write_batch was covered, so the
+    submit/collect loop was untested."""
+    def build(ctx: LMDBCacheBuildContext) -> None:
+        ctx.parallel_build(items=[2, 3, 4, 5], process_fn=_sq_process_fn, num_workers=2)
+
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="pb",
+        checksum="c",
+        length=4,
+        map_size=_MAP_SIZE,
+        build_fn=build,
+    )
+    assert cache.length == 4
+    assert cache.get("n_2") == b"4"
+    assert cache.get("n_5") == b"25"
+
+
+def test_parallel_build_single_worker_skips_process_pool(tmp_path: Path):
+    """num_workers=1 must run the build inline (no ProcessPoolExecutor), so it
+    is safe to nest inside a test/xdist worker without oversubscribing cores."""
+    def build(ctx: LMDBCacheBuildContext) -> None:
+        ctx.parallel_build(items=[2, 3, 4], process_fn=_sq_process_fn, num_workers=1)
+
+    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+        cache = LMDBCache(
+            cache_dir=tmp_path,
+            name="pb1",
+            checksum="c",
+            length=3,
+            map_size=_MAP_SIZE,
+            build_fn=build,
+        )
+    mock_pool.assert_not_called()
+    assert cache.get("n_2") == b"4"
+    assert cache.get("n_4") == b"16"
+
+
+def test_parallel_build_none_workers_builds_single_item_inline(tmp_path: Path):
+    """num_workers=None must resolve to min(os.cpu_count() or 1, n_items); a lone
+    item yields <= 1 effective worker and therefore an inline build."""
+    def build(ctx: LMDBCacheBuildContext) -> None:
+        ctx.parallel_build(items=[7], process_fn=_sq_process_fn, num_workers=None)
+
+    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+        cache = LMDBCache(
+            cache_dir=tmp_path,
+            name="pbn",
+            checksum="c",
+            length=1,
+            map_size=_MAP_SIZE,
+            build_fn=build,
+        )
+    mock_pool.assert_not_called()
+    assert cache.get("n_7") == b"49"

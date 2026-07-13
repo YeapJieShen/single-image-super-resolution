@@ -15,7 +15,40 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from pathlib import Path
+from collections.abc import Iterator
 from ..utils import LMDBCache, LMDBCacheBuildContext
+
+
+def _iter_patch_origins(
+    height: int,
+    width: int,
+    scale: int,
+    sub_img_size: int,
+    stride: int,
+) -> Iterator[tuple[int, int]]:
+    """Yields the ``(top, left)`` origin of every sliding-window sub-image.
+
+    Each axis is first cropped to a multiple of *scale* (so the bicubic LR
+    downsample is exact), then a *sub_img_size* window is walked across the
+    cropped grid in *stride* steps.  Both :meth:`TrainDataset._compute_offsets`
+    and :func:`_process_subimages` consume this, so the patch count and ordering
+    can never disagree and misalign the LMDB ``lr_``/``hr_`` keys.
+
+    Args:
+        height (int): Full image height in pixels.
+        width (int): Full image width in pixels.
+        scale (int): Downscaling factor; each axis is cropped to a multiple of it.
+        sub_img_size (int): Side length of the square sub-image window.
+        stride (int): Step size of the sliding window.
+
+    Yields:
+        ``(top, left)`` pixel offsets of each sub-image's top-left corner.
+    """
+    h_crop = height - (height % scale)
+    w_crop = width - (width % scale)
+    for top in range(0, h_crop - sub_img_size + 1, stride):
+        for left in range(0, w_crop - sub_img_size + 1, stride):
+            yield top, left
 
 
 def _process_subimages(
@@ -35,7 +68,8 @@ def _process_subimages(
     than at module level so that workers spawned on Windows do not need
     to pickle the Compose object across the process boundary.
 
-    For each sliding-window position the function:
+    For each sliding-window position (from the shared
+    :func:`_iter_patch_origins` grid) the function:
       1. Crops the HR sub-image with a direct numpy slice (deterministic,
          pixel-exact — no need for ``A.Crop`` overhead).
       2. Generates the LR sub-image by Gaussian-blurring then
@@ -61,9 +95,6 @@ def _process_subimages(
     """
     arr = np.array(Image.open(path).convert('RGB'))
     h, w = arr.shape[:2]
-    w_crop = w - (w % scale)
-    h_crop = h - (h % scale)
-    arr = arr[:h_crop, :w_crop, :]
 
     lr_size = sub_img_size // scale
     kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
@@ -74,19 +105,18 @@ def _process_subimages(
     ])
 
     keyed_pairs = []
-    idx = base_idx
+    for offset, (top, left) in enumerate(
+        _iter_patch_origins(h, w, scale, sub_img_size, stride)
+    ):
+        idx = base_idx + offset
+        hr_subimg = arr[top:top + sub_img_size, left:left + sub_img_size, :]
+        lr_subimg = lr_pipeline(image=hr_subimg)['image']
 
-    for top in range(0, h_crop - sub_img_size + 1, stride):
-        for left in range(0, w_crop - sub_img_size + 1, stride):
-            hr_subimg = arr[top:top + sub_img_size, left:left + sub_img_size, :]
-            lr_subimg = lr_pipeline(image=hr_subimg)['image']
+        hr_chw = hr_subimg.transpose(2, 0, 1)
+        lr_chw = lr_subimg.transpose(2, 0, 1)
 
-            hr_chw = hr_subimg.transpose(2, 0, 1)
-            lr_chw = lr_subimg.transpose(2, 0, 1)
-
-            keyed_pairs.append((f'lr_{idx:08d}', lr_chw.tobytes()))
-            keyed_pairs.append((f'hr_{idx:08d}', hr_chw.tobytes()))
-            idx += 1
+        keyed_pairs.append((f'lr_{idx:08d}', lr_chw.tobytes()))
+        keyed_pairs.append((f'hr_{idx:08d}', hr_chw.tobytes()))
 
     return keyed_pairs
 
@@ -119,6 +149,11 @@ class TrainDataset(torch.utils.data.Dataset):
             build.  Defaults to ``False``.
         cache_dir (str | Path | None): Directory in which to store the
             LMDB cache.  Defaults to ``img_dir / '.lmdb_cache'``.
+        build_num_workers (int | None): Number of worker processes for the
+            one-time LMDB build.  ``None`` (default) uses
+            ``min(os.cpu_count() or 1, num_images)``; a value that resolves to
+            ``<= 1`` effective workers runs an inline, no-subprocess build.
+            Only affects cache construction, not data loading.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``.
@@ -133,6 +168,7 @@ class TrainDataset(torch.utils.data.Dataset):
         blur_sigma: float = 1.0,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
+        build_num_workers: int | None = None,
     ):
         super().__init__()
 
@@ -141,6 +177,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.stride = stride
         self.scale = scale
         self.blur_sigma = blur_sigma
+        self.build_num_workers = build_num_workers
 
         self.img_paths = sorted(
             [p for p in self.img_dir.glob('*.*') if p.is_file()])
@@ -208,12 +245,10 @@ class TrainDataset(torch.utils.data.Dataset):
             img = Image.open(path)
             w, h = img.size
             img.close()
-            w_crop = w - (w % self.scale)
-            h_crop = h - (h % self.scale)
-            n_h = max(0, (h_crop - self.sub_img_size) // self.stride + 1)
-            n_w = max(0, (w_crop - self.sub_img_size) // self.stride + 1)
+            n = sum(1 for _ in _iter_patch_origins(
+                h, w, self.scale, self.sub_img_size, self.stride))
             offsets.append(offset)
-            offset += n_h * n_w
+            offset += n
         return offsets, offset
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
@@ -237,7 +272,7 @@ class TrainDataset(torch.utils.data.Dataset):
             items=self.img_paths,
             process_fn=_process_subimages,
             process_args=process_args,
-            num_workers=8,
+            num_workers=self.build_num_workers,
             desc="Building LMDB cache",
         )
 
