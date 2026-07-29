@@ -20,8 +20,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # setup-uv stopped publishing moving major/minor tags at v8.0.0 as supply-chain
+      # hardening, so this pins an exact patch unlike the @v4/@v5 actions above.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
       - name: Install ruff
-        run: pip install ruff
+        run: uv pip install --system ruff
       - name: Ruff lint
         run: ruff check --output-format=github .
       - name: Ruff format check
@@ -42,10 +47,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
+      # See the lint job for why this pins an exact patch version.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
       - name: Install
-        run: pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
       - name: Run tests with coverage
         run: pytest -n 8 --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
       - name: Upload coverage to Codecov
