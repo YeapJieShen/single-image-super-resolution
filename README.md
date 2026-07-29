@@ -91,6 +91,10 @@ rest from PyPI. Same convention as PyTorch's own
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install .
+
+# or, with uv (inside the activated environment):
+python -m uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+python -m uv pip install .
 ```
 
 The bundled templates set `accelerator: cuda`; change it to `cpu` to run without a GPU.
@@ -112,7 +116,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"     # or: python -m uv pip install -e ".[dev]"
 pytest
 ```
 

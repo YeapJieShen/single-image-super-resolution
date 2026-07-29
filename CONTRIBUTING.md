@@ -9,14 +9,31 @@ covers how to set up a development environment, run the tests, and land a change
 Requires **Python ≥ 3.12**.
 
 ```bash
-# Clone your fork, then install in editable mode with the dev extras:
+# Clone your fork:
 git clone https://github.com/YeapJieShen/single-image-super-resolution.git
 cd single-image-super-resolution
-pip install -e ".[dev]"
+
+# Create an isolated environment (conda shown; any virtualenv works):
+conda create -n sisr python=3.13
+conda activate sisr
+
+# Install uv into the environment, then install the project with dev extras:
+pip install uv
+python -m uv pip install -e ".[dev]"
 ```
 
-The `[dev]` extra adds the test toolchain (`pytest`, `pytest-cov`). `pyproject.toml`
-is the single source of truth for dependencies — there is no `requirements.txt`.
+Invoke it as `python -m uv`, not bare `uv`: uv resolves `VIRTUAL_ENV` ahead of the active
+conda env, so the bare binary installs into whatever virtualenv happens to be active,
+while `python -m uv` targets the interpreter you just activated.
+
+`uv` is a much faster drop-in replacement for `pip install`. Installing it *into* the
+environment keeps it self-contained — removing the environment removes uv with it. Plain
+`pip install -e ".[dev]"` remains fully supported; CI's **build** check verifies the
+end-user `pip install .` path on all four matrix legs.
+
+The `[dev]` extra adds the test and lint toolchain (`pytest`, `pytest-cov`,
+`pytest-xdist`, `pyyaml`, `ruff`). `pyproject.toml` is the single source of truth for
+dependencies — there is no `requirements.txt`.
 
 If you develop on a CUDA GPU, install the CUDA `torch` / `torchvision` wheels from
 PyTorch's own index **first** (the `+cu###` wheels are not on PyPI), then install the
