@@ -2,8 +2,8 @@
 
 import torch
 
+from sisr.colorspace import rgb_to_ycbcr
 from sisr.processors import SRProcessor, YCbCrProcessor
-from sisr.utils import rgb_to_ycbcr
 
 
 def test_ycbcr_processor_is_srprocessor():
@@ -32,7 +32,7 @@ def test_ycbcr_reconstruct_matches_bt601_inverse_not_just_clamp():
     lr = torch.rand(1, 3, 2, 2)  # only its shape matters to reconstruct
     out = p.reconstruct(ycbcr, lr)
 
-    # Hand-computed BT.601 full-range inverse (coefficients from sisr.utils).
+    # Hand-computed BT.601 full-range inverse (coefficients from sisr.colorspace).
     cb, cr = 0.1, -0.1
     r = 0.5 + 1.402 * cr
     g = 0.5 - 0.344 * cb - 0.714 * cr
@@ -46,7 +46,7 @@ def test_ycbcr_reconstruct_matches_bt601_inverse_not_just_clamp():
 def test_ycbcr_roundtrip_recovers_input():
     """extract -> reconstruct approximately recovers the input RGB.
 
-    Tolerance is 1e-3 because the BT.601 coefficients in :mod:`sisr.utils`
+    Tolerance is 1e-3 because the BT.601 coefficients in :mod:`sisr.colorspace`
     are truncated to 3 decimal places (e.g. ``-0.169`` vs the exact
     ``-0.168736``), so the forward and inverse matrices aren't perfect
     inverses. Observed worst-case error is ~5e-4 across the chroma channels.

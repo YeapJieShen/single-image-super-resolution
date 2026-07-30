@@ -2,7 +2,9 @@
 
 
 def test_public_exports():
+    from sisr.cache import LMDBCache, LMDBCacheBuildContext  # noqa: F401
     from sisr.cli import main  # noqa: F401
+    from sisr.colorspace import rgb_to_ycbcr, ycbcr_to_rgb  # noqa: F401
     from sisr.datasets.srcnn import TrainDataset, ValidationDataset  # noqa: F401
     from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig  # noqa: F401
     from sisr.models.srresnet.model import (  # noqa: F401
@@ -19,10 +21,4 @@ def test_public_exports():
         SRLightning,
         SRTrainingConfig,
         WeightHistogramLogger,
-    )
-    from sisr.utils import (  # noqa: F401
-        LMDBCache,
-        LMDBCacheBuildContext,
-        rgb_to_ycbcr,
-        ycbcr_to_rgb,
     )

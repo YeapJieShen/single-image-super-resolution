@@ -1,72 +1,12 @@
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import lmdb
 import pytest
-import torch
 
-from sisr.utils import (
-    LMDBCache,
-    LMDBCacheBuildContext,
-    rgb_to_ycbcr,
-    ycbcr_to_rgb,
-)
-
-# ---------------------------------------------------------------------------
-# Colorspace utilities
-# ---------------------------------------------------------------------------
-
-
-def test_rgb_to_ycbcr_shape_and_dtype():
-    x = torch.rand(2, 3, 8, 8, dtype=torch.float32)
-    y = rgb_to_ycbcr(x)
-    assert y.shape == (2, 3, 8, 8)
-    assert y.dtype == torch.float32
-
-
-def test_ycbcr_to_rgb_shape_and_dtype():
-    x = torch.rand(2, 3, 8, 8, dtype=torch.float32)
-    y = ycbcr_to_rgb(x)
-    assert y.shape == (2, 3, 8, 8)
-    assert y.dtype == torch.float32
-
-
-def test_rgb_to_ycbcr_known_values_white():
-    # White: (1, 1, 1) -> Y=1, Cb=0.5, Cr=0.5
-    x = torch.ones(1, 3, 1, 1)
-    y = rgb_to_ycbcr(x)
-    expected = torch.tensor([[[[1.0]], [[0.5]], [[0.5]]]])
-    assert torch.allclose(y, expected, atol=1e-5)
-
-
-def test_rgb_to_ycbcr_known_values_black():
-    # Black: (0, 0, 0) -> Y=0, Cb=0.5, Cr=0.5
-    x = torch.zeros(1, 3, 1, 1)
-    y = rgb_to_ycbcr(x)
-    expected = torch.tensor([[[[0.0]], [[0.5]], [[0.5]]]])
-    assert torch.allclose(y, expected, atol=1e-5)
-
-
-def test_rgb_to_ycbcr_known_values_red():
-    # Pure red: (1, 0, 0) -> Y=0.299, Cb=0.5−0.169, Cr=0.5+0.500
-    x = torch.tensor([[[[1.0]], [[0.0]], [[0.0]]]])
-    y = rgb_to_ycbcr(x)
-    expected = torch.tensor([[[[0.299]], [[0.331]], [[1.000]]]])
-    assert torch.allclose(y, expected, atol=1e-5)
-
-
-def test_round_trip_within_coefficient_precision():
-    # BT.601 coefficients are 3-decimal-place; round-trip error floor ~5e-4.
-    torch.manual_seed(0)
-    x = torch.rand(1, 3, 16, 16)
-    y = ycbcr_to_rgb(rgb_to_ycbcr(x))
-    err = (y - x).abs().max().item()
-    assert err < 5e-4
-
-
-# ---------------------------------------------------------------------------
-# LMDBCache
-# ---------------------------------------------------------------------------
+from sisr.cache import LMDBCache, LMDBCacheBuildContext
 
 _MAP_SIZE = 16 * 1024 * 1024  # 16 MiB — plenty for tiny test caches
 
@@ -78,6 +18,34 @@ def _make_build_fn(n: int, value_prefix: bytes = b"v"):
         ctx.write_batch([(f"key_{i}", value_prefix + str(i).encode()) for i in range(n)])
 
     return build
+
+
+# ---------------------------------------------------------------------------
+# Import weight
+# ---------------------------------------------------------------------------
+
+
+def test_cache_module_imports_no_torch():
+    """sisr.cache must not pull torch in, directly or transitively.
+
+    parallel_build fans out over a ProcessPoolExecutor, and on spawn platforms
+    each worker re-imports the module tree holding its process_fn. A torch
+    import reachable from here costs every worker several seconds for a
+    dependency the build path never calls, so guard it: a fresh interpreter is
+    required because the test session itself has torch loaded already.
+    """
+    probe = "import sys, sisr.cache; print('torch' in sys.modules)"
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert proc.stdout.strip() == "False", (
+        "sisr.cache now imports torch (directly or transitively). Every spawned "
+        "LMDB build worker pays that import for nothing — move the torch-dependent "
+        "code to sisr.colorspace or another module."
+    )
+
+
+# ---------------------------------------------------------------------------
+# LMDBCache
+# ---------------------------------------------------------------------------
 
 
 def test_lmdb_build_and_read(tmp_path: Path):
@@ -219,7 +187,7 @@ def test_lmdb_try_load_swallows_lmdb_error_and_drops_cache(tmp_path: Path):
         build_fn=_make_build_fn(1),
     )
     assert cache.path.exists()
-    with patch("sisr.utils.lmdb.open", side_effect=lmdb.Error("corrupt")):
+    with patch("sisr.cache.lmdb.open", side_effect=lmdb.Error("corrupt")):
         assert cache._try_load("abc") is False
     assert not cache.path.exists()
 
@@ -235,7 +203,7 @@ def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
         map_size=_MAP_SIZE,
         build_fn=_make_build_fn(1),
     )
-    with patch("sisr.utils.lmdb.open", side_effect=ValueError("unexpected")):
+    with patch("sisr.cache.lmdb.open", side_effect=ValueError("unexpected")):
         with pytest.raises(ValueError, match="unexpected"):
             cache._try_load("abc")
 
@@ -281,7 +249,7 @@ def test_parallel_build_single_worker_skips_process_pool(tmp_path: Path):
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[2, 3, 4], process_fn=_sq_process_fn, num_workers=1)
 
-    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
         cache = LMDBCache(
             cache_dir=tmp_path,
             name="pb1",
@@ -302,7 +270,7 @@ def test_parallel_build_none_workers_builds_single_item_inline(tmp_path: Path):
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[7], process_fn=_sq_process_fn, num_workers=None)
 
-    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
         cache = LMDBCache(
             cache_dir=tmp_path,
             name="pbn",

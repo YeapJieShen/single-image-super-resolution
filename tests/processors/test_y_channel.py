@@ -2,8 +2,8 @@
 
 import torch
 
+from sisr.colorspace import rgb_to_ycbcr, ycbcr_to_rgb
 from sisr.processors import SRProcessor, YChannelProcessor
-from sisr.utils import rgb_to_ycbcr, ycbcr_to_rgb
 
 
 def test_y_channel_processor_is_srprocessor():
@@ -38,7 +38,7 @@ def test_y_channel_reconstruct_same_size_roundtrips_to_lr():
         rgb_to_ycbcr(lr)[:, 1:], size=(16, 16), mode="bicubic", align_corners=False
     )
     assert torch.equal(same, rgb_to_ycbcr(lr)[:, 1:])  # bicubic@same-size == identity
-    # Tolerance 1e-3: the BT.601 coeffs in sisr.utils are truncated to 3 dp, so
+    # Tolerance 1e-3: the BT.601 coeffs in sisr.colorspace are truncated to 3 dp, so
     # the forward/inverse matrices aren't perfect inverses (worst-case ~5e-4).
     assert torch.allclose(out, lr, atol=1e-3)
 

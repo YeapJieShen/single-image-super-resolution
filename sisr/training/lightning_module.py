@@ -18,9 +18,9 @@ import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
+from ..colorspace import rgb_to_ycbcr
 from ..models.base import SRModel
 from ..processors import SRProcessor
-from ..utils import rgb_to_ycbcr
 from .config import SREvalConfig, SRTrainingConfig
 
 

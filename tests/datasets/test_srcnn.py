@@ -144,7 +144,7 @@ def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Pat
     """build_num_workers=1 must thread through to an inline LMDB build (no
     ProcessPoolExecutor), so the one-time build is safe inside a test/xdist
     worker instead of nesting an 8-process pool."""
-    with patch("sisr.utils.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
         ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
     mock_pool.assert_not_called()
     assert len(ds) > 0

@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from sisr.utils import rgb_to_ycbcr, ycbcr_to_rgb
+from sisr.colorspace import rgb_to_ycbcr, ycbcr_to_rgb
 
 from .base import SRProcessor
 
