@@ -91,11 +91,17 @@ testpaths = ["tests"]
 # --import-mode=importlib avoids duplicate-basename collisions across test
 # subdirs (e.g. tests/models/srcnn/test_model.py vs
 # tests/models/srresnet/test_model.py) without requiring __init__.py files.
-# -n 8 is the measured-clean xdist worker count; -n auto (=16 here) oversubscribed.
-# Capped so it merely time-slices on smaller CI runners. --dist=loadscope keeps
-# same-module tests on one worker so module-scoped fixtures (e.g. the shared
-# SRCNN LMDB cache) build once instead of once per worker.
-addopts = "-ra --strict-markers --import-mode=importlib -n 8 --dist=loadscope"
+# -n 2, deliberately low: every xdist worker is a fresh interpreter that
+# cold-imports the whole torch + lightning stack (~10s; torch 3.7s, plus scipy
+# and sympy via torchmetrics/torchvision), while the suite's own compute is only
+# ~20s. Past a couple of workers the added startup costs more than the
+# parallelism wins back. Measured 2026-07-30, 8-core/16-thread Windows:
+# -n 0 44.0s, -n 2 38.3s, -n 4 38.3s, -n 8 47.1s (-n auto = 16 is far worse).
+# Re-measure before raising this — "more workers" is not free here, and the
+# break-even moves whenever the import cost or the suite's compute changes.
+# --dist=loadscope keeps same-module tests on one worker so module-scoped
+# fixtures (e.g. the shared SRCNN LMDB cache) build once instead of once per worker.
+addopts = "-ra --strict-markers --import-mode=importlib -n 2 --dist=loadscope"
 filterwarnings = [
     "error",
     # Lightning 2.6.5 constructs torch 2.12's deprecated pytree `LeafSpec` at
