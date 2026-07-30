@@ -11,7 +11,7 @@ class SRProcessor(abc.ABC):
     Partitioned by colorspace, not by model — the same processor instance
     is shared across all models that train in that colorspace. Replaces
     the per-batch colorspace logic that previously lived as standalone
-    functions in :mod:`sisr.utils`.
+    functions in :mod:`sisr.colorspace`.
     """
 
     @abc.abstractmethod

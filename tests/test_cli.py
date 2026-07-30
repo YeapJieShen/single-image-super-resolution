@@ -1,9 +1,10 @@
-"""CLI tests: mostly in-process config resolution, plus two subprocess smokes.
+"""CLI tests: in-process config resolution, plus one subprocess entry-point smoke.
 
 Config-resolution / matmul / override / subcommand-help assertions run in-process
 via ``SRLightningCLI(args=..., run=False)`` (see ``_resolve``); only
-``test_cli_print_config_resolves`` and ``test_cli_help_lists_subcommands`` still
-spawn the installed ``sisr`` console script to exercise the real entry point.
+``test_cli_help_lists_subcommands`` spawns the installed ``sisr`` console script.
+Each spawn re-imports the whole torch + lightning stack (~10s wall), so a single
+smoke covers "the entry point works" and every other assertion runs in-process.
 """
 
 import subprocess
@@ -83,22 +84,31 @@ def _resolve(*args: str):
         sys.argv = saved_argv
 
 
-def test_cli_print_config_resolves():
-    """`cli fit --print_config` exits 0 and resolves the SRCNN template."""
-    proc = _cli("fit", "--config", str(TEMPLATE), "--print_config")
-    assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
-    out = proc.stdout
-    # Sanity markers — confirm config-class wiring resolved correctly.
-    assert "class_path: sisr.models.srcnn.SRCNN" in out
-    assert "class_path: sisr.processors.YChannelProcessor" in out
-    assert "class_path: sisr.models.srcnn.SRCNNTrainingConfig" in out
-    assert "class_path: sisr.models.srcnn.SRCNNEvalConfig" in out
-    assert "layer_lrs:" in out
-    assert "crop_border: 3" in out
-    # The removed model_colorspace field must not reappear.
-    assert "model_colorspace" not in out
+def test_srcnn_config_resolves_in_process():
+    """SRCNN template resolves to the paper-faithful model/processor/config
+    classes — resolved in-process (no subprocess).
+
+    Ports the class-wiring assertions of the old subprocess ``--print_config``
+    test. ``cli.config`` is the same merged config ``--print_config`` dumps, so
+    these assert on resolved objects rather than on dumped YAML text.
+    """
+    from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
+    from sisr.processors import YChannelProcessor
+
+    cli = _resolve("--config", str(TEMPLATE))
+    m = cli.model
+    assert isinstance(m.model, SRCNN)
+    assert isinstance(m.processor, YChannelProcessor)
+    assert isinstance(m.training_config, SRCNNTrainingConfig)
+    assert isinstance(m.eval_config, SRCNNEvalConfig)
+    assert m.eval_config.crop_border == 3  # inherited-default check
+    # Paper recipe: reconstruction layer learns 10x slower than the other two.
+    assert m.training_config.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
     # Top-level optimizer block linked from YAML.
-    assert "optimizer:" in out
+    assert cli.config.optimizer.class_path == "torch.optim.SGD"
+    # The removed model_colorspace field must not reappear.
+    assert not hasattr(m, "model_colorspace")
+    assert not hasattr(m.eval_config, "model_colorspace")
 
 
 def test_srresnet_config_resolves_in_process():
