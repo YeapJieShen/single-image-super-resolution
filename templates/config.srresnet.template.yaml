@@ -9,7 +9,7 @@ model:
   model:
     class_path: sisr.models.srresnet.SRResNet
     init_args:
-      scale: 4
+      scale: &scale 4
       in_out_channels: 3
       hidden_channel: 64
       kernel_sizes: [9, 3, 9]
@@ -29,25 +29,25 @@ data:
     class_path: sisr.datasets.srresnet.TrainDataset
     init_args:
       img_dir: data/DIV2K_train_HR
-      scale: 4
+      scale: *scale
       hr_crop_size: 96
       crops_per_image: 1
   val_dataset:
     class_path: sisr.datasets.srresnet.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
-      scale: 4
+      scale: *scale
   test_datasets:
     Set5:
       class_path: sisr.datasets.srresnet.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
-        scale: 4
+        scale: *scale
     Set14:
       class_path: sisr.datasets.srresnet.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
-        scale: 4
+        scale: *scale
   train_dataloader_kwargs:
     batch_size: 16
     num_workers: 16
@@ -78,12 +78,10 @@ trainer:
       init_args:
         monitor_metric: val_psnr(RGB)
         save_top_k: 3
-        dirpath: experiments/SRResNet/baseline
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: val_ssim
         save_top_k: 3
-        dirpath: experiments/SRResNet/baseline
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
@@ -93,13 +91,12 @@ trainer:
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
-        save_dir: experiments
-        name: SRResNet
-        version: baseline
+        <<: &log_dest
+          save_dir: experiments
+          name: SRResNet
+          version: baseline
         log_graph: true
         default_hp_metric: false
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
-        save_dir: experiments
-        name: SRResNet
-        version: baseline
+        <<: *log_dest
