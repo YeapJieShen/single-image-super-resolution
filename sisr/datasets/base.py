@@ -2,19 +2,17 @@
 
 All four architecture datasets (SRCNN / SRResNet train + validation) subclass
 :class:`SRDataset`. It centralises the file discovery (extension-allowlisted
-glob + empty-directory guard), the RGB image load, and the AlbumentationsX
-``uint8`` HWC → ``float32`` CHW ``[0, 1]`` tensor adapter, and declares the
-``.img_paths`` filename contract that :class:`~sisr.training.SRDataModule`
-and :class:`~sisr.training.callbacks.BenchmarkImageLogger` rely on.
+glob + empty-directory guard), the RGB image load, the ``uint8`` HWC →
+``float32`` CHW ``[0, 1]`` tensor adapter, and declares the ``.img_paths``
+filename contract that :class:`~sisr.training.SRDataModule` and
+:class:`~sisr.training.callbacks.BenchmarkImageLogger` rely on.
 """
 
 import abc
 from pathlib import Path
 
-import albumentations as A
 import numpy as np
 import torch
-from albumentations.pytorch import ToTensorV2
 from PIL import Image
 
 
@@ -88,14 +86,21 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         return np.array(Image.open(path).convert("RGB"))
 
     @staticmethod
-    def _to_tensor_transform() -> A.Compose:
-        """Build the AlbumentationsX uint8-HWC → float32-CHW-``[0, 1]`` adapter.
+    def _to_tensor(image: np.ndarray) -> torch.Tensor:
+        """Converts a ``uint8`` HWC array to a ``float32`` CHW ``[0, 1]`` tensor.
+
+        Byte-identical replacement for the removed AlbumentationsX
+        ``ToFloat(255.0)`` + ``ToTensorV2()`` chain (probed against
+        albumentations 2.1.0 with this project's exact call-site
+        parameters).
+
+        Args:
+            image: ``uint8`` array, HWC.
 
         Returns:
-            An :class:`albumentations.Compose` of ``ToFloat(max_value=255.0)``
-            followed by :class:`~albumentations.pytorch.ToTensorV2`.
+            ``float32`` tensor, CHW, values in ``[0, 1]``.
         """
-        return A.Compose([A.ToFloat(max_value=255.0), ToTensorV2()])
+        return torch.from_numpy(image).permute(2, 0, 1).float().div(255.0)
 
     @abc.abstractmethod
     def __len__(self) -> int:

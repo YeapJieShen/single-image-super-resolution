@@ -30,15 +30,15 @@ def varied_size_rgb_image_dir(tmp_path: Path) -> Path:
 
 
 def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
-    """LR must be the cv2 INTER_CUBIC downscale of the SAME HR crop the item
-    returned — not merely a (3, h/scale, w/scale) tensor in [0, 1]. Recovers the
-    returned HR crop as uint8 and re-runs the dataset's own LR pipeline as the
-    reference; the crop is random, but LR and HR come from one call, so the
-    reference is exact. A regression to bilinear/nearest downscaling fails here."""
-    import albumentations as A
-    import cv2
+    """LR must be the MATLAB-compatible bicubic downscale of the SAME HR crop
+    the item returned — not merely a (3, h/scale, w/scale) tensor in [0, 1].
+    Recovers the returned HR crop as uint8 and re-runs the dataset's own
+    resize primitive as the reference; the crop is random, but LR and HR come
+    from one call, so the reference is exact. A regression to a different
+    interpolation/backend fails here."""
     import numpy as np
-    from albumentations.pytorch import ToTensorV2
+
+    from sisr.imresize import resize
 
     ds = TrainDataset(img_dir=tiny_rgb_image_dir, scale=4, hr_crop_size=16)
     lr, hr = ds[0]
@@ -51,17 +51,11 @@ def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
     # Reference: recover the HR crop as uint8 HWC and re-run the dataset's own
-    # LR pipeline (A.Resize INTER_CUBIC -> ToFloat -> ToTensorV2).
+    # resize primitive (backend='matlab', the dataset's default).
     hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
     lr_size = 16 // 4
-    ref_pipeline = A.Compose(
-        [
-            A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
-            A.ToFloat(max_value=255.0),
-            ToTensorV2(),
-        ]
-    )
-    lr_expected = ref_pipeline(image=hr_uint8)["image"]
+    lr_expected_arr = resize(hr_uint8, (lr_size, lr_size), backend="matlab")
+    lr_expected = torch.from_numpy(lr_expected_arr).permute(2, 0, 1).float().div(255.0)
     torch.testing.assert_close(lr, lr_expected, atol=1e-6, rtol=0)
 
 
@@ -282,6 +276,69 @@ def test_train_dataset_checksum_ignores_crop_params(tiny_rgb_image_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# resize_backend (INIT.11) — no blur_sigma param here; SRResNet never had one.
+# ---------------------------------------------------------------------------
+
+
+def test_train_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
+    ds = TrainDataset(
+        img_dir=tiny_rgb_image_dir,
+        scale=2,
+        hr_crop_size=16,
+        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
+        build_num_workers=1,
+    )
+    assert ds.resize_backend == "matlab"
+
+
+def test_train_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
+    # Separate cache_dir per dataset: both backends key to the same checksum
+    # (see test below), and LMDB disallows two live environments on one path
+    # within a single process, which reading from both here would trip.
+    ds_matlab = TrainDataset(
+        img_dir=tiny_rgb_image_dir,
+        scale=4,
+        hr_crop_size=16,
+        resize_backend="matlab",
+        cache_dir=tiny_rgb_image_dir / ".lmdb_cache_matlab",
+        build_num_workers=1,
+    )
+    ds_cv2 = TrainDataset(
+        img_dir=tiny_rgb_image_dir,
+        scale=4,
+        hr_crop_size=16,
+        resize_backend="cv2",
+        cache_dir=tiny_rgb_image_dir / ".lmdb_cache_cv2",
+        build_num_workers=1,
+    )
+    lr_matlab, _ = ds_matlab[0]
+    lr_cv2, _ = ds_cv2[0]
+    assert not torch.allclose(lr_matlab, lr_cv2)
+
+
+def test_train_dataset_backend_does_not_affect_checksum(tiny_rgb_image_dir: Path):
+    """The HR cache stores raw pixels only; the resize backend is applied at
+    read time, so switching it must not trigger an unnecessary cache rebuild."""
+    ds_matlab = TrainDataset(
+        img_dir=tiny_rgb_image_dir,
+        scale=2,
+        hr_crop_size=16,
+        resize_backend="matlab",
+        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
+        build_num_workers=1,
+    )
+    ds_cv2 = TrainDataset(
+        img_dir=tiny_rgb_image_dir,
+        scale=2,
+        hr_crop_size=16,
+        resize_backend="cv2",
+        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
+        build_num_workers=1,
+    )
+    assert ds_matlab._compute_checksum() == ds_cv2._compute_checksum()
+
+
+# ---------------------------------------------------------------------------
 # ValidationDataset (full image)
 # ---------------------------------------------------------------------------
 
@@ -310,6 +367,18 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
     lr_b, hr_b = ds[0]
     assert torch.equal(lr_a, lr_b), "validation LR must be deterministic"
     assert torch.equal(hr_a, hr_b), "validation HR must be deterministic"
+
+
+def test_validation_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
+    assert ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2).resize_backend == "matlab"
+
+
+def test_validation_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
+    ds_matlab = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=4, resize_backend="matlab")
+    ds_cv2 = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=4, resize_backend="cv2")
+    lr_matlab, _ = ds_matlab[0]
+    lr_cv2, _ = ds_cv2[0]
+    assert not torch.allclose(lr_matlab, lr_cv2)
 
 
 # ---------------------------------------------------------------------------

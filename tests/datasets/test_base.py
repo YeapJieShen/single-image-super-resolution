@@ -74,9 +74,9 @@ def test_load_rgb_returns_hwc_uint8_rgb(tmp_path: Path):
     assert arr.dtype == np.uint8
 
 
-def test_to_tensor_transform_produces_chw_float01(tmp_path: Path):
+def test_to_tensor_produces_chw_float01(tmp_path: Path):
     arr = np.full((4, 4, 3), 255, dtype=np.uint8)
-    t = SRDataset._to_tensor_transform()(image=arr)["image"]
+    t = SRDataset._to_tensor(arr)
     assert t.shape == (3, 4, 4)
     assert t.dtype == torch.float32
     assert torch.allclose(t, torch.ones(3, 4, 4))

@@ -24,6 +24,12 @@ model:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 
 data:
+  # resize_backend defaults to 'matlab' (MATLAB-compatible antialiased bicubic,
+  # comparable to published paper numbers) on every dataset below. blur_sigma is
+  # omitted to match: it is only meaningful (and only accepted) on resize_backend:
+  # cv2, which has no antialiasing of its own and exists solely to reproduce LMDB
+  # caches built before the matlab backend existed. See README.md's benchmark
+  # protocol section.
   train_dataset:
     class_path: sisr.datasets.srcnn.TrainDataset
     init_args:
@@ -31,7 +37,6 @@ data:
       subimg_size: 33
       stride: 14
       scale: &scale 3
-      blur_sigma: &blur_sigma 1.0
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
@@ -39,20 +44,17 @@ data:
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
-      blur_sigma: *blur_sigma
   test_datasets:
     Set5:
       class_path: sisr.datasets.srcnn.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
-        blur_sigma: *blur_sigma
     Set14:
       class_path: sisr.datasets.srcnn.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
-        blur_sigma: *blur_sigma
   train_dataloader_kwargs:
     batch_size: 64
     num_workers: 16
