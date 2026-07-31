@@ -56,8 +56,21 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install
         run: uv pip install --system -e ".[dev]"
+      # -n 2, deliberately low: every xdist worker is a fresh interpreter that
+      # cold-imports the whole torch + lightning stack (~10s; torch 3.7s, plus scipy
+      # and sympy via torchmetrics/torchvision), while the suite's own compute is only
+      # ~20s. Past a couple of workers the added startup costs more than the
+      # parallelism wins back. Measured 2026-07-30, 8-core/16-thread Windows:
+      # -n 0 44.0s, -n 2 38.3s, -n 4 38.3s, -n 8 47.1s (-n auto = 16 is far worse).
+      # Re-measure before raising this — "more workers" is not free here, and the
+      # break-even moves whenever the import cost or the suite's compute changes.
+      # GitHub runners have fewer cores than the machine above, so -n 8 (this
+      # workflow's previous setting) already sits past the break-even point measured
+      # as slower than serial there; -n 2 is the safer choice here too.
+      # --dist=loadscope keeps same-module tests on one worker so module-scoped
+      # fixtures (e.g. the shared SRCNN LMDB cache) build once instead of once per worker.
       - name: Run tests with coverage
-        run: pytest -n 8 --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
+        run: pytest -n 2 --dist=loadscope --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
         uses: codecov/codecov-action@v5
