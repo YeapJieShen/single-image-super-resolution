@@ -25,10 +25,9 @@ on Ampere+ GPUs to enable TF32 matmul kernels.
 SRCNN limitation. It requires the optional ``export`` extra
 (``pip install '.[export]'``).
 
-Top-level ``cudnn_benchmark:`` (``true`` / ``false``) sets
-``torch.backends.cudnn.benchmark`` once at startup. Free win whenever input
-shapes are static across steps, as they are for this project's fixed training
-crops (cuDNN autotunes a kernel per shape on first sight and reuses it).
+cuDNN autotuning is *not* exposed here — Lightning's own ``trainer.benchmark:``
+already assigns ``torch.backends.cudnn.benchmark``, and it coordinates with
+``trainer.deterministic``. A separate top-level key would silently bypass that.
 """
 
 import sys
@@ -87,9 +86,10 @@ class SRLightningCLI(LightningCLI):
     own ``configure_optimizers`` then constructs the optimizer (uniform or
     per-Conv2d ``param_groups`` depending on ``training_config.layer_lrs``).
 
-    Also exposes top-level ``matmul_precision`` / ``cudnn_benchmark`` YAML keys
-    that apply process-global torch flags in
-    :meth:`before_instantiate_classes`.
+    Also exposes a top-level ``matmul_precision`` YAML key that calls
+    :func:`torch.set_float32_matmul_precision` in
+    :meth:`before_instantiate_classes`. ``Trainer`` has no equivalent, unlike
+    cuDNN autotuning which ``trainer.benchmark:`` already covers.
 
     Defaults ``trainer_class`` to :class:`_ExportTrainer`: :meth:`subcommands`
     unconditionally registers ``export``, and ``LightningCLI`` resolves every
@@ -114,8 +114,7 @@ class SRLightningCLI(LightningCLI):
         super().__init__(*args, trainer_class=trainer_class, **kwargs)
 
     def add_arguments_to_parser(self, parser):
-        """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` /
-        ``cudnn_benchmark:`` keys.
+        """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
         Non-subclass mode (``model_class=SRLightning`` fixed) means
         ``SRLightning``'s init args land at ``model.<arg>``, not
@@ -134,27 +133,14 @@ class SRLightningCLI(LightningCLI):
                 "enable TF32 matmul kernels."
             ),
         )
-        parser.add_argument(
-            "--cudnn_benchmark",
-            type=bool | None,
-            default=None,
-            help=(
-                "If set, assigns torch.backends.cudnn.benchmark before "
-                "instantiating classes. Use True when input shapes are static "
-                "across steps (cuDNN autotunes and caches a kernel per shape)."
-            ),
-        )
 
     def before_instantiate_classes(self):
-        """Apply process-global flags (``matmul_precision``, ``cudnn_benchmark``)
-        before class instantiation."""
+        """Apply process-global flags (``matmul_precision``) before class instantiation."""
         if self.subcommand is None:
             return
-        config = self.config[self.subcommand]
-        if config.matmul_precision is not None:
-            torch.set_float32_matmul_precision(config.matmul_precision)
-        if config.cudnn_benchmark is not None:
-            torch.backends.cudnn.benchmark = config.cudnn_benchmark
+        precision = self.config[self.subcommand].matmul_precision
+        if precision is not None:
+            torch.set_float32_matmul_precision(precision)
 
     @staticmethod
     def subcommands() -> dict[str, set[str]]:
