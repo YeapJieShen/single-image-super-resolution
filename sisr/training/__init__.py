@@ -8,6 +8,7 @@ from .callbacks import (
     BenchmarkImageLogger,
     GradNormLogger,
     SRCheckpoint,
+    SRPredictionWriter,
     WeightHistogramLogger,
 )
 from .config import SREvalConfig, SRTrainingConfig
@@ -22,5 +23,6 @@ __all__ = [
     "BenchmarkImageLogger",
     "GradNormLogger",
     "SRCheckpoint",
+    "SRPredictionWriter",
     "WeightHistogramLogger",
 ]

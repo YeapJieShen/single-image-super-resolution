@@ -227,15 +227,38 @@ class SRLightning(lightning.LightningModule):
         """
         return self.model(x)
 
+    def _forward_lr(self, lr_img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """LR-only core of the forward pipeline: extract → model → reconstruct.
+
+        Factored out of :meth:`_forward_sr` so :meth:`predict_step` can share
+        the exact colorspace pipeline instead of forking it — HR is only ever
+        needed for the center-crop :meth:`_forward_sr` adds on top, which has
+        no meaning without an HR reference at inference time.
+
+        Args:
+            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
+                ``(B, 3, H, W)``.
+
+        Returns:
+            ``(sr_model_out, sr_rgb)`` — the raw model output in the model IO
+            colorspace, and the reconstructed SR RGB.
+        """
+        model_input = self.processor.extract(lr_img)
+        sr_model_out = self.model(model_input)
+        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        return sr_model_out, sr_rgb
+
     def _forward_sr(
         self, lr_img: torch.Tensor, hr_img: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Canonical SR forward: extract → model → reconstruct → crop HR.
 
         The single source of truth for the forward pipeline. Shared by
-        :meth:`_step` (which also needs the model-space output for the loss)
-        and :meth:`predict_rgb` (the public scoring seam), so the training and
-        benchmark-logging paths cannot silently diverge.
+        :meth:`_step` (which also needs the model-space output for the loss),
+        :meth:`predict_rgb` (the public scoring seam), and — via
+        :meth:`_forward_lr` — :meth:`predict_step` (the HR-free inference
+        seam), so the training, benchmark-logging, and prediction paths
+        cannot silently diverge.
 
         Args:
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
@@ -247,9 +270,7 @@ class SRLightning(lightning.LightningModule):
             the model IO colorspace, the reconstructed SR RGB, and HR
             center-cropped to the SR spatial size.
         """
-        model_input = self.processor.extract(lr_img)
-        sr_model_out = self.model(model_input)
-        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        sr_model_out, sr_rgb = self._forward_lr(lr_img)
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
         return sr_model_out, sr_rgb, hr_cropped
 
@@ -415,6 +436,34 @@ class SRLightning(lightning.LightningModule):
             dataloader_idx: Index of the test loader (unused).
         """
         return None
+
+    def predict_step(
+        self, batch: torch.Tensor, batch_idx: int, dataloader_idx: int = 0
+    ) -> torch.Tensor:
+        """Run the HR-free inference pipeline: extract → model → reconstruct.
+
+        Shares :meth:`_forward_lr` with :meth:`_forward_sr` (the pipeline
+        backing :meth:`_step` / :meth:`predict_rgb`) — the same colorspace
+        pipeline minus the HR-dependent center-crop and scoring, neither of
+        which has meaning without an HR reference. Paired with
+        :meth:`~sisr.training.SRDataModule.predict_dataloader` and typically
+        consumed by :class:`~sisr.training.callbacks.SRPredictionWriter`.
+
+        Args:
+            batch: LR batch, RGB ``float32`` in ``[0, 1]``, shape
+                ``(B, 3, H, W)``, as produced by
+                :class:`~sisr.datasets.predict.PredictDataset`.
+            batch_idx: Index of the batch within the predict run (unused).
+            dataloader_idx: Index of the predict loader (unused — a single
+                predict loader is expected).
+
+        Returns:
+            SR RGB tensor, ``float32`` in ``[0, 1]``, shape
+            ``(B, 3, H', W')`` — same size as the input for SRCNN,
+            ``H'=H*scale``/``W'=W*scale`` for SRResNet.
+        """
+        _, sr_rgb = self._forward_lr(batch)
+        return sr_rgb
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build optimizer (and optional scheduler) from top-level YAML.

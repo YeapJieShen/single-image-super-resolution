@@ -33,6 +33,10 @@ class SRDataModule(lightning.LightningDataModule):
     * :meth:`test_dataloader` returns the test loaders only, for
       ``cli test --ckpt_path <path>`` final evaluation.
 
+    :meth:`predict_dataloader` serves a separate, optional LR-only dataset
+    (e.g. :class:`~sisr.datasets.predict.PredictDataset`) for ``cli predict``
+    — the only stage with no HR reference at all.
+
     Architecture-agnostic: each dataset spec carries its own ``class_path``,
     so swapping in an alternative pipeline (e.g. SRResNet's random-crop dataset)
     only requires pointing the YAML at a different class.
@@ -43,12 +47,20 @@ class SRDataModule(lightning.LightningDataModule):
             held-out validation dataset.
         test_datasets: ``{name: {class_path, init_args}}`` mapping for held-out
             test sets (Set5, Set14, …). ``None`` disables test evaluation.
+        predict_dataset: ``{class_path, init_args}`` spec for the LR-only
+            prediction dataset. ``None`` (default) leaves ``cli predict``
+            unconfigured — :meth:`predict_dataloader` raises if called.
         train_dataloader_kwargs: DataLoader kwargs for the training loader
             (excluding ``shuffle``, which is forced to ``True``).
         val_dataloader_kwargs: DataLoader kwargs for the primary validation
             loader. Defaults to ``{'batch_size': 1, 'num_workers': 1}``.
         test_dataloader_kwargs: DataLoader kwargs reused for every test
             loader. Defaults to the same as the validation loader.
+        predict_dataloader_kwargs: DataLoader kwargs for the prediction
+            loader. Defaults to ``{'batch_size': 1, 'num_workers': 0}`` —
+            predict images vary in size so batch_size 1 is the safe default,
+            and num_workers 0 keeps a one-off inference call free of
+            multiprocessing startup cost.
     """
 
     def __init__(
@@ -56,21 +68,26 @@ class SRDataModule(lightning.LightningDataModule):
         train_dataset: dict[str, Any],
         val_dataset: dict[str, Any],
         test_datasets: dict[str, dict[str, Any]] | None = None,
+        predict_dataset: dict[str, Any] | None = None,
         train_dataloader_kwargs: dict[str, Any] | None = None,
         val_dataloader_kwargs: dict[str, Any] | None = None,
         test_dataloader_kwargs: dict[str, Any] | None = None,
+        predict_dataloader_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
         self._train_spec = train_dataset
         self._val_spec = val_dataset
         self._test_specs = test_datasets or {}
+        self._predict_spec = predict_dataset
         self._train_dl_kwargs = train_dataloader_kwargs or {}
         self._val_dl_kwargs = val_dataloader_kwargs or {"batch_size": 1, "num_workers": 1}
         self._test_dl_kwargs = test_dataloader_kwargs or self._val_dl_kwargs
+        self._predict_dl_kwargs = predict_dataloader_kwargs or {"batch_size": 1, "num_workers": 0}
 
         self._train_ds: Dataset | None = None
         self._val_ds: Dataset | None = None
         self._test_ds: dict[str, Dataset] = {}
+        self._predict_ds: Dataset | None = None
 
     @property
     def test_names(self) -> list[str]:
@@ -92,8 +109,8 @@ class SRDataModule(lightning.LightningDataModule):
 
         Args:
             stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
-                ``'test'``, or ``None`` (for all). Determines which
-                datasets get instantiated.
+                ``'test'``, ``'predict'``, or ``None`` (for all). Determines
+                which datasets get instantiated.
         """
         if stage in ("fit", None) and self._train_ds is None:
             self._train_ds = instantiate_class((), self._train_spec)
@@ -103,6 +120,8 @@ class SRDataModule(lightning.LightningDataModule):
             }
         if stage in ("fit", "validate", None) and self._val_ds is None:
             self._val_ds = instantiate_class((), self._val_spec)
+        if stage in ("predict", None) and self._predict_ds is None and self._predict_spec:
+            self._predict_ds = instantiate_class((), self._predict_spec)
 
     def train_dataloader(self) -> DataLoader:
         """Build the training DataLoader.
@@ -142,3 +161,22 @@ class SRDataModule(lightning.LightningDataModule):
         return [
             DataLoader(ds, shuffle=False, **self._test_dl_kwargs) for ds in self._test_ds.values()
         ]
+
+    def predict_dataloader(self) -> DataLoader:
+        """Build the DataLoader over the LR-only prediction dataset.
+
+        Returns:
+            DataLoader over the ``predict_dataset`` spec.
+
+        Raises:
+            RuntimeError: If ``predict_dataset`` was not configured — there
+                is nothing to run ``cli predict`` against.
+        """
+        if self._predict_ds is None:
+            raise RuntimeError(
+                "SRDataModule.predict_dataloader() called but no predict_dataset was "
+                "configured. Set data.predict_dataset (a {class_path, init_args} spec, "
+                "e.g. sisr.datasets.predict.PredictDataset) pointing at a directory of "
+                "LR images."
+            )
+        return DataLoader(self._predict_ds, shuffle=False, **self._predict_dl_kwargs)

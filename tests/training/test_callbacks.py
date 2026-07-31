@@ -16,6 +16,7 @@ from sisr.training import (
     SRCheckpoint,
     SREvalConfig,
     SRLightning,
+    SRPredictionWriter,
     SRTrainingConfig,
     WeightHistogramLogger,
 )
@@ -851,6 +852,87 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
     _, _, sr0, hr0, _, _ = cb._buffer["Set5"][0]
     torch.testing.assert_close(sr0, ref_sr[0].cpu())
     torch.testing.assert_close(hr0, ref_hr[0].cpu())
+
+
+def test_prediction_writer_creates_output_dir(tmp_path: Path):
+    out_dir = tmp_path / "preds" / "nested"
+    SRPredictionWriter(output_dir=out_dir)
+    assert out_dir.is_dir()
+
+
+def test_prediction_writer_writes_png_named_after_input(tmp_path: Path):
+    from PIL import Image
+
+    out_dir = tmp_path / "preds"
+    writer = SRPredictionWriter(output_dir=out_dir)
+
+    ds = _stub_dataset_with_img_paths(n=2, name="lr")
+    trainer = SimpleNamespace(predict_dataloaders=_stub_dataloader(ds))
+    prediction = torch.rand(2, 3, 8, 8)
+    writer.write_on_batch_end(
+        trainer=trainer,
+        pl_module=None,
+        prediction=prediction,
+        batch_indices=[0, 1],
+        batch=None,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    written = sorted(p.name for p in out_dir.glob("*.png"))
+    assert written == ["lr_000.png", "lr_001.png"]
+    with Image.open(out_dir / "lr_000.png") as img:
+        assert img.size == (8, 8)
+
+
+def test_prediction_writer_handles_dataloader_list():
+    """trainer.predict_dataloaders may be a list (Lightning's CombinedLoader
+    behaviour for multi-loader predict); the writer must index it by
+    dataloader_idx rather than assuming a single bare DataLoader."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "preds"
+        writer = SRPredictionWriter(output_dir=out_dir)
+
+        ds = _stub_dataset_with_img_paths(n=1, name="lr")
+        trainer = SimpleNamespace(predict_dataloaders=[_stub_dataloader(ds)])
+        prediction = torch.rand(1, 3, 4, 4)
+        writer.write_on_batch_end(
+            trainer=trainer,
+            pl_module=None,
+            prediction=prediction,
+            batch_indices=[0],
+            batch=None,
+            batch_idx=0,
+            dataloader_idx=0,
+        )
+        assert (out_dir / "lr_000.png").exists()
+
+
+def test_prediction_writer_clamps_out_of_range_values(tmp_path: Path):
+    """Model output isn't guaranteed to land in [0, 1]; the writer must clamp
+    before saving rather than let save_image wrap/overflow."""
+    out_dir = tmp_path / "preds"
+    writer = SRPredictionWriter(output_dir=out_dir)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="lr")
+    trainer = SimpleNamespace(predict_dataloaders=_stub_dataloader(ds))
+    prediction = torch.full((1, 3, 4, 4), 1.5)  # out of [0, 1]
+    writer.write_on_batch_end(
+        trainer=trainer,
+        pl_module=None,
+        prediction=prediction,
+        batch_indices=[0],
+        batch=None,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(out_dir / "lr_000.png") as img:
+        arr = np.array(img)
+    assert (arr == 255).all()
 
 
 def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir: Path):
