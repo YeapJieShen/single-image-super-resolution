@@ -23,6 +23,19 @@ def test_predict_dataset_no_images_raises(tmp_path: Path):
         PredictDataset(img_dir=tmp_path)
 
 
+def test_predict_dataset_duplicate_stems_raise(tmp_path: Path):
+    """Outputs are named by stem, so `cat.png` + `cat.jpg` would collide."""
+    import numpy as np
+    from PIL import Image
+
+    arr = np.zeros((8, 8, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(tmp_path / "cat.png")
+    Image.fromarray(arr).save(tmp_path / "cat.jpg")
+
+    with pytest.raises(ValueError, match="Duplicate filename stem"):
+        PredictDataset(img_dir=tmp_path)
+
+
 def test_predict_dataset_is_srdataset_subclass():
     assert issubclass(PredictDataset, SRDataset)
 
