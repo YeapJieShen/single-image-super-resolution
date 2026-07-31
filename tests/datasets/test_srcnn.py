@@ -128,7 +128,6 @@ def test_train_dataset_no_images_raises(tmp_path: Path):
             subimg_size=20,
             stride=8,
             scale=2,
-            blur_sigma=1.0,
             use_tqdm=False,
             cache_dir=tmp_path / ".lmdb",
         )

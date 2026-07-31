@@ -177,10 +177,12 @@ def matlab_imresize(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndar
     weights_h, indices_h = _contributions(in_h, out_h, scale_h)
     weights_w, indices_w = _contributions(in_w, out_w, scale_w)
 
-    # MATLAB's imresize.m resizes the smaller-scale-factor axis first. Because
-    # of the intermediate uint8 rounding in _resize_axis this is not a mere
-    # performance choice -- swapping the order changes the exact output -- so
-    # it must mirror the reference exactly, not just be "mathematically free".
+    # MATLAB's imresize.m resizes the smaller-scale-factor axis first. Mirrored
+    # here because the intermediate uint8 rounding in _resize_axis makes pass
+    # order observable in principle. Note it is currently unexercised: every
+    # call site passes one integer `scale`, so scale_h == scale_w and this sort
+    # is a no-op (reversing it reproduces the reference byte-for-byte on all
+    # Set5/Set14 pairs). It would start to matter under an anisotropic resize.
     passes = [(scale_h, 0, weights_h, indices_h), (scale_w, 1, weights_w, indices_w)]
     passes.sort(key=lambda p: p[0])
     for _, axis, weights, indices in passes:
