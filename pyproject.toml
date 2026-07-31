@@ -121,11 +121,12 @@ line-length = 100
 # E,F: pycodestyle errors + pyflakes (unused imports/vars, undefined names).
 # I: import sorting. UP: pyupgrade (modern syntax for the py312 floor).
 # B: flake8-bugbear (likely-bug patterns, e.g. zip() without strict=).
+# UP038 (non-pep604-isinstance) was hand-applied when UP was first selected, then
+# deprecated in ruff 0.12.0 and *removed* in 0.16.0 — so it no longer fires and there
+# is nothing to suppress. Do not add it to `ignore`: ruff warns "rules have been
+# removed and ignoring them has no effect" on every run, which is noise in a required
+# check. The isinstance(x, A | B) style it enforced is now convention, not lint.
 select = ["E", "F", "I", "UP", "B"]
-ignore = [
-    # UP038 deprecated upstream in ruff 0.12.0; will silently stop firing on the next bump.
-    "UP038",
-]
 
 [tool.ruff.lint.per-file-ignores]
 # Re-export hubs import names purely to surface them under short class paths.
