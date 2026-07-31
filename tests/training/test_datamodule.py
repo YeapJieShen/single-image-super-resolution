@@ -187,6 +187,108 @@ def test_old_class_params_rejected(tiny_rgb_image_dir: Path):
         )
 
 
+def _predict_spec(image_dir: Path) -> dict:
+    return {
+        "class_path": "sisr.datasets.predict.PredictDataset",
+        "init_args": {"img_dir": str(image_dir)},
+    }
+
+
+def test_setup_predict_only_builds_predict_dataset(tiny_rgb_image_dir: Path):
+    """stage='predict' must build only the predict dataset, not train/val/test —
+    mirroring the other stages' selective-instantiation contract."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_predict_stage"),
+            "build_num_workers": 1,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    dm = SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        test_datasets={"Set5": val_spec},
+        predict_dataset=_predict_spec(tiny_rgb_image_dir),
+    )
+    dm.setup(stage="predict")
+    assert dm._train_ds is None
+    assert dm._val_ds is None
+    assert dm._test_ds == {}
+    assert dm._predict_ds is not None
+
+
+def test_predict_dataloader_returns_loader_over_predict_dataset(tiny_rgb_image_dir: Path):
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_predict_loader"),
+            "build_num_workers": 1,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    dm = SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        predict_dataset=_predict_spec(tiny_rgb_image_dir),
+        predict_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+    dm.setup(stage="predict")
+    loader = dm.predict_dataloader()
+    assert isinstance(loader, DataLoader)
+    assert loader.dataset is dm._predict_ds
+    from torch.utils.data import SequentialSampler
+
+    assert isinstance(loader.sampler, SequentialSampler)  # shuffle=False
+
+
+def test_predict_dataloader_default_kwargs(tiny_rgb_image_dir: Path):
+    """batch_size=1/num_workers=0 default when predict_dataloader_kwargs is omitted."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "cache_dir": str(tiny_rgb_image_dir / ".lmdb_cache_predict_default"),
+            "build_num_workers": 1,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    dm = SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        predict_dataset=_predict_spec(tiny_rgb_image_dir),
+    )
+    assert dm._predict_dl_kwargs == {"batch_size": 1, "num_workers": 0}
+
+
+def test_predict_dataloader_without_predict_dataset_raises(tiny_rgb_image_dir: Path):
+    """No predict_dataset configured -> a clear RuntimeError, not a silent None loader."""
+    dm = _make_dm(tiny_rgb_image_dir)
+    dm.setup(stage="predict")
+    with pytest.raises(RuntimeError, match="predict_dataset"):
+        dm.predict_dataloader()
+
+
 def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
     """train_dataset accepts {class_path, init_args} and setup() instantiates it."""
     train_spec = {

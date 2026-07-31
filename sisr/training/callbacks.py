@@ -5,10 +5,13 @@ for held-out test sets (Set5, Set14, ...) during both ``cli fit`` (every
 N val cycles) and ``cli test`` (one-shot final eval).
 :class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
 training signals; :class:`SRCheckpoint` is a thin
-:class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics.
+:class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics;
+:class:`SRPredictionWriter` writes ``cli predict`` output to disk as PNGs.
 """
 
 import math
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import lightning
@@ -16,7 +19,7 @@ import torch
 import torch.nn.functional
 import torchmetrics.functional
 import torchvision
-from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 
@@ -625,3 +628,70 @@ class SRCheckpoint(ModelCheckpoint):
                 f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or monitor "
                 f"`val_ssim`."
             )
+
+
+class SRPredictionWriter(BasePredictionWriter):
+    """Writes ``predict_step`` output as 8-bit PNGs named after their input files.
+
+    ``cli predict`` has no HR reference to score against, so a saved image
+    *is* the entire result — this callback is what makes the subcommand
+    produce a visible artifact instead of a discarded in-memory tensor.
+
+    Only ``write_interval='batch'`` is supported — ``'epoch'`` /
+    ``'batch_and_epoch'`` would accumulate every prediction in memory for
+    the whole run before writing, which defeats writing PNGs one-by-one in
+    the first place, and this class doesn't implement
+    ``write_on_epoch_end``.
+
+    Args:
+        output_dir: Directory PNGs are written to; created (including
+            parents) if missing.
+    """
+
+    def __init__(self, output_dir: str | Path):
+        super().__init__("batch")
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_on_batch_end(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        prediction: torch.Tensor,
+        batch_indices: Sequence[int] | None,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int,
+    ) -> None:
+        """Save each SR image in ``prediction`` as ``<input_stem>.png``.
+
+        Filenames are resolved from the predict dataloader's underlying
+        dataset via ``batch_indices`` and its ``.img_paths`` contract — the
+        same one :class:`BenchmarkImageLogger` relies on — rather than from
+        ``batch`` itself, which is a bare LR tensor with no filename.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being run
+                (unused).
+            prediction (torch.Tensor): ``SRLightning.predict_step`` output —
+                SR RGB batch, ``float32`` in ``[0, 1]``, shape
+                ``(B, 3, H, W)``.
+            batch_indices (Sequence[int] | None): Dataset indices of the
+                samples in this batch, supplied by Lightning's predict loop.
+            batch (Any): The input LR batch (unused — filenames come from
+                ``batch_indices``, not the tensor itself).
+            batch_idx (int): Index of the batch within the current
+                dataloader (unused).
+            dataloader_idx (int): Index of the predict loader — used only
+                when ``trainer.predict_dataloaders`` is a list.
+        """
+        loader = trainer.predict_dataloaders
+        if isinstance(loader, list | tuple):
+            loader = loader[dataloader_idx]
+        img_paths = loader.dataset.img_paths
+
+        for i, sample_idx in enumerate(batch_indices):
+            filename = img_paths[sample_idx].stem
+            out_path = self.output_dir / f"{filename}.png"
+            torchvision.utils.save_image(prediction[i].clamp(0.0, 1.0), out_path)

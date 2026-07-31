@@ -20,12 +20,14 @@ import pytest
 import torch
 
 from sisr.models.srcnn import SRCNN
-from sisr.processors import RGBProcessor
+from sisr.models.srresnet.model import SRResNet
+from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
     BenchmarkImageLogger,
     SRDataModule,
     SREvalConfig,
     SRLightning,
+    SRPredictionWriter,
 )
 
 
@@ -108,3 +110,103 @@ def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
     test_metrics = set(trainer.callback_metrics)
     # test_step is a no-op; these come solely from BenchmarkImageLogger.on_test_*.
     assert {"Set5_psnr(RGB)", "Set5_ssim"} <= test_metrics
+
+
+# ---------------------------------------------------------------------------
+# cli predict end-to-end (P3.7) — LR-only inference path, both architectures
+# ---------------------------------------------------------------------------
+
+
+def _make_predict_datamodule(image_dir: Path, arch: str) -> SRDataModule:
+    """Predict-only SRDataModule: train_dataset/val_dataset are required by
+    the constructor but never instantiated — setup(stage='predict') only
+    builds predict_dataset, matching every other stage's selective build."""
+    unused_spec = {
+        "class_path": f"sisr.datasets.{arch}.ValidationDataset",
+        "init_args": {"img_dir": str(image_dir), "scale": 2},
+    }
+    return SRDataModule(
+        train_dataset=unused_spec,
+        val_dataset=unused_spec,
+        predict_dataset={
+            "class_path": "sisr.datasets.predict.PredictDataset",
+            "init_args": {"img_dir": str(image_dir)},
+        },
+        predict_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_predict_end_to_end_srcnn_y_channel_same_size_output(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """SRCNN's pre-upsampled, Y-channel path: predict output must be the same
+    H/W as the input (scale=1x) and land as one PNG per input file."""
+    from PIL import Image
+
+    model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    module = SRLightning(
+        model=model,
+        processor=YChannelProcessor(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    datamodule = _make_predict_datamodule(tiny_rgb_image_dir, arch="srcnn")
+    out_dir = tmp_path / "predictions"
+    trainer = lightning.Trainer(
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=[SRPredictionWriter(output_dir=out_dir)],
+    )
+
+    predictions = trainer.predict(module, datamodule=datamodule)
+
+    assert len(predictions) == 3  # tiny_rgb_image_dir has 3 images, batch_size=1
+    for pred in predictions:
+        assert pred.shape == (1, 3, 36, 36)  # 36x36 input, scale=1x
+
+    written = sorted(p.stem for p in out_dir.glob("*.png"))
+    assert written == ["img_00", "img_01", "img_02"]
+    for name in written:
+        with Image.open(out_dir / f"{name}.png") as img:
+            assert img.size == (36, 36)
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_predict_end_to_end_srresnet_rgb_upsamples_by_scale(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """SRResNet's genuine-LR, RGB path: predict output must be exactly
+    scale x the input H/W."""
+    from PIL import Image
+
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    datamodule = _make_predict_datamodule(tiny_rgb_image_dir, arch="srresnet")
+    out_dir = tmp_path / "predictions"
+    trainer = lightning.Trainer(
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=[SRPredictionWriter(output_dir=out_dir)],
+    )
+
+    predictions = trainer.predict(module, datamodule=datamodule)
+
+    assert len(predictions) == 3
+    for pred in predictions:
+        assert pred.shape == (1, 3, 72, 72)  # 36x36 input, scale=2x -> 72x72
+
+    written = sorted(p.stem for p in out_dir.glob("*.png"))
+    assert written == ["img_00", "img_01", "img_02"]
+    for name in written:
+        with Image.open(out_dir / f"{name}.png") as img:
+            assert img.size == (72, 72)

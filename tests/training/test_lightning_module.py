@@ -607,6 +607,61 @@ def test_hparams_expand_nested_config_fields():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# predict_step — LR-only inference seam (P3.7)
+# ---------------------------------------------------------------------------
+
+
+def test_forward_lr_matches_forward_sr_sr_component(srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch):
+    """_forward_sr's (sr_model_out, sr_rgb) must equal _forward_lr's output on
+    the same LR — the refactor shares the pipeline instead of forking it."""
+    lr, hr = rgb_lr_hr_batch
+    sr_model_out_a, sr_rgb_a, _ = srcnn_rgb_lit._forward_sr(lr, hr)
+    sr_model_out_b, sr_rgb_b = srcnn_rgb_lit._forward_lr(lr)
+    torch.testing.assert_close(sr_model_out_a, sr_model_out_b)
+    torch.testing.assert_close(sr_rgb_a, sr_rgb_b)
+
+
+def test_predict_step_matches_forward_lr_rgb_path(srcnn_rgb_lit: SRLightning):
+    lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(0))
+    _, expected_sr = srcnn_rgb_lit._forward_lr(lr)
+    out = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    torch.testing.assert_close(out, expected_sr)
+
+
+def test_predict_step_y_channel_reconstructs_rgb(srcnn_y_lit: SRLightning):
+    """Y-channel model output is 1-channel; predict_step must still return
+    RGB — the processor.reconstruct step stitches back bicubic LR Cb/Cr.
+    srcnn_y_lit uses 'valid' padding (33 -> 21), so the size check locks that
+    same shrinkage; the channel check is the actual regression guard."""
+    lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(1))
+    out = srcnn_y_lit.predict_step(lr, batch_idx=0)
+    assert out.shape == (2, 3, 21, 21)
+
+
+def test_predict_step_srresnet_upsamples_by_scale():
+    """Genuine-LR RGB path: output must be exactly scale x the LR input."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(1, 3, 12, 12)
+    out = lit.predict_step(lr, batch_idx=0)
+    assert out.shape == (1, 3, 24, 24)
+
+
+def test_predict_step_dataloader_idx_default_is_ignored(srcnn_rgb_lit: SRLightning):
+    """A single predict loader is expected; dataloader_idx must not change output."""
+    lr = torch.rand(1, 3, 33, 33, generator=torch.Generator().manual_seed(2))
+    out_default = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    out_explicit = srcnn_rgb_lit.predict_step(lr, batch_idx=0, dataloader_idx=0)
+    torch.testing.assert_close(out_default, out_explicit)
+
+
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
     """Regression (P2.6): PSNR for a batch equals the mean of the per-image
     PSNRs (SR-standard reduction, invariant to val batch_size), not the
