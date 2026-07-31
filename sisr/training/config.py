@@ -139,12 +139,12 @@ class SREvalConfig:
         psnr_channels: Colorspaces in which PSNR is reported.  Supported
             values are ``'RGB'`` and ``'YCbCr'``.  Multiple entries are
             allowed (e.g. ``['RGB', 'YCbCr']`` produces both
-            ``val_psnr(RGB)`` and ``val_psnr(YCbCr)``).
+            ``psnr/val/RGB`` and ``psnr/val/YCbCr``).
 
         separate_psnr: When ``True``, also reports PSNR for each individual
             channel within each requested colorspace (e.g. ``'RGB'`` adds
-            ``val_psnr(R)`` / ``val_psnr(G)`` / ``val_psnr(B)`` alongside
-            the aggregate ``val_psnr(RGB)``).
+            ``psnr/val/R`` / ``psnr/val/G`` / ``psnr/val/B`` alongside
+            the aggregate ``psnr/val/RGB``).
     """
 
     crop_border: int = 0

@@ -45,9 +45,9 @@ class BenchmarkImageLogger(Callback):
     SR output is center-padded when smaller than HR (``padding='valid'``) so
     all three panels share the same spatial size.
 
-    Per-image PSNR/SSIM scalars go under ``"{name}_psnr/{filename}"`` and
-    ``"{name}_ssim/{filename}"``; per-set means under
-    ``"{name}_psnr({key})"`` and ``"{name}_ssim"``.
+    Per-image PSNR/SSIM scalars go under ``"per_image/{name}/psnr/{key}/{filename}"``
+    and ``"per_image/{name}/ssim/{filename}"``; per-set means under
+    ``"psnr/{name}/{key}"`` and ``"ssim/{name}"``.
 
     Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
     the use site; this avoids dual-knob configuration drift.
@@ -353,8 +353,8 @@ class BenchmarkImageLogger(Callback):
 
             for key in psnr_keys:
                 mean_psnr = sum(s[4][key] for s in samples) / len(samples)
-                pl_module.log(f"{dataset_name}_psnr({key})", mean_psnr, add_dataloader_idx=False)
-            pl_module.log(f"{dataset_name}_ssim", mean_ssim, add_dataloader_idx=False)
+                pl_module.log(f"psnr/{dataset_name}/{key}", mean_psnr, add_dataloader_idx=False)
+            pl_module.log(f"ssim/{dataset_name}", mean_ssim, add_dataloader_idx=False)
 
             if should_log_images:
                 tb_logger = next(
@@ -372,9 +372,13 @@ class BenchmarkImageLogger(Callback):
                 for filename, lr, sr, hr, psnr_dict, ssim in samples:
                     for key, psnr_val in psnr_dict.items():
                         experiment.add_scalar(
-                            f"{dataset_name}_psnr({key})/{filename}", psnr_val, global_step=step
+                            f"per_image/{dataset_name}/psnr/{key}/{filename}",
+                            psnr_val,
+                            global_step=step,
                         )
-                    experiment.add_scalar(f"{dataset_name}_ssim/{filename}", ssim, global_step=step)
+                    experiment.add_scalar(
+                        f"per_image/{dataset_name}/ssim/{filename}", ssim, global_step=step
+                    )
 
                     # Triptych: bicubic | SR | HR, all at HR size.
                     # The bicubic panel is the LR upsampled to HR via bicubic
@@ -448,7 +452,7 @@ class GradNormLogger(Callback):
     """Log the total gradient L2 norm to TensorBoard periodically.
 
     Computes ``sqrt(sum(p.grad.norm() ** 2))`` across all model parameters
-    after the backward pass and logs it as the ``"grad_norm"`` scalar.
+    after the backward pass and logs it as the ``"diag/grad_norm"`` scalar.
 
     Args:
         log_every_n_steps (int): Compute and log every *n* training steps.
@@ -462,6 +466,11 @@ class GradNormLogger(Callback):
     def on_after_backward(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Compute and log gradient norm if on the right step cadence.
 
+        Per-parameter norms are stacked and reduced with a single
+        ``torch.linalg.vector_norm`` call so only one ``.item()`` forces a
+        GPU sync, instead of one per parameter (the previous per-parameter
+        ``.item()`` accumulation loop).
+
         Args:
             trainer (lightning.Trainer): The trainer instance.
             pl_module (lightning.LightningModule): The model being trained.
@@ -469,13 +478,12 @@ class GradNormLogger(Callback):
         if trainer.global_step % self.log_every_n_steps != 0:
             return
 
-        total_norm_sq = 0.0
-        for p in pl_module.parameters():
-            if p.grad is not None:
-                total_norm_sq += p.grad.detach().norm(2).item() ** 2
-        total_norm = math.sqrt(total_norm_sq)
+        grad_norms = [p.grad.detach().norm(2) for p in pl_module.parameters() if p.grad is not None]
+        total_norm = (
+            torch.linalg.vector_norm(torch.stack(grad_norms), ord=2).item() if grad_norms else 0.0
+        )
 
-        pl_module.log("grad_norm", total_norm, on_step=True, on_epoch=False)
+        pl_module.log("diag/grad_norm", total_norm, on_step=True, on_epoch=False)
 
 
 class WeightHistogramLogger(Callback):
@@ -484,10 +492,17 @@ class WeightHistogramLogger(Callback):
 
     Args:
         log_every_n_steps (int): Log histograms every *n* training steps.
-            Defaults to ``100``.
+            Defaults to ``10000``. Histograms dominate event-file size, and
+            one is written per tracked parameter on every cadence hit — at
+            the templates' 1M-step schedule the old default of ``100`` was
+            ~10k writes per parameter (multi-GB event files) despite never
+            having been exercised at that scale (this callback is absent
+            from the SRResNet template). ``10000`` drops that to ~100
+            writes per parameter, still enough to see the weight-drift
+            trend across a full run.
     """
 
-    def __init__(self, log_every_n_steps: int = 100):
+    def __init__(self, log_every_n_steps: int = 10000):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
 
@@ -541,8 +556,8 @@ class SRCheckpoint(ModelCheckpoint):
 
     The filename's metric *label* is sanitised (``/`` -> ``_``) and
     ``auto_insert_metric_name`` is disabled, so a ``/``-bearing
-    ``monitor_metric`` (e.g. a future ``psnr/val/RGB`` TensorBoard-style tag)
-    cannot leak a raw ``/`` into the filename template. Lightning's
+    ``monitor_metric`` (e.g. the default ``psnr/val/RGB`` TensorBoard-hierarchy
+    tag) cannot leak a raw ``/`` into the filename template. Lightning's
     ``_format_checkpoint_name`` does no sanitisation itself, and with
     ``auto_insert_metric_name=True`` (the default) a raw ``/`` there causes
     ``TorchCheckpointIO`` to silently create a nested directory tree per
@@ -552,9 +567,9 @@ class SRCheckpoint(ModelCheckpoint):
 
     Args:
         monitor_metric (str): The validation metric to monitor.
-            Defaults to ``"val_psnr(RGB)"``.  Use any ``val_psnr({key})``
-            logged by the lightning module (e.g. ``"val_psnr(Y)"``,
-            ``"val_psnr(YCbCr)"``) or ``"val_ssim"``.
+            Defaults to ``"psnr/val/RGB"``.  Use any ``psnr/val/{key}``
+            logged by the lightning module (e.g. ``"psnr/val/Y"``,
+            ``"psnr/val/YCbCr"``) or ``"ssim/val"``.
         save_top_k (int): Number of best checkpoints to keep.
             Defaults to ``3``.
         dirpath (str | None): Directory to save checkpoints.
@@ -566,7 +581,7 @@ class SRCheckpoint(ModelCheckpoint):
 
     def __init__(
         self,
-        monitor_metric: str = "val_psnr(RGB)",
+        monitor_metric: str = "psnr/val/RGB",
         save_top_k: int = 3,
         dirpath: str | None = None,
         filename_prefix: str = "sr",
@@ -619,14 +634,14 @@ class SRCheckpoint(ModelCheckpoint):
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
-        valid_metrics = {f"val_psnr({key})" for key in pl_module.eval_config.psnr_keys}
-        valid_metrics.add("val_ssim")
+        valid_metrics = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
+        valid_metrics.add("ssim/val")
         if self.monitor is not None and self.monitor not in valid_metrics:
             raise MisconfigurationException(
                 f"`SRCheckpoint(monitor_metric={self.monitor!r})` does not match any "
                 f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
                 f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or monitor "
-                f"`val_ssim`."
+                f"`ssim/val`."
             )
 
 
