@@ -137,6 +137,10 @@ class TrainDataset(SRDataset):
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         checksum = self._compute_checksum()
+        # Exact sizes from image headers + 10% slack. If it is ever exceeded,
+        # lmdb raises MapFullError mid-build and the checksum is never written,
+        # so the partial DB reads as stale and is rebuilt rather than silently
+        # serving truncated data. Same unhandled-overflow behaviour as SRCNN's cache.
         map_size = max(int(self._estimate_raw_bytes() * 1.1), 64 * 1024 * 1024)
 
         self._cache = LMDBCache(
