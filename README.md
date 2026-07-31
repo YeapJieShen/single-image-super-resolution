@@ -19,12 +19,55 @@ reproducing a paper means writing a config, not a new training loop.
 
 | Model | Paper | LR input | Upsampling | Colorspace |
 |---|---|---|---|---|
-| **SRCNN** | [Image Super-Resolution Using Deep Convolutional Networks](https://arxiv.org/pdf/1501.00092) | Pre-upsampled to HR size (blur → downsample → bicubic up) | None — same-resolution refinement | Y channel |
+| **SRCNN** | [Image Super-Resolution Using Deep Convolutional Networks](https://arxiv.org/pdf/1501.00092) | Pre-upsampled to HR size (bicubic down → bicubic up) | None — same-resolution refinement | Y channel |
 | **SRResNet** | [Photo-Realistic Single Image Super-Resolution Using a GAN](https://arxiv.org/pdf/1609.04802) | Genuine low-resolution | ×`scale` sub-pixel convolution | RGB |
 
 During training and test evaluation, PSNR/SSIM are logged and **bicubic│SR│HR** image
 strips are written to TensorBoard for each benchmark set (Set5, Set14, …), so you can
 watch reconstruction quality improve run-over-run.
+
+### Degradation protocol (how LR is generated)
+
+Both datasets derive their LR input from HR via bicubic resizing, selectable per-dataset
+via `resize_backend`:
+
+- **`'matlab'` (default, tracked templates use it).** A vendored (not a dependency),
+  MATLAB-`imresize`-compatible bicubic resize — antialiased (MATLAB widens the
+  interpolation kernel by the scale factor on downscale; this widening *is* the
+  low-pass, so no separate blur step is used or accepted with this backend) and using
+  MATLAB's own bicubic coefficient (a=-0.5, vs. OpenCV's a=-0.75). This is what makes
+  PSNR/SSIM numbers comparable to published papers, most of which generate their
+  benchmark LR images with real MATLAB. See `sisr/imresize.py` for the implementation
+  and its license/attribution header, and `tests/test_imresize.py` for verification.
+- **`'cv2'` (opt-in).** Plain `cv2.INTER_CUBIC`, no antialiasing of its own. SRCNN's
+  `blur_sigma` (a pre-resize Gaussian blur) only has an effect on this path — passing
+  `blur_sigma` together with `resize_backend='matlab'` raises `ValueError` at
+  construction, since MATLAB's kernel widening already *is* the low-pass and stacking
+  an explicit blur on top would push PSNR away from published values, not toward them.
+  This backend exists solely to keep LMDB caches built before the `'matlab'` backend
+  existed reproducible; new work should use the default.
+
+**Honest limit:** without access to real MATLAB, this project cannot prove
+byte-identity with MATLAB's `imresize` from first principles. `tests/test_imresize.py`
+asserts byte-exact reproduction against the standard Set5/Set14 bicubic LR pairs
+distributed by the EDSR authors (themselves generated with real MATLAB) — the
+strongest available claim short of running MATLAB itself. That test is skipped
+(not a failure) when the reference archive hasn't been fetched locally; see the
+test file's module docstring for the source URL and checksum.
+
+Switching `resize_backend` (or the one-time move from AlbumentationsX to
+`sisr.imresize`) invalidates previously-built LMDB caches and renumbers any
+previously recorded benchmark figure — expected, one-time costs of the change,
+not a bug.
+
+### Reproducibility note
+
+The tracked templates set `seed_everything: 42` **and** `trainer.deterministic: false`.
+That pairing is deliberate: `deterministic: false` allows cuDNN to pick
+non-deterministic (but faster) convolution algorithms, so **runs are not
+bit-for-bit reproducible** even with the same seed — a throughput trade worth
+knowing about explicitly in a paper-*reproduction* project, where "reproduction"
+means comparable metrics, not bit-identical checkpoints.
 
 ## Quickstart
 
@@ -179,15 +222,9 @@ style, and code-style expectations.
 ## Dependency notes
 
 `pyproject.toml` is the single source of truth for dependencies (no `requirements.txt`).
-
-This project depends on
-[AlbumentationsX](https://github.com/albumentations-team/AlbumentationsX), licensed under
-AGPL-3.0 (or a separate commercial license from upstream). The
-`single-image-super-resolution` project itself remains MIT-licensed. Users who
-redistribute or host this code as a network service should review AGPL-3.0 obligations.
-AlbumentationsX is capped at `<=2.1.0` so it stays on the `simsimd`-backed `albucore`;
-`albucore` 0.1.0 switched its native backend to one whose runtime dependency
-(`libomp140`) is not bundled on stock Windows / Python 3.13, breaking import there.
+All dependencies are MIT-compatible; the project itself is MIT-licensed (see below).
+`sisr/imresize.py` vendors (does not depend on) a small MIT-licensed MATLAB-`imresize`
+port — see that file's header for the source and attribution.
 
 ## License
 

@@ -65,6 +65,20 @@ deprecation you cannot control, and note why.
 When you fix a bug, add one test that **fails on the old behavior and passes on the new**.
 Name it after what the failure catches, not after the fix.
 
+### Debugging dataset code
+
+To step through `Dataset.__getitem__` (SRCNN/SRResNet dataset code, `sisr/imresize.py`,
+etc.) with breakpoints, run with `--data.train_dataloader_kwargs.num_workers=0`:
+
+```bash
+sisr fit --config templates/config.srcnn.template.yaml --data.train_dataloader_kwargs.num_workers=0
+```
+
+The tracked templates set `num_workers: 16`, so by default every `__getitem__` call runs
+in a `DataLoader` worker **subprocess** — breakpoints set in the main process never fire
+there. `num_workers=0` runs the dataset in-process instead, at the cost of losing
+parallel data loading; use it only for debugging, not for real training runs.
+
 ## The change workflow
 
 1. Branch off `main`.
@@ -117,7 +131,6 @@ instead:
 
 ## License
 
-This project is MIT-licensed. Note it depends on
-[AlbumentationsX](https://github.com/albumentations-team/AlbumentationsX) (AGPL-3.0, or a
-separate commercial license from upstream); if you redistribute or host this code as a
-network service, review the AGPL-3.0 obligations.
+This project is MIT-licensed and all of its dependencies are MIT-compatible.
+`sisr/imresize.py` vendors a small MIT-licensed MATLAB-`imresize` port rather than
+depending on it — see that file's header for the source repo and required attribution.
