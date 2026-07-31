@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,58 +68,105 @@ def test_train_dataset_getitem_shape_dtype_range(shared_srcnn_train_ds: TrainDat
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
 
-def test_train_dataset_missing_key_raises_keyerror(shared_srcnn_train_ds: TrainDataset):
-    """A missing LMDB key (here, an out-of-range index) surfaces as a KeyError
-    naming the key, not a cryptic numpy TypeError from np.frombuffer(None)."""
-    with pytest.raises(KeyError, match=r"lr_\d{8}"):
+def test_train_dataset_out_of_range_index_raises_indexerror(shared_srcnn_train_ds: TrainDataset):
+    with pytest.raises(IndexError):
         shared_srcnn_train_ds[len(shared_srcnn_train_ds) + 100]
+    with pytest.raises(IndexError):
+        shared_srcnn_train_ds[-1]
+
+
+def test_train_dataset_missing_key_raises_keyerror(tiny_rgb_image_dir: Path):
+    """A missing LMDB key (a corrupt/incomplete cache) surfaces as a KeyError
+    naming the key, not a cryptic numpy error from np.frombuffer(None).
+
+    __getitem__ maps idx to an always-valid image index, so an out-of-range
+    idx can't reach this path (see test above) -- instead force get_buffer to
+    report a miss, as a genuinely stale cache would."""
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
+
+    @contextmanager
+    def _always_missing(key):
+        yield None
+
+    with patch.object(ds._cache, "get_buffer", side_effect=_always_missing):
+        with pytest.raises(KeyError, match=r"hr_\d{8}"):
+            ds[0]
 
 
 def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
-    """Second instantiation with same params must not call _process_subimages."""
+    """Second instantiation with the same file set must not re-decode images."""
     _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
-    with patch("sisr.datasets.srcnn._process_subimages") as mock_proc:
+    with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
         _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
         mock_proc.assert_not_called()
 
 
-def test_train_dataset_checksum_change_triggers_rebuild(tiny_rgb_image_dir: Path):
-    """Different subimg_size produces a different cache directory + different
-    patch counts, confirming the rebuild ran with new params.
+def test_train_dataset_cache_independent_of_grid_params(tiny_rgb_image_dir: Path):
+    """The cache stores whole images, so changing subimg_size/stride/scale/
+    blur_sigma/resize_backend over the same file set must NOT trigger a
+    rebuild (contrast the pre-HR-only cache, whose checksum baked all of
+    those in)."""
+    cache_dir = tiny_rgb_image_dir / ".lmdb_cache_shared_grid"
+    _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2, cache_dir=cache_dir)
+    with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
+        ds_b = _make_train(
+            tiny_rgb_image_dir,
+            subimg_size=24,
+            stride=10,
+            scale=4,
+            resize_backend="cv2",
+            blur_sigma=2.0,
+            cache_dir=cache_dir,
+        )
+        mock_proc.assert_not_called()
+    assert len(ds_b) > 0
 
-    (Patch-based detection of `_process_subimages` calls doesn't work because
-    those run in `ProcessPoolExecutor` workers, which don't see parent-process
-    monkey-patches.)
-    """
-    ds_a = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
-    ds_b = _make_train(tiny_rgb_image_dir, subimg_size=24, stride=8)
-    assert len(ds_a) != len(ds_b), "different subimg_size must yield different patch counts"
+
+def test_train_dataset_checksum_change_triggers_rebuild(tmp_path: Path):
+    """Adding/removing a file changes the manifest, hence the checksum."""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    img_dir = tmp_path / "imgs"
+    img_dir.mkdir()
+    rng = np.random.default_rng(seed=2)
+    arr = rng.integers(0, 256, size=(36, 36, 3), dtype=np.uint8)
+    PILImage.fromarray(arr).save(img_dir / "img_00.png")
+    ds_a = _make_train(img_dir, subimg_size=20, stride=8)
+    checksum_a = ds_a._compute_checksum()
+
+    arr2 = rng.integers(0, 256, size=(36, 36, 3), dtype=np.uint8)
+    PILImage.fromarray(arr2).save(img_dir / "img_01.png")
+    ds_b = _make_train(img_dir, subimg_size=20, stride=8, cache_dir=img_dir / ".lmdb_cache_train_2")
+    assert ds_b._compute_checksum() != checksum_a
 
 
-def test_train_dataset_checksum_includes_transforms_impl_tag(shared_srcnn_train_ds: TrainDataset):
-    """The checksum input must include a 'transforms_impl' tag and the
-    resize_backend so caches built under a different resize implementation or
-    backend invalidate automatically rather than silently being reused."""
+def test_train_dataset_checksum_ignores_grid_and_lr_params(shared_srcnn_train_ds: TrainDataset):
+    """_compute_checksum must depend only on the file manifest (+ a format
+    tag) -- not on subimg_size/stride/scale/blur_sigma/resize_backend, since
+    the HR-only cache stores raw pixels unaffected by any of them."""
     import hashlib
 
     ds = shared_srcnn_train_ds
     file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in ds.img_paths)
-    expected_canonical = "|".join(
-        [
-            file_manifest,
-            "20",  # subimg_size
-            "8",  # stride
-            "2",  # scale
-            "None",  # blur_sigma (matlab backend)
-            "resize_backend=matlab",
-            "transforms_impl=vendored_matlab_imresize_v1",
-        ]
-    )
+    expected_canonical = "|".join([file_manifest, "format=srcnn_hr_v1"])
     expected = hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest()
-    assert ds._compute_checksum() == expected, (
-        "checksum must include the 'transforms_impl' and 'resize_backend' tags — "
-        "without them, caches built under a different implementation/backend would be reused."
+    assert ds._compute_checksum() == expected
+
+
+def test_train_dataset_backend_and_grid_do_not_affect_checksum(tiny_rgb_image_dir: Path):
+    ds_a = _make_train(
+        tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2, resize_backend="matlab"
     )
+    ds_b = _make_train(
+        tiny_rgb_image_dir,
+        subimg_size=24,
+        stride=10,
+        scale=4,
+        resize_backend="cv2",
+        blur_sigma=1.5,
+    )
+    assert ds_a._compute_checksum() == ds_b._compute_checksum()
 
 
 def test_train_dataset_no_images_raises(tmp_path: Path):
@@ -153,31 +201,68 @@ def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Pat
     assert hr.shape == (3, 20, 20)
 
 
-def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
-    """_compute_offsets and the worker must derive the sliding-window grid from
-    one shared helper, so their patch counts can never silently disagree and
-    misalign the LMDB lr_/hr_ keys."""
-    from sisr.datasets.srcnn import _iter_patch_origins, _process_subimages
+def test_patch_grid_enumeration_matches_grid_dims(tiny_rgb_image_dir: Path):
+    """_iter_patch_origins and _compute_grid must derive the sliding-window
+    grid from the same _grid_dims helper, so their patch counts and ordering
+    can never silently disagree."""
+    from sisr.datasets.srcnn import _grid_dims, _iter_patch_origins
 
     ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
-    _, total = ds._compute_offsets()
 
-    # The worker's actual emitted pairs (one lr + one hr per patch) across every
-    # image must sum to exactly the offset total.
-    worker_total = 0
-    for i, path in enumerate(ds.img_paths):
-        pairs = _process_subimages(
-            path, 20, 8, 2, ds.blur_sigma, ds.resize_backend, ds._img_offsets[i]
-        )
-        worker_total += len(pairs) // 2
-    assert worker_total == total
+    n_rows, n_cols = _grid_dims(36, 36, 2, 20, 8)
+    assert (n_rows, n_cols) == (3, 3)  # (36-20)//8 + 1 = 3 positions per axis
 
-    # And the helper enumerates the expected grid for the 36x36 fixture:
-    # crop 36 -> 36 (divisible by scale=2); (36-20)//8 + 1 = 3 positions per axis.
     origins = list(_iter_patch_origins(36, 36, 2, 20, 8))
-    assert len(origins) == 9
+    assert len(origins) == n_rows * n_cols == 9
     assert origins[0] == (0, 0)
     assert (16, 16) in origins
+
+    assert ds._total_patches == len(ds.img_paths) * 9
+
+
+def test_grid_index_mapping_matches_iteration_order(tiny_rgb_image_dir: Path):
+    """TrainDataset.__getitem__'s O(1) index -> (top, left) lookup (bisect +
+    divmod over _img_offsets/_img_n_cols) must agree, position-for-position,
+    with _iter_patch_origins' explicit enumeration across every image in a
+    multi-image dataset -- so an index can never silently point at the wrong
+    sub-image (the single-source-of-truth guarantee P2.5 established)."""
+    import bisect
+
+    from sisr.datasets.srcnn import _iter_patch_origins
+
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2)
+
+    expected = []
+    for path in ds.img_paths:
+        img = Image.open(path)
+        w, h = img.size
+        img.close()
+        expected.extend(_iter_patch_origins(h, w, ds.scale, ds.sub_img_size, ds.stride))
+    assert len(expected) == len(ds) == ds._total_patches
+
+    for idx, (exp_top, exp_left) in enumerate(expected):
+        img_idx = bisect.bisect_right(ds._img_offsets, idx) - 1
+        local_idx = idx - ds._img_offsets[img_idx]
+        row, col = divmod(local_idx, ds._img_n_cols[img_idx])
+        assert (row * ds.stride, col * ds.stride) == (exp_top, exp_left)
+
+
+def test_train_dataset_hr_subimage_matches_exact_grid_position(tiny_rgb_image_dir: Path):
+    """The cached-and-sliced HR sub-image must equal the source image's own
+    pixels at its deterministic (top, left) grid position -- not merely
+    'somewhere' in the image, since (unlike SRResNet) SRCNN's positions are
+    fixed, not random."""
+    from sisr.datasets.srcnn import _iter_patch_origins
+
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2)
+    origins = list(_iter_patch_origins(36, 36, 2, 20, 8))
+    source = np.array(Image.open(ds.img_paths[0]).convert("RGB"))
+
+    for idx, (top, left) in enumerate(origins):  # first image's patches only
+        _, hr = ds[idx]
+        hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+        expected = source[top : top + 20, left : left + 20, :]
+        assert np.array_equal(hr_uint8, expected), f"patch {idx} mismatch at ({top}, {left})"
 
 
 # ---------------------------------------------------------------------------
