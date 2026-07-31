@@ -71,6 +71,17 @@ dev = [
     "pyyaml>=6",
     "ruff>=0.9",
 ]
+# Opt-in (INIT.7): sisr/export.py gates the actual `import onnx` inside to_onnx(),
+# so plain `pip install .` stays onnx-free. onnxruntime is the CI numeric-parity
+# check's target (CPU build — GitHub runners have no GPU); it also lets users
+# verify an export locally without a separate inference framework. Deliberately
+# NOT paired with onnxscript: that would pull in torch's newer torch.export-based
+# exporter, so to_onnx() pins dynamo=False (the legacy TorchScript exporter) and
+# stays on this pair.
+export = [
+    "onnx>=1.16",
+    "onnxruntime>=1.19",
+]
 
 [project.scripts]
 sisr = "sisr.cli:main"

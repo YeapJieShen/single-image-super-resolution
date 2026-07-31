@@ -4,6 +4,8 @@ Usage:
     sisr fit --config templates/config.srcnn.template.yaml
     sisr test --config templates/config.srcnn.template.yaml \\
               --ckpt_path <best.ckpt>
+    sisr export --config templates/config.srcnn.template.yaml \\
+                --output_path model.onnx --ckpt_path <best.ckpt>
 
 The ``sisr`` console script is registered by ``pyproject.toml``; ``python -m
 sisr.cli ...`` also works.
@@ -17,15 +19,56 @@ architectures.
 Top-level ``matmul_precision:`` (``'highest' | 'high' | 'medium'``) calls
 :func:`torch.set_float32_matmul_precision` once at startup. Set to ``'high'``
 on Ampere+ GPUs to enable TF32 matmul kernels.
+
+``sisr export`` (INIT.7) is a thin CLI wrapper around
+:func:`sisr.export.to_onnx` — see that module for what gets exported and its
+SRCNN limitation. It requires the optional ``export`` extra
+(``pip install '.[export]'``).
 """
 
 import sys
 from typing import Literal
 
 import torch
+from lightning.pytorch import Trainer
 from lightning.pytorch.cli import LightningCLI
 
+from .export import to_onnx
 from .training import SRDataModule, SRLightning
+
+
+class _ExportTrainer(Trainer):
+    """``Trainer`` subclass adding an ``export`` method for the CLI subcommand.
+
+    ``LightningCLI`` derives each subcommand's argument parser and help text
+    from a method of this name on ``trainer_class`` (see
+    ``_add_subcommands`` / ``_prepare_subcommand_parser`` in
+    ``lightning.pytorch.cli``) — there is no supported way to register a
+    subcommand that isn't a ``Trainer`` method. This subclass exists solely to
+    give ``export`` that home; it changes no behavior for ``fit`` / ``validate``
+    / ``test`` / ``predict``.
+    """
+
+    def export(
+        self,
+        model: SRLightning,
+        datamodule: SRDataModule | None = None,
+        output_path: str = "model.onnx",
+        ckpt_path: str | None = None,
+        opset_version: int = 17,
+    ) -> None:
+        """Export ``model`` to ONNX — thin wrapper around ``sisr.export.to_onnx``.
+
+        Args:
+            output_path: Destination ``.onnx`` file path.
+            ckpt_path: Optional checkpoint whose weights are loaded into
+                ``model`` before export.
+            opset_version: ONNX opset to target.
+        """
+        # datamodule is unused: export needs no data, only the model's
+        # architecture + weights, but LightningCLI always injects it (matching
+        # every other subcommand's signature contract).
+        to_onnx(model, output_path, ckpt_path=ckpt_path, opset_version=opset_version)
 
 
 class SRLightningCLI(LightningCLI):
@@ -42,7 +85,18 @@ class SRLightningCLI(LightningCLI):
     Also exposes a top-level ``matmul_precision`` YAML key that calls
     :func:`torch.set_float32_matmul_precision` in
     :meth:`before_instantiate_classes`.
+
+    Defaults ``trainer_class`` to :class:`_ExportTrainer`: :meth:`subcommands`
+    unconditionally registers ``export``, and ``LightningCLI`` resolves every
+    subcommand's parser via ``getattr(trainer_class, subcommand)`` regardless
+    of which subcommand is actually invoked — so any caller constructing this
+    class needs a ``trainer_class`` that has an ``export`` method, not just
+    ``main()``. Callers may still override it explicitly (e.g. a project-specific
+    ``Trainer`` subclass), as long as it also provides ``export``.
     """
+
+    def __init__(self, *args, trainer_class: type[Trainer] = _ExportTrainer, **kwargs):
+        super().__init__(*args, trainer_class=trainer_class, **kwargs)
 
     def add_arguments_to_parser(self, parser):
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
@@ -72,6 +126,19 @@ class SRLightningCLI(LightningCLI):
         precision = self.config[self.subcommand].matmul_precision
         if precision is not None:
             torch.set_float32_matmul_precision(precision)
+
+    @staticmethod
+    def subcommands() -> dict[str, set[str]]:
+        """Register ``export`` alongside the stock ``fit``/``validate``/``test``/``predict``.
+
+        ``{"model", "datamodule"}`` is skipped from ``export``'s CLI-parsed
+        arguments the same way ``fit`` skips them — both are already wired
+        from the top-level ``model:`` / ``data:`` YAML keys, not re-specified
+        per-subcommand.
+        """
+        subcommands = LightningCLI.subcommands()
+        subcommands["export"] = {"model", "datamodule"}
+        return subcommands
 
 
 def main() -> None:

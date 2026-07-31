@@ -86,12 +86,36 @@ jobs:
           path: coverage.xml
           retention-days: 14
 
+  # Numeric-parity check for the opt-in ONNX export (INIT.7): torch eager vs.
+  # onnxruntime CPU (GitHub runners have no GPU), both architectures. Single
+  # OS/Python leg — a correctness check on one code path, not a compatibility
+  # matrix. Installs the `export` extra explicitly since test-matrix's `.[dev]`
+  # deliberately excludes it (onnx/onnxruntime stay opt-in for contributors).
+  onnx-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-suffix: onnx-export
+      - name: Install
+        run: uv pip install --system -e ".[dev,export]"
+      - name: ONNX export parity tests
+        run: pytest tests/test_export.py tests/test_cli.py -k export -v
+
   # Stable required-check context: green only if every matrix leg passed
   # (legs report as "test-matrix (os, ver)", which are not fixed contexts).
   test:
-    needs: test-matrix
+    needs: [test-matrix, onnx-export]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require all matrix legs to pass
-        run: '[ "${{ needs.test-matrix.result }}" = "success" ]'
+        run: |
+          [ "${{ needs.test-matrix.result }}" = "success" ]
+          [ "${{ needs.onnx-export.result }}" = "success" ]
