@@ -293,6 +293,10 @@ class BenchmarkImageLogger(Callback):
             if n > 0:
                 sr_4d = sr_4d[..., n:-n, n:-n]
                 hr_4d = hr_4d[..., n:-n, n:-n]
+            # Still a private reach (P5.9): the colorspace split has no public
+            # seam, and duplicating it here would recreate the divergence P2.1
+            # removed. Keys now come from eval_config, so this is a value
+            # lookup only — the callback no longer decides *which* keys exist.
             psnr_tensors = pl_module._build_psnr_tensors(sr_4d, hr_4d)
             psnr_dict = {
                 key: torchmetrics.functional.image.peak_signal_noise_ratio(
@@ -599,13 +603,19 @@ class SRCheckpoint(ModelCheckpoint):
             trainer (lightning.Trainer): The active trainer.
             pl_module (lightning.LightningModule): The model being trained;
                 must expose ``eval_config`` (an :class:`SREvalConfig`).
-            stage (str): Lightning trainer stage.
+            stage (str): Lightning trainer stage. Only ``"fit"`` is checked —
+                the monitored tags are val-loop metrics, so they are never
+                logged under ``validate``/``test``/``predict`` and demanding
+                them there would reject configs that are perfectly valid for
+                the stage actually being run.
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a
-                metric ``SRLightning`` will log for ``stage``.
+                metric ``SRLightning`` will log during ``fit``.
         """
         super().setup(trainer, pl_module, stage)
+        if stage != "fit":
+            return
         valid_metrics = {f"val_psnr({key})" for key in pl_module.eval_config.psnr_keys}
         valid_metrics.add("val_ssim")
         if self.monitor is not None and self.monitor not in valid_metrics:
