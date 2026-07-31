@@ -39,7 +39,7 @@ def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
     """Decodes one HR image and returns its single LMDB entry.
 
     Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
-    across all platforms, mirroring :func:`sisr.datasets.srcnn._process_subimages`.
+    across all platforms, mirroring :func:`sisr.datasets.srcnn._process_hr_image`.
 
     Args:
         path (Path): File path of the high-resolution image.
@@ -160,10 +160,11 @@ class TrainDataset(SRDataset):
     def _compute_checksum(self) -> str:
         """Computes a SHA-256 checksum over the file manifest only.
 
-        Unlike :meth:`sisr.datasets.srcnn.TrainDataset._compute_checksum`, no
-        crop/scale parameter enters this hash: the cache stores whole raw
+        No crop/scale parameter enters this hash: the cache stores whole raw
         images, so it is valid for any ``hr_crop_size``/``crops_per_image``/
         ``scale`` combination over the same file set.
+        :meth:`sisr.datasets.srcnn.TrainDataset._compute_checksum` now does the
+        same — both datasets cache HR only.
 
         Returns:
             A hex-encoded SHA-256 digest string.

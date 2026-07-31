@@ -149,7 +149,7 @@ class LMDBCache:
     Args:
         cache_dir (str | Path): Parent directory for the LMDB database.
         name (str): Prefix used in the LMDB folder name
-            (e.g. ``'srcnn_patches'``).
+            (e.g. ``'srcnn_hr'``).
         checksum (str): Hex digest that uniquely identifies the current
             configuration.  A mismatch triggers a rebuild.
         length (int): Total number of entries that will be stored.

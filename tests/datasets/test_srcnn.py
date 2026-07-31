@@ -247,6 +247,41 @@ def test_grid_index_mapping_matches_iteration_order(tiny_rgb_image_dir: Path):
         assert (row * ds.stride, col * ds.stride) == (exp_top, exp_left)
 
 
+def test_grid_index_mapping_across_differently_sized_images(tmp_path: Path):
+    """Same guarantee, but with images of *different* sizes and uneven grids.
+
+    The uniform-fixture test above cannot catch a bug in the bisect/_img_n_cols
+    interaction, because every image contributes an identical patch count and
+    column stride. Deliberately prime-ish, non-square dimensions that do not
+    divide evenly by the stride make each image's grid a different shape.
+    """
+    import bisect
+
+    from sisr.datasets.srcnn import _iter_patch_origins
+
+    rng = np.random.default_rng(7)
+    for i, (h, w) in enumerate([(37, 53), (64, 41), (29, 29), (100, 67)]):
+        arr = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        Image.fromarray(arr).save(tmp_path / f"img_{i:02d}.png")
+
+    ds = _make_train(tmp_path, subimg_size=20, stride=7, scale=3)
+
+    expected = []
+    for path in ds.img_paths:
+        img = Image.open(path)
+        w, h = img.size
+        img.close()
+        expected.extend(_iter_patch_origins(h, w, ds.scale, ds.sub_img_size, ds.stride))
+    assert len(expected) == len(ds) == ds._total_patches
+    assert len(set(ds._img_n_cols)) > 1, "fixture failed to produce differing grid widths"
+
+    for idx, (exp_top, exp_left) in enumerate(expected):
+        img_idx = bisect.bisect_right(ds._img_offsets, idx) - 1
+        local_idx = idx - ds._img_offsets[img_idx]
+        row, col = divmod(local_idx, ds._img_n_cols[img_idx])
+        assert (row * ds.stride, col * ds.stride) == (exp_top, exp_left)
+
+
 def test_train_dataset_hr_subimage_matches_exact_grid_position(tiny_rgb_image_dir: Path):
     """The cached-and-sliced HR sub-image must equal the source image's own
     pixels at its deterministic (top, left) grid position -- not merely
