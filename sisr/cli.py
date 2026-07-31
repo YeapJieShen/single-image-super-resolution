@@ -96,6 +96,16 @@ class SRLightningCLI(LightningCLI):
     """
 
     def __init__(self, *args, trainer_class: type[Trainer] = _ExportTrainer, **kwargs):
+        # LightningCLI resolves a parser for *every* registered subcommand during
+        # __init__, so a trainer_class without `export` fails as a bare AttributeError
+        # from inside Lightning. Say what is actually wrong instead.
+        if not hasattr(trainer_class, "export"):
+            raise TypeError(
+                f"{trainer_class.__name__} has no `export` method. SRLightningCLI "
+                f"registers an `export` subcommand, and LightningCLI resolves a parser "
+                f"for every subcommand at construction. Subclass _ExportTrainer, or add "
+                f"an `export` method with the same signature."
+            )
         super().__init__(*args, trainer_class=trainer_class, **kwargs)
 
     def add_arguments_to_parser(self, parser):

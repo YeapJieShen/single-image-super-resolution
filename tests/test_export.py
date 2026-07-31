@@ -132,14 +132,15 @@ def test_to_onnx_ckpt_path_loads_weights_before_export(tmp_path):
     np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=1e-3)
 
 
-def test_to_onnx_restores_training_mode(tmp_path):
+@pytest.mark.parametrize("was_training", [True, False])
+def test_to_onnx_restores_training_mode(tmp_path, was_training):
     """model.training is restored after export, whatever it was before."""
     module = _make_srcnn_module(example_input_shape=(1, 16, 16))
-    module.model.train()
+    module.model.train(was_training)
 
     to_onnx(module, tmp_path / "model.onnx")
 
-    assert module.model.training is True
+    assert module.model.training is was_training
 
 
 def test_to_onnx_missing_onnx_raises_import_error_with_extra_hint(monkeypatch):
