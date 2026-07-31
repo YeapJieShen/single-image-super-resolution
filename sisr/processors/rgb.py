@@ -13,3 +13,7 @@ class RGBProcessor(SRProcessor):
 
     def reconstruct(self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         return sr_model_out
+
+    @property
+    def model_channels(self) -> int:
+        return 3

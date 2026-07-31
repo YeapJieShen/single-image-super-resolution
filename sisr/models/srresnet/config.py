@@ -13,6 +13,8 @@ Section 3.2 (SRResNet baseline).
 from dataclasses import dataclass, field
 from typing import Literal
 
+from sisr.models.base import SRModel
+from sisr.processors.base import SRProcessor
 from sisr.training.config import SREvalConfig, SRTrainingConfig
 
 
@@ -35,6 +37,33 @@ class SRResNetTrainingConfig(SRTrainingConfig):
     """
 
     init_strategy: Literal["default", "paper"] = "default"
+
+    def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
+        """Extend the base checks with SRResNet's ``in_out_channels``/processor correlation.
+
+        Raises a readable error before the base's forward probe would
+        otherwise surface the same defect as a cryptic Conv2d shape mismatch.
+
+        Args:
+            model: The constructed :class:`~sisr.models.srresnet.SRResNet` instance.
+            processor: The :class:`~sisr.processors.base.SRProcessor` paired
+                with ``model``.
+
+        Raises:
+            ValueError: If ``model``'s ``in_out_channels`` doesn't match
+                ``processor.model_channels``.
+        """
+        in_out_channels = model.hparams["in_out_channels"]
+        if in_out_channels != processor.model_channels:
+            raise ValueError(
+                f"SRResNet in_out_channels={in_out_channels} does not match "
+                f"{type(processor).__name__}.model_channels={processor.model_channels}. "
+                f"in_out_channels sets both the head Conv2d's input and the tail "
+                f"Conv2d's output (after the scale={model.hparams['scale']}x "
+                f"PixelShuffle upsampling); pick a processor whose model_channels "
+                f"matches (e.g. RGBProcessor or YCbCrProcessor for in_out_channels=3)."
+            )
+        super().validate_against(model, processor)
 
 
 @dataclass

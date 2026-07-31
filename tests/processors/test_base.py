@@ -12,8 +12,8 @@ def test_srprocessor_is_abstract():
         SRProcessor()
 
 
-def test_srprocessor_subclass_must_implement_both_methods():
-    """A subclass missing either abstract method also raises on instantiation."""
+def test_srprocessor_subclass_must_implement_all_abstract_members():
+    """A subclass missing any abstract member also raises on instantiation."""
 
     class _ExtractOnly(SRProcessor):
         def extract(self, lr_rgb):
@@ -30,8 +30,22 @@ def test_srprocessor_subclass_must_implement_both_methods():
         _ReconstructOnly()
 
 
+def test_srprocessor_subclass_missing_model_channels_raises():
+    """model_channels is abstract too — extract/reconstruct alone isn't enough."""
+
+    class _MissingModelChannels(SRProcessor):
+        def extract(self, lr_rgb):
+            return lr_rgb
+
+        def reconstruct(self, sr_model_out, lr_rgb):
+            return sr_model_out
+
+    with pytest.raises(TypeError, match="abstract"):
+        _MissingModelChannels()
+
+
 def test_srprocessor_complete_subclass_instantiates():
-    """Subclass implementing both abstract methods can be instantiated."""
+    """Subclass implementing all abstract members can be instantiated."""
 
     class _Complete(SRProcessor):
         def extract(self, lr_rgb):
@@ -40,8 +54,13 @@ def test_srprocessor_complete_subclass_instantiates():
         def reconstruct(self, sr_model_out, lr_rgb):
             return sr_model_out
 
+        @property
+        def model_channels(self):
+            return 3
+
     p = _Complete()
     assert isinstance(p, SRProcessor)
     x = torch.zeros(1, 3, 4, 4)
     assert torch.equal(p.extract(x), x)
     assert torch.equal(p.reconstruct(x, x), x)
+    assert p.model_channels == 3
