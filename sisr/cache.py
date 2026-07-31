@@ -14,8 +14,9 @@ torch-free; colorspace math lives in :mod:`sisr.colorspace` for this reason.
 
 import os
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,31 @@ class LMDBCache:
             if buf is None:
                 return None
             return bytes(buf)
+
+    @contextmanager
+    def get_buffer(self, key: str) -> Iterator[memoryview | None]:
+        """Yields a zero-copy view onto the raw value stored at *key*.
+
+        The read transaction is opened on entry and committed on exit, so the
+        yielded ``memoryview`` aliases memory that is **only valid inside this
+        ``with`` block** — LMDB is free to reclaim it the moment the
+        transaction closes. Do all interpretation (``np.frombuffer``, slicing)
+        and copying (``.copy()``, ``torch.from_numpy(...).clone()``) *before*
+        the block exits. This is a context manager rather than a plain return
+        specifically so a caller cannot accidentally retain the view past its
+        transaction — there is no variable holding the buffer until you
+        actually enter the ``with``.
+
+        Args:
+            key (str): The string key to look up.
+
+        Yields:
+            A ``memoryview`` onto the raw value bytes, or ``None`` if *key* is
+            absent.
+        """
+        env = self.get_env()
+        with env.begin(write=False, buffers=True) as txn:
+            yield txn.get(key.encode())
 
     def get_batch(self, keys: Sequence[str]) -> list[bytes | None]:
         """Reads multiple values from the cache in a single transaction.

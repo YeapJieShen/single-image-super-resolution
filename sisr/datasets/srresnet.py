@@ -2,36 +2,80 @@
 
 LR is the bicubic downscale of HR by ``scale`` (no upsample round-trip);
 the model is responsible for the ×``scale`` upsampling. :class:`TrainDataset`
-serves random ``hr_crop_size`` crops without caching (random crops aren't
-cacheable); :class:`ValidationDataset` serves full images cropped to a
-multiple of ``scale``.
+caches full decoded HR images (raw, uint8) through :class:`~sisr.cache.LMDBCache`
+— decoding a DIV2K PNG costs ~109ms, while the 96x96 crop kept from it costs
+~1ms, so re-decoding per crop is ~99% wasted work. The random crop itself is
+**not** cached (that would defeat crop randomness); it is drawn fresh, from
+the cached raw array, on every ``__getitem__`` call.
+:class:`ValidationDataset` serves full images cropped to a multiple of
+``scale``, uncached (each is decoded once per epoch, no repetition).
 """
 
+import hashlib
+import random
+import struct
 from pathlib import Path
 
 import albumentations as A
 import cv2
+import numpy as np
 import torch
 from albumentations.pytorch import ToTensorV2
+from PIL import Image
 
+from ..cache import LMDBCache, LMDBCacheBuildContext
 from .base import SRDataset
+
+# (height, width) as little-endian uint32 each, prefixed to every cached HR
+# value so a per-image shape (DIV2K images vary in size) travels with its
+# pixel data in one LMDB read instead of a second lookup.
+_SHAPE_HEADER = struct.Struct("<II")
+
+
+def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
+    """Decodes one HR image and returns its single LMDB entry.
+
+    Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
+    across all platforms, mirroring :func:`sisr.datasets.srcnn._process_subimages`.
+
+    Args:
+        path (Path): File path of the high-resolution image.
+        idx (int): This image's position in the manifest — determines its LMDB key.
+
+    Returns:
+        A single-element list ``[(f'hr_{idx:08d}', header + raw_bytes)]`` where
+        *header* is :data:`_SHAPE_HEADER`-packed ``(h, w)`` and *raw_bytes* is
+        the ``(H, W, 3)`` uint8 RGB array's bytes.
+    """
+    arr = np.array(Image.open(path).convert("RGB"))
+    h, w = arr.shape[:2]
+    value = _SHAPE_HEADER.pack(h, w) + arr.tobytes()
+    return [(f"hr_{idx:08d}", value)]
 
 
 class TrainDataset(SRDataset):
-    """Random-crop HR/LR pairs for SRResNet-style training (AlbumentationsX backend).
+    """Random-crop HR/LR pairs for SRResNet-style training, HR served from an
+    LMDB cache of full raw images.
 
-    Each ``__getitem__`` takes a random ``hr_crop_size`` square crop from an
-    HR image via :class:`albumentations.RandomCrop` and bicubic-downsamples
-    it by ``scale`` (via :class:`albumentations.Resize` with
-    ``cv2.INTER_CUBIC``) to form the LR input. Unlike
+    On first instantiation with a given set of parameters, every HR image is
+    decoded once and stored whole (uint8, RGB, with its own ``(H, W)`` header)
+    in an LMDB database — see module docstring for why. Each ``__getitem__``
+    then reads that image's cached bytes via a zero-copy
+    :meth:`~sisr.cache.LMDBCache.get_buffer` view, takes a fresh random
+    ``hr_crop_size`` square crop (plain numpy slicing — crop randomness must
+    survive the cache, so only the *decode* is memoized, never the crop), and
+    bicubic-downsamples it by ``scale`` (via :class:`albumentations.Resize`
+    with ``cv2.INTER_CUBIC``) to form the LR input. Unlike
     :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     blur+downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is
     ``hr_crop_size // scale`` on a side.
 
-    Crops are generated on the fly (so they differ every epoch); there is no
-    LMDB cache because random crops are not cacheable. HR is always served as
-    RGB; Y/YCbCr selection happens downstream in :class:`SRLightning`.
+    Because the cache holds whole decoded images rather than crops, it is independent of
+    ``hr_crop_size``/``crops_per_image``/``scale`` — the checksum keys only on
+    the file manifest, so changing the crop recipe never invalidates the
+    cache. HR is always served as RGB; Y/YCbCr selection happens downstream in
+    :class:`SRLightning`.
 
     Reference:
         Photo-Realistic Single Image Super-Resolution Using a Generative
@@ -43,7 +87,17 @@ class TrainDataset(SRDataset):
         hr_crop_size (int): Side length of the square HR crop.
         crops_per_image (int): Number of random crops drawn per image per
             epoch (the dataset length is ``len(images) * crops_per_image``).
-            Defaults to ``1``.
+            Each draw re-reads the same cached array (a cheap mmap access, not
+            a decode) and takes an independently random crop. Defaults to ``1``.
+        use_tqdm (bool): Whether to display a progress bar during the LMDB
+            build. Defaults to ``False``.
+        cache_dir (str | Path | None): Directory in which to store the LMDB
+            cache. Defaults to ``img_dir / '.lmdb_cache'``.
+        build_num_workers (int | None): Number of worker processes for the
+            one-time LMDB build. ``None`` (default) uses
+            ``min(os.cpu_count() or 1, num_images)``; a value that resolves to
+            ``<= 1`` effective workers runs an inline, no-subprocess build.
+            Only affects cache construction, not data loading.
 
     Raises:
         ValueError: If no images are found, or ``hr_crop_size`` is not
@@ -56,6 +110,9 @@ class TrainDataset(SRDataset):
         scale: int,
         hr_crop_size: int,
         crops_per_image: int = 1,
+        use_tqdm: bool = False,
+        cache_dir: str | Path | None = None,
+        build_num_workers: int | None = None,
     ):
         super().__init__()
 
@@ -66,9 +123,9 @@ class TrainDataset(SRDataset):
         self.scale = scale
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
+        self.build_num_workers = build_num_workers
 
         lr_size = hr_crop_size // scale
-        self._hr_crop = A.Compose([A.RandomCrop(hr_crop_size, hr_crop_size)])
         self._lr_pipeline = A.Compose(
             [
                 A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
@@ -77,6 +134,64 @@ class TrainDataset(SRDataset):
             ]
         )
         self._hr_to_tensor = self._to_tensor_transform()
+
+        cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
+        checksum = self._compute_checksum()
+        map_size = max(int(self._estimate_raw_bytes() * 1.1), 64 * 1024 * 1024)
+
+        self._cache = LMDBCache(
+            cache_dir=cache_dir,
+            name="srresnet_hr",
+            checksum=checksum,
+            length=len(self.img_paths),
+            map_size=map_size,
+            metadata={"format": "raw_rgb_v1"},
+            build_fn=self._build,
+            use_tqdm=use_tqdm,
+        )
+
+    def _compute_checksum(self) -> str:
+        """Computes a SHA-256 checksum over the file manifest only.
+
+        Unlike :meth:`sisr.datasets.srcnn.TrainDataset._compute_checksum`, no
+        crop/scale parameter enters this hash: the cache stores whole raw
+        images, so it is valid for any ``hr_crop_size``/``crops_per_image``/
+        ``scale`` combination over the same file set.
+
+        Returns:
+            A hex-encoded SHA-256 digest string.
+        """
+        file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in self.img_paths)
+        canonical = "|".join([file_manifest, "format=raw_rgb_v1"])
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _estimate_raw_bytes(self) -> int:
+        """Sums each image's decoded byte size from its header, without decoding pixels.
+
+        Returns:
+            Total bytes the LMDB build will write (header + raw RGB per image).
+        """
+        total = 0
+        for path in self.img_paths:
+            img = Image.open(path)
+            w, h = img.size
+            img.close()
+            total += _SHAPE_HEADER.size + h * w * 3
+        return total
+
+    def _build(self, ctx: LMDBCacheBuildContext) -> None:
+        """Populates the LMDB cache by decoding each HR image once in parallel.
+
+        Args:
+            ctx (LMDBCacheBuildContext): Build context provided by :class:`~sisr.cache.LMDBCache`.
+        """
+        ctx.parallel_build(
+            items=self.img_paths,
+            process_fn=_process_hr_image,
+            process_args=[(i,) for i in range(len(self.img_paths))],
+            num_workers=self.build_num_workers,
+            desc="Building SRResNet HR cache",
+        )
 
     def __len__(self) -> int:
         return len(self.img_paths) * self.crops_per_image
@@ -89,16 +204,24 @@ class TrainDataset(SRDataset):
         ``hr_crop_size // scale``). Both are ``float32`` in ``[0, 1]``
         with shape ``(3, H, W)``.
         """
-        path = self.img_paths[idx % len(self.img_paths)]
-        arr = self._load_rgb(path)  # HWC uint8 RGB
+        img_idx = idx % len(self.img_paths)
+        key = f"hr_{img_idx:08d}"
 
-        h, w = arr.shape[:2]
-        if w < self.hr_crop_size or h < self.hr_crop_size:
-            raise ValueError(
-                f"Image {path.name} ({w}x{h}) is smaller than hr_crop_size {self.hr_crop_size}."
-            )
-
-        hr_arr = self._hr_crop(image=arr)["image"]  # HWC uint8
+        with self._cache.get_buffer(key) as buf:
+            if buf is None:
+                raise KeyError(key)
+            h, w = _SHAPE_HEADER.unpack_from(buf, 0)
+            if w < self.hr_crop_size or h < self.hr_crop_size:
+                raise ValueError(
+                    f"Image {self.img_paths[img_idx].name} ({w}x{h}) is smaller than "
+                    f"hr_crop_size {self.hr_crop_size}."
+                )
+            # Read-only view into the LMDB transaction's mmap page — sliced and
+            # copied out below, before the `with` block ends and the view dies.
+            arr = np.frombuffer(buf, dtype=np.uint8, offset=_SHAPE_HEADER.size).reshape(h, w, 3)
+            top = random.randint(0, h - self.hr_crop_size)
+            left = random.randint(0, w - self.hr_crop_size)
+            hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()
 
         lr_tensor = self._lr_pipeline(image=hr_arr)["image"]
         hr_tensor = self._hr_to_tensor(image=hr_arr)["image"]
