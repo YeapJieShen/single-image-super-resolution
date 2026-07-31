@@ -45,7 +45,6 @@ class PredictDataset(SRDataset):
                     f"named by stem, so these would overwrite each other."
                 )
             stems[path.stem] = path
-        self._to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -60,4 +59,4 @@ class PredictDataset(SRDataset):
             ``float32`` tensor of shape ``(3, H, W)`` in ``[0, 1]``.
         """
         arr = self._load_rgb(self.img_paths[idx])
-        return self._to_tensor(image=arr)["image"]
+        return self._to_tensor(arr)
