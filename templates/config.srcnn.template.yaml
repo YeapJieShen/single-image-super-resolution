@@ -1,5 +1,12 @@
 seed_everything: 42
 
+# TF32 matmul/conv kernels on Ampere+ GPUs (confirmed here: RTX 5060 Laptop, sm_120
+# Blackwell) — a standard free lever with no precision opt-in, unlike bf16-mixed below.
+matmul_precision: high
+# Autotunes a conv kernel per input shape on first sight and caches it — free here since
+# every training step feeds the same 33x33 subimg_size patch shape.
+cudnn_benchmark: true
+
 optimizer:
   class_path: torch.optim.SGD
   init_args:
@@ -73,6 +80,11 @@ trainer:
   num_sanity_val_steps: -1
   log_every_n_steps: 500
   deterministic: false
+  # bf16-mixed is a larger throughput lever than the two above, but this is a
+  # paper-reproduction repo: the shipped default must train in full fp32 so results stay
+  # comparable to the paper. Uncomment for your own runs on bf16-capable hardware (confirmed
+  # here via torch.cuda.is_bf16_supported()).
+  # precision: bf16-mixed
   accelerator: cuda
   devices: [0]
   enable_progress_bar: true
@@ -95,6 +107,15 @@ trainer:
     - class_path: sisr.training.GradNormLogger
       init_args:
         log_every_n_steps: 2000
+    # Throughput/hardware diagnostics — commented out by default (extra per-step logging
+    # overhead); uncomment to profile a run. DeviceStatsMonitor works as-is.
+    # ThroughputMonitor additionally needs a `batch_size_fn` callable (dotted import path);
+    # batches here are (lr, hr) tuples, not plain tensors, so it needs a small project-side
+    # helper — none exists yet.
+    # - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
+    # - class_path: lightning.pytorch.callbacks.ThroughputMonitor
+    #   init_args:
+    #     batch_size_fn: sisr.training.callbacks.batch_size  # example path; add if needed
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
