@@ -31,13 +31,41 @@ jobs:
         run: pip install .
       - name: Smoke import
         run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
+      # Ports the old tests/test_cli.py::test_cli_help_lists_subcommands subprocess
+      # smoke here (P5.11): it cost ~10s of the pytest suite re-importing torch +
+      # lightning just to print --help, and this job already installs the wheel and
+      # smoke-imports it, so it's the natural home for a packaging-level check.
+      - name: CLI entry point lists subcommands
+        run: |
+          python -c "import subprocess; out = subprocess.run(['sisr', '--help'], capture_output=True, text=True, check=True).stdout; missing = [s for s in ('fit', 'validate', 'test', 'predict') if s not in out]; assert not missing, f'sisr --help missing subcommands: {missing}'"
 
-  # Stable required-check context: green only if every matrix leg passed
-  # (see the equivalent gate in test.yml).
+  # Cheap single-leg guard for the *editable* install path (PEP 660): test.yml
+  # moved to uv, so nothing else in CI exercises `pip install -e`, yet
+  # CONTRIBUTING.md gives contributors who skip uv exactly that command. One
+  # OS/Python leg is enough — this checks build-backend behaviour, not the matrix.
+  editable-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Editable install
+        run: pip install -e ".[dev]"
+      - name: Smoke import
+        run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
+
+  # Stable required-check context: green only if every build-matrix leg and the
+  # editable-install check passed (see the equivalent gate in test.yml).
   build:
-    needs: build-matrix
+    needs: [build-matrix, editable-install]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require all matrix legs to pass
-        run: '[ "${{ needs.build-matrix.result }}" = "success" ]'
+        run: |
+          [ "${{ needs.build-matrix.result }}" = "success" ]
+          [ "${{ needs.editable-install.result }}" = "success" ]

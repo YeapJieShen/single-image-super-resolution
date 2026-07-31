@@ -1,15 +1,13 @@
-"""CLI tests: in-process config resolution, plus one subprocess entry-point smoke.
+"""CLI tests: in-process config resolution.
 
-Config-resolution / matmul / override / subcommand-help assertions run in-process
-via ``SRLightningCLI(args=..., run=False)`` (see ``_resolve``); only
-``test_cli_help_lists_subcommands`` spawns the installed ``sisr`` console script.
-Each spawn re-imports the whole torch + lightning stack (~10s wall), so a single
-smoke covers "the entry point works" and every other assertion runs in-process.
+Every assertion resolves a config via ``SRLightningCLI(args=..., run=False)`` (see
+``_resolve``) or via a synchronous ``--help`` invocation — nothing spawns a
+subprocess, so nothing pays the torch + lightning cold-import cost per test. The
+installed ``sisr`` console script itself is smoke-tested in ``build.yml`` instead
+(a packaging concern, not something every test run needs to re-pay for).
 """
 
-import subprocess
 import sys
-import sysconfig
 import warnings
 from pathlib import Path
 
@@ -19,27 +17,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
-
-# Drive the installed `sisr` console script (declared in pyproject.toml's
-# [project.scripts]) rather than `python -m sisr.cli`, so these smoke tests
-# exercise the same entry point an end user gets after `pip install`. The
-# scripts dir is the venv's Scripts/ (Windows) or bin/ (POSIX), resolved
-# without depending on PATH activation.
-SISR_BIN = Path(sysconfig.get_path("scripts")) / ("sisr.exe" if sys.platform == "win32" else "sisr")
-assert SISR_BIN.exists(), (
-    f"sisr console script not found at {SISR_BIN} — run `pip install -e .` first"
-)
-
-
-def _cli(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Invoke the installed `sisr` console script from the repo root."""
-    return subprocess.run(
-        [str(SISR_BIN), *args],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
 
 
 def _resolve(*args: str):
@@ -168,13 +145,6 @@ def test_optimizer_lr_override_in_process():
     """Top-level --optimizer.init_args.lr override surfaces in the resolved config."""
     cli = _resolve("--config", str(TEMPLATE), "--optimizer.init_args.lr=5e-3")
     assert cli.config.optimizer.init_args.lr == pytest.approx(0.005)
-
-
-def test_cli_help_lists_subcommands():
-    proc = _cli("--help")
-    assert proc.returncode == 0
-    for sub in ("fit", "validate", "test", "predict"):
-        assert sub in proc.stdout
 
 
 def test_matmul_precision_accepted_in_process():
