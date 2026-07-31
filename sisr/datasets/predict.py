@@ -27,12 +27,24 @@ class PredictDataset(SRDataset):
             inference on.
 
     Raises:
-        ValueError: If no image files are found in ``img_dir``.
+        ValueError: If no image files are found in ``img_dir``, or if two
+            images share a filename stem.
     """
 
     def __init__(self, img_dir: str | Path):
         super().__init__()
         self._index_images(img_dir)
+        # SRPredictionWriter names outputs by stem, so `cat.png` and `cat.jpg`
+        # would silently overwrite each other. Fail at construction instead.
+        stems: dict[str, Path] = {}
+        for path in self.img_paths:
+            if path.stem in stems:
+                raise ValueError(
+                    f"Duplicate filename stem {path.stem!r} in {img_dir}: "
+                    f"{stems[path.stem].name} and {path.name}. Predictions are "
+                    f"named by stem, so these would overwrite each other."
+                )
+            stems[path.stem] = path
         self._to_tensor = self._to_tensor_transform()
 
     def __len__(self) -> int:
