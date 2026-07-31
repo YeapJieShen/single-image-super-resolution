@@ -331,7 +331,7 @@ class SRLightning(lightning.LightningModule):
         """Compute training loss for one batch and log it.
 
         Delegates the forward + colorspace + loss pipeline to :meth:`_step`
-        and logs ``train_loss`` on every step for the progress bar.
+        and logs ``loss/train`` on every step for the progress bar.
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple as produced by the
@@ -343,7 +343,7 @@ class SRLightning(lightning.LightningModule):
             Scalar loss tensor for the optimizer.
         """
         loss, *_ = self._step(batch)
-        self.log("train_loss", loss, prog_bar=True, on_step=True)
+        self.log("loss/train", loss, prog_bar=True, on_step=True)
         return loss
 
     def validation_step(
@@ -375,19 +375,19 @@ class SRLightning(lightning.LightningModule):
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
-        self.log("val_loss", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
+        self.log("loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
         primary = self.eval_config.psnr_channels[0]
         for key in self.eval_config.psnr_keys:
             sr_t, hr_t = psnr_tensors[key]
             self.log(
-                f"val_psnr({key})",
+                f"psnr/val/{key}",
                 self._mean_psnr(sr_t, hr_t),
                 prog_bar=(key == primary),
                 on_step=False,
                 add_dataloader_idx=False,
             )
         self.log(
-            "val_ssim",
+            "ssim/val",
             torchmetrics.functional.image.structural_similarity_index_measure(
                 sr, hr_cropped, data_range=1.0
             ),
@@ -413,8 +413,8 @@ class SRLightning(lightning.LightningModule):
         if not tb_loggers:
             return
         metrics = {
-            **{f"val_psnr({k})": 0.0 for k in self.eval_config.psnr_keys},
-            "val_ssim": 0.0,
+            **{f"psnr/val/{k}": 0.0 for k in self.eval_config.psnr_keys},
+            "ssim/val": 0.0,
         }
         for tb in tb_loggers:
             tb.log_hyperparams(self.hparams, metrics)

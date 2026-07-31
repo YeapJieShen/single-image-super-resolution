@@ -100,15 +100,15 @@ def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
     trainer.fit(module, datamodule=datamodule)
     fit_metrics = set(trainer.callback_metrics)
     # Module-logged: training_step + validation_step on the primary val loader (idx 0).
-    assert {"train_loss", "val_loss", "val_psnr(RGB)", "val_ssim"} <= fit_metrics
+    assert {"loss/train", "loss/val", "psnr/val/RGB", "ssim/val"} <= fit_metrics
     # Callback-logged for the Set5 test loader (val_dataloader idx 1) — proves
     # BenchmarkImageLogger auto-discovered the datamodule's test set and ran.
-    assert {"Set5_psnr(RGB)", "Set5_ssim"} <= fit_metrics
+    assert {"psnr/Set5/RGB", "ssim/Set5"} <= fit_metrics
 
     trainer.test(module, datamodule=datamodule)
     test_metrics = set(trainer.callback_metrics)
     # test_step is a no-op; these come solely from BenchmarkImageLogger.on_test_*.
-    assert {"Set5_psnr(RGB)", "Set5_ssim"} <= test_metrics
+    assert {"psnr/Set5/RGB", "ssim/Set5"} <= test_metrics
 
 
 # ---------------------------------------------------------------------------

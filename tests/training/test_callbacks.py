@@ -163,7 +163,7 @@ def test_grad_norm_logger_logs_on_cadence():
     cb.on_after_backward(trainer, pl_module)
     pl_module.log.assert_called_once()
     args, _ = pl_module.log.call_args
-    assert args[0] == "grad_norm"
+    assert args[0] == "diag/grad_norm"
     assert args[1] == pytest.approx(10.0)
 
 
@@ -205,7 +205,7 @@ def test_grad_norm_logger_uses_grad_detach_not_grad_data():
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(trainer, pl_module)
     args, _ = pl_module.log.call_args
-    assert args[0] == "grad_norm"
+    assert args[0] == "diag/grad_norm"
     assert args[1] == pytest.approx(10.0)
 
 
@@ -326,15 +326,15 @@ def test_srcheckpoint_setup_accepts_monitor_matching_psnr_keys(tmp_path: Path):
     """monitor_metric derived from eval_config.psnr_keys must pass setup()
     without raising."""
     pl_module = _make_real_pl_module()  # SREvalConfig(crop_border=0) -> psnr_keys=['RGB']
-    ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath=str(tmp_path))
+    ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
     ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")  # must not raise
 
 
 @_ignore_gpu_warning
 def test_srcheckpoint_setup_accepts_val_ssim_monitor(tmp_path: Path):
-    """val_ssim is always logged regardless of psnr_keys and must be accepted."""
+    """ssim/val is always logged regardless of psnr_keys and must be accepted."""
     pl_module = _make_real_pl_module()
-    ckpt = SRCheckpoint(monitor_metric="val_ssim", dirpath=str(tmp_path))
+    ckpt = SRCheckpoint(monitor_metric="ssim/val", dirpath=str(tmp_path))
     ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")  # must not raise
 
 
@@ -345,8 +345,8 @@ def test_srcheckpoint_setup_rejects_monitor_not_in_psnr_keys(tmp_path: Path):
     MisconfigurationException at setup() time — startup, not 20k steps into
     training once Lightning's own val_loop._has_run-gated check would fire."""
     pl_module = _make_real_pl_module()
-    ckpt = SRCheckpoint(monitor_metric="val_psnr(Y)", dirpath=str(tmp_path))
-    with pytest.raises(MisconfigurationException, match=r"val_psnr\(Y\)"):
+    ckpt = SRCheckpoint(monitor_metric="psnr/val/Y", dirpath=str(tmp_path))
+    with pytest.raises(MisconfigurationException, match=r"psnr/val/Y"):
         ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
 
 
@@ -358,8 +358,8 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     ckpt = SRCheckpoint(monitor_metric="bogus_metric", dirpath=str(tmp_path))
     with pytest.raises(MisconfigurationException) as exc_info:
         ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
-    assert "val_psnr(RGB)" in str(exc_info.value)
-    assert "val_ssim" in str(exc_info.value)
+    assert "psnr/val/RGB" in str(exc_info.value)
+    assert "ssim/val" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -458,10 +458,10 @@ def test_benchmark_validation_epoch_end_logs_means():
     cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
     # Two log calls per dataset: psnr + ssim.
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
-    assert "Set5_psnr(RGB)" in log_keys
-    assert "Set5_ssim" in log_keys
+    assert "psnr/Set5/RGB" in log_keys
+    assert "ssim/Set5" in log_keys
     # Mean PSNR = (30.0 + 32.0) / 2 = 31.0
-    psnr_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "Set5_psnr(RGB)")
+    psnr_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "psnr/Set5/RGB")
     assert psnr_call.args[1] == pytest.approx(31.0)
 
 
@@ -504,7 +504,7 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     assert strip.ndim == 3 and strip.shape[0] == 3  # (C, H, W) triptych
     # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
-    assert scalar_tags == ["Set5_psnr(RGB)/img_0", "Set5_ssim/img_0"]
+    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/img_0"]
 
 
 def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path, monkeypatch):
@@ -618,7 +618,7 @@ def test_benchmark_test_epoch_end_logs_means():
     trainer = SimpleNamespace(global_step=0, loggers=[])
     cb.on_test_epoch_end(trainer=trainer, pl_module=pl_module)
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
-    assert "Set5_psnr(RGB)" in log_keys
+    assert "psnr/Set5/RGB" in log_keys
 
 
 # ---------------------------------------------------------------------------

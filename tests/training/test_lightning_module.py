@@ -345,8 +345,8 @@ def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning
     params_arg = args[0] if args else kwargs.get("params")
     metrics_arg = args[1] if len(args) > 1 else kwargs.get("metrics")
 
-    expected_metrics = {f"val_psnr({k})": 0.0 for k in srcnn_rgb_lit.eval_config.psnr_keys}
-    expected_metrics["val_ssim"] = 0.0
+    expected_metrics = {f"psnr/val/{k}": 0.0 for k in srcnn_rgb_lit.eval_config.psnr_keys}
+    expected_metrics["ssim/val"] = 0.0
 
     assert params_arg == srcnn_rgb_lit.hparams
     assert metrics_arg == expected_metrics
