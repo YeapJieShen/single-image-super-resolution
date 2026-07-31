@@ -32,6 +32,8 @@ data:
       scale: *scale
       hr_crop_size: 96
       crops_per_image: 1
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
     class_path: sisr.datasets.srresnet.ValidationDataset
     init_args:

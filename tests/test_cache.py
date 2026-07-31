@@ -77,6 +77,88 @@ def test_lmdb_get_method(tmp_path: Path):
     assert cache.get("missing") is None
 
 
+def test_lmdb_get_buffer_yields_memoryview_matching_get(tmp_path: Path):
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=3,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(3),
+    )
+    with cache.get_buffer("key_1") as buf:
+        assert isinstance(buf, memoryview)
+        assert bytes(buf) == b"v1"
+
+
+def test_lmdb_get_buffer_yields_none_for_missing_key(tmp_path: Path):
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with cache.get_buffer("missing") as buf:
+        assert buf is None
+
+
+def test_lmdb_get_buffer_is_a_context_manager_not_a_plain_value(tmp_path: Path):
+    """get_buffer() itself must return a context manager, not the buffer --
+    misuse (retaining the view past its transaction) requires deliberately
+    working around the API shape rather than just calling it normally."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    ctx = cache.get_buffer("key_0")
+    assert hasattr(ctx, "__enter__") and hasattr(ctx, "__exit__")
+    assert not isinstance(ctx, (bytes, memoryview))
+
+
+def test_lmdb_get_buffer_does_not_leak_read_transactions(tmp_path: Path):
+    """Each with-block must commit its transaction on exit rather than leaking
+    it -- LMDB's default max_readers is 126, so many sequential get_buffer
+    calls would raise lmdb.ReadersFullError if the context manager failed to
+    close the transaction it opened."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    for _ in range(300):
+        with cache.get_buffer("key_0") as buf:
+            assert bytes(buf) == b"v0"
+
+
+def test_lmdb_get_buffer_propagates_exception_and_stays_usable(tmp_path: Path):
+    """An exception raised inside the with-block must propagate (the
+    transaction aborts, it isn't swallowed), and the cache must remain
+    readable afterward -- the aborted transaction must not corrupt or lock
+    the read-only environment for subsequent reads."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with pytest.raises(ValueError, match="boom"):
+        with cache.get_buffer("key_0"):
+            raise ValueError("boom")
+    with cache.get_buffer("key_0") as buf:
+        assert bytes(buf) == b"v0"
+
+
 def test_lmdb_get_batch(tmp_path: Path):
     cache = LMDBCache(
         cache_dir=tmp_path,
