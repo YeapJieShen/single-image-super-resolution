@@ -214,15 +214,15 @@ def test_optimizer_lr_override_in_process():
 
 
 def test_matmul_precision_accepted_in_process():
-    """--matmul_precision=high is accepted and round-trips into the resolved config."""
-    cli = _resolve("--config", str(TEMPLATE), "--matmul_precision=high")
-    assert cli.config.matmul_precision == "high"
+    """--matmul_precision=medium overrides the template's shipped 'high' default."""
+    cli = _resolve("--config", str(TEMPLATE), "--matmul_precision=medium")
+    assert cli.config.matmul_precision == "medium"
 
 
-def test_matmul_precision_defaults_to_none_in_process():
-    """When unset, matmul_precision resolves to None."""
+def test_matmul_precision_template_default_is_high_in_process():
+    """The shipped templates set matmul_precision: high (TF32 on Ampere+) by default."""
     cli = _resolve("--config", str(TEMPLATE))
-    assert cli.config.matmul_precision is None
+    assert cli.config.matmul_precision == "high"
 
 
 def test_matmul_precision_rejects_invalid_in_process():
@@ -232,10 +232,26 @@ def test_matmul_precision_rejects_invalid_in_process():
         _resolve("--config", str(TEMPLATE), "--matmul_precision=bogus")
 
 
+def test_cudnn_benchmark_accepted_in_process():
+    """--cudnn_benchmark=false overrides the template's shipped 'true' default."""
+    cli = _resolve("--config", str(TEMPLATE), "--cudnn_benchmark=false")
+    assert cli.config.cudnn_benchmark is False
+
+
+def test_cudnn_benchmark_template_default_is_true_in_process():
+    """The shipped templates set cudnn_benchmark: true (free at static crop shapes)."""
+    cli = _resolve("--config", str(TEMPLATE))
+    assert cli.config.cudnn_benchmark is True
+
+
 # In-process unit tests for SRLightningCLI.before_instantiate_classes. Subprocess
 # tests above cover argparse wiring; these cover the hook's branching logic so it
 # shows up in line coverage.
-def _make_cli_stub(subcommand: str | None, matmul_precision: str | None):
+def _make_cli_stub(
+    subcommand: str | None,
+    matmul_precision: str | None,
+    cudnn_benchmark: bool | None = None,
+):
     """Build an SRLightningCLI instance bypassing __init__ for direct hook testing."""
     from types import SimpleNamespace
 
@@ -244,7 +260,13 @@ def _make_cli_stub(subcommand: str | None, matmul_precision: str | None):
     cli = SRLightningCLI.__new__(SRLightningCLI)
     cli.subcommand = subcommand
     cli.config = (
-        {subcommand: SimpleNamespace(matmul_precision=matmul_precision)} if subcommand else {}
+        {
+            subcommand: SimpleNamespace(
+                matmul_precision=matmul_precision, cudnn_benchmark=cudnn_benchmark
+            )
+        }
+        if subcommand
+        else {}
     )
     return cli
 
@@ -283,6 +305,32 @@ def test_before_instantiate_classes_skips_when_no_subcommand(monkeypatch):
     _make_cli_stub(subcommand=None, matmul_precision="medium").before_instantiate_classes()
 
     assert calls == []
+
+
+def test_before_instantiate_classes_sets_cudnn_benchmark(monkeypatch):
+    """When cudnn_benchmark is set, torch.backends.cudnn.benchmark is assigned that value."""
+    import torch
+
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
+
+    _make_cli_stub(
+        subcommand="fit", matmul_precision=None, cudnn_benchmark=True
+    ).before_instantiate_classes()
+
+    assert torch.backends.cudnn.benchmark is True
+
+
+def test_before_instantiate_classes_skips_cudnn_benchmark_when_unset(monkeypatch):
+    """When cudnn_benchmark is None, torch.backends.cudnn.benchmark is left untouched."""
+    import torch
+
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
+
+    _make_cli_stub(
+        subcommand="fit", matmul_precision=None, cudnn_benchmark=None
+    ).before_instantiate_classes()
+
+    assert torch.backends.cudnn.benchmark is False
 
 
 TEMPLATE_PATHS = sorted((REPO_ROOT / "templates").glob("config.*.template.yaml"))
