@@ -17,6 +17,7 @@ import torch.nn.functional
 import torchmetrics.functional
 import torchvision
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 
 class BenchmarkImageLogger(Callback):
@@ -295,9 +296,9 @@ class BenchmarkImageLogger(Callback):
             psnr_tensors = pl_module._build_psnr_tensors(sr_4d, hr_4d)
             psnr_dict = {
                 key: torchmetrics.functional.image.peak_signal_noise_ratio(
-                    sr_t, hr_t, data_range=1.0
+                    *psnr_tensors[key], data_range=1.0
                 ).item()
-                for key, (sr_t, hr_t) in psnr_tensors.items()
+                for key in pl_module.eval_config.psnr_keys
             }
             ssim = torchmetrics.functional.image.structural_similarity_index_measure(
                 sr_4d, hr_4d, data_range=1.0
@@ -531,6 +532,17 @@ class SRCheckpoint(ModelCheckpoint):
     automatically sets ``mode='max'`` (both PSNR and SSIM are
     higher-is-better) and builds a descriptive filename pattern.
 
+    The filename's metric *label* is sanitised (``/`` -> ``_``) and
+    ``auto_insert_metric_name`` is disabled, so a ``/``-bearing
+    ``monitor_metric`` (e.g. a future ``psnr/val/RGB`` TensorBoard-style tag)
+    cannot leak a raw ``/`` into the filename template. Lightning's
+    ``_format_checkpoint_name`` does no sanitisation itself, and with
+    ``auto_insert_metric_name=True`` (the default) a raw ``/`` there causes
+    ``TorchCheckpointIO`` to silently create a nested directory tree per
+    save instead of a flat file. The ``metrics`` dict lookup that supplies
+    the interpolated *value* is unaffected — it is a plain dict key and
+    handles ``/`` fine.
+
     Args:
         monitor_metric (str): The validation metric to monitor.
             Defaults to ``"val_psnr(RGB)"``.  Use any ``val_psnr({key})``
@@ -554,12 +566,52 @@ class SRCheckpoint(ModelCheckpoint):
         mode: str = "max",
         **kwargs: Any,
     ):
-        filename = f"{filename_prefix}-{{step}}-{{{monitor_metric}:.4f}}"
+        label = monitor_metric.replace("/", "_")
+        filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
         super().__init__(
             monitor=monitor_metric,
             mode=mode,
             save_top_k=save_top_k,
             dirpath=dirpath,
             filename=filename,
+            auto_insert_metric_name=False,
             **kwargs,
         )
+
+    def setup(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        stage: str,
+    ) -> None:
+        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+
+        Lightning itself only raises ``MisconfigurationException`` for a
+        missing monitor once the val loop has already run at least once
+        (``ModelCheckpoint._save_topk_checkpoint``, gated on
+        ``val_loop._has_run``) — with a long ``val_check_interval`` that is a
+        late, expensive-to-reach crash. This moves the same failure to
+        startup by checking ``monitor`` against ``pl_module.eval_config.psnr_keys``
+        (the same seam ``SRLightning`` logs val PSNR from) up front, before
+        any training happens.
+
+        Args:
+            trainer (lightning.Trainer): The active trainer.
+            pl_module (lightning.LightningModule): The model being trained;
+                must expose ``eval_config`` (an :class:`SREvalConfig`).
+            stage (str): Lightning trainer stage.
+
+        Raises:
+            MisconfigurationException: If ``monitor`` does not name a
+                metric ``SRLightning`` will log for ``stage``.
+        """
+        super().setup(trainer, pl_module, stage)
+        valid_metrics = {f"val_psnr({key})" for key in pl_module.eval_config.psnr_keys}
+        valid_metrics.add("val_ssim")
+        if self.monitor is not None and self.monitor not in valid_metrics:
+            raise MisconfigurationException(
+                f"`SRCheckpoint(monitor_metric={self.monitor!r})` does not match any "
+                f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
+                f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or monitor "
+                f"`val_ssim`."
+            )

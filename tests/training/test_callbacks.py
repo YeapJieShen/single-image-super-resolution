@@ -3,8 +3,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import lightning
 import pytest
 import torch
+from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
@@ -260,6 +262,103 @@ def test_srcheckpoint_default_filename_prefix_is_neutral_sr():
     not the SRCNN-specific 'srcnn'."""
     ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
     assert ckpt.filename.startswith("sr-")
+
+
+def test_srcheckpoint_disables_auto_insert_metric_name():
+    """INIT.8 prerequisite: auto_insert_metric_name must be off, since it is the
+    mechanism that would otherwise splice the raw (possibly `/`-bearing) metric
+    name into the filename as literal text."""
+    ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
+    assert ckpt.auto_insert_metric_name is False
+
+
+def test_srcheckpoint_slash_monitor_renders_flat_filename(tmp_path: Path):
+    """INIT.8 prerequisite: a `/`-bearing monitor_metric (e.g. a future
+    `psnr/val/RGB` TensorBoard-hierarchy tag) must render to a flat basename
+    with no path separator. Lightning's `_format_checkpoint_name` does no
+    sanitisation of its own — with the default `auto_insert_metric_name=True`
+    it splices the raw metric name in as literal text before the value
+    placeholder, which would make `TorchCheckpointIO.save_checkpoint`
+    silently create a nested directory tree (one per save) instead of a flat
+    checkpoint file. The `metrics` dict lookup that supplies the *value* is
+    unaffected by the `/` — it's just a dict key."""
+    ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    rendered = ckpt.format_checkpoint_name(
+        {"step": torch.tensor(1000), "psnr/val/RGB": torch.tensor(30.1234)}
+    )
+    basename = Path(rendered).name
+    assert "/" not in basename
+    assert basename == "sr-1000-psnr_val_RGB=30.1234.ckpt"
+
+
+# ---------------------------------------------------------------------------
+# SRCheckpoint.setup monitor validation
+# ---------------------------------------------------------------------------
+
+
+def _make_bare_trainer() -> lightning.Trainer:
+    """Minimal, unfitted Trainer — enough for ModelCheckpoint.setup's
+    `__resolve_ckpt_dir` / `trainer.strategy.broadcast` / `is_global_zero`
+    calls without running an actual loop."""
+    return lightning.Trainer(
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+
+# _make_bare_trainer logs a "GPU available but not used" PossibleUserWarning on
+# this CUDA-equipped dev box (accelerator="cpu" is deliberate — matches how the
+# templates run in CI, which has no GPU); harmless environment noise, not a
+# library-health signal, but the strict global `filterwarnings=error` config
+# would otherwise fail these tests on it. Same pattern as test_integration.py.
+_ignore_gpu_warning = pytest.mark.filterwarnings(
+    "ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning"
+)
+
+
+@_ignore_gpu_warning
+def test_srcheckpoint_setup_accepts_monitor_matching_psnr_keys(tmp_path: Path):
+    """monitor_metric derived from eval_config.psnr_keys must pass setup()
+    without raising."""
+    pl_module = _make_real_pl_module()  # SREvalConfig(crop_border=0) -> psnr_keys=['RGB']
+    ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath=str(tmp_path))
+    ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")  # must not raise
+
+
+@_ignore_gpu_warning
+def test_srcheckpoint_setup_accepts_val_ssim_monitor(tmp_path: Path):
+    """val_ssim is always logged regardless of psnr_keys and must be accepted."""
+    pl_module = _make_real_pl_module()
+    ckpt = SRCheckpoint(monitor_metric="val_ssim", dirpath=str(tmp_path))
+    ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")  # must not raise
+
+
+@_ignore_gpu_warning
+def test_srcheckpoint_setup_rejects_monitor_not_in_psnr_keys(tmp_path: Path):
+    """P5.9/INIT.8: monitoring a PSNR key eval_config never requests (here 'Y',
+    since psnr_channels=['RGB'] and separate_psnr=False) must raise
+    MisconfigurationException at setup() time — startup, not 20k steps into
+    training once Lightning's own val_loop._has_run-gated check would fire."""
+    pl_module = _make_real_pl_module()
+    ckpt = SRCheckpoint(monitor_metric="val_psnr(Y)", dirpath=str(tmp_path))
+    with pytest.raises(MisconfigurationException, match=r"val_psnr\(Y\)"):
+        ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
+
+
+@_ignore_gpu_warning
+def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
+    """The error message must enumerate the actually-loggable metric set, so a
+    misconfigured monitor is actionable without reading source."""
+    pl_module = _make_real_pl_module()
+    ckpt = SRCheckpoint(monitor_metric="bogus_metric", dirpath=str(tmp_path))
+    with pytest.raises(MisconfigurationException) as exc_info:
+        ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
+    assert "val_psnr(RGB)" in str(exc_info.value)
+    assert "val_ssim" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +741,71 @@ def test_benchmark_collect_batch_routes_through_processor():
     assert "RGB" in psnr_dict
     assert "YCbCr" in psnr_dict
     assert isinstance(ssim, float)
+
+
+def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_false():
+    """P2.7 regression: a real run's metrics.csv contained 8 PSNR keys
+    (RGB/R/G/B/YCbCr/Y/Cb/Cr) for a config requesting only ['RGB', 'YCbCr']
+    with separate_psnr=False — because _collect_batch iterated every tensor
+    `_build_psnr_tensors` populates for the colorspace *family*, not the
+    configured key set. The emitted key set must equal `eval_config.psnr_keys`
+    exactly."""
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(
+            crop_border=0, psnr_channels=["RGB", "YCbCr"], separate_psnr=False
+        ),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+    _, _, _, _, psnr_dict, _ = cb._buffer["Set5"][0]
+    assert set(psnr_dict.keys()) == set(pl_module.eval_config.psnr_keys) == {"RGB", "YCbCr"}
+
+
+def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true():
+    """separate_psnr=True must surface per-channel keys alongside the
+    aggregate key for the requested colorspace only — no keys from an
+    unrequested colorspace family leak in."""
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB"], separate_psnr=True),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+    _, _, _, _, psnr_dict, _ = cb._buffer["Set5"][0]
+    assert set(psnr_dict.keys()) == set(pl_module.eval_config.psnr_keys) == {"R", "G", "B", "RGB"}
 
 
 # ---------------------------------------------------------------------------
