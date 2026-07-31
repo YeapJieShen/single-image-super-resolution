@@ -80,6 +80,59 @@ sisr test --config templates/config.srcnn.template.yaml \
 Test sets are also surfaced during `fit` (monitored each validation cycle). The `sisr`
 console script is registered by `pyproject.toml`; `python -m sisr.cli ...` works too.
 
+## ONNX export
+
+Trained models can be exported to ONNX for inference outside this framework — install
+the optional extra first:
+
+```bash
+pip install ".[export]"     # or: python -m uv pip install ".[export]"
+
+sisr export --config templates/config.srresnet.template.yaml \
+    --ckpt_path path/to/best.ckpt --output_path model.onnx
+```
+
+`sisr.export.to_onnx(...)` is the underlying function, for exporting from Python
+directly (e.g. right after `trainer.fit(...)`, without a checkpoint round-trip):
+
+```python
+from sisr.export import to_onnx
+
+to_onnx(sr_lightning_module, "model.onnx")
+```
+
+**What gets exported — the bare model, not the processor.** The graph is exactly
+`SRLightning.forward`: the wrapped `SRModel`, with no `SRProcessor` colorspace step.
+Consumers are expected to have `sisr` importable and call `processor.extract` /
+`processor.reconstruct` themselves — that keeps the graph honest about what it actually
+computes, rather than silently baking in Python-side pre/post-processing an ONNX runtime
+can't see.
+
+- **SRResNet is unaffected by this**: `RGBProcessor.extract` / `reconstruct` are identity
+  functions, so the exported graph already is the complete LR-RGB → SR-RGB pipeline.
+- **SRCNN is not**: it trains on the Y channel, so the exported graph only maps Y → Y. A
+  non-Python consumer of an SRCNN ONNX graph must reimplement the surrounding steps
+  itself — extract Y from the LR RGB image (`sisr.colorspace.rgb_to_ycbcr`), run the
+  graph, then bicubic-upsample the LR Cb/Cr channels back to the SR size and recombine
+  (`sisr.colorspace.ycbcr_to_rgb`). See `sisr/processors/y_channel.py` for the exact
+  reference implementation.
+
+The exported graph accepts **arbitrary spatial dimensions** (`dynamic_axes` on height and
+width) — it is not limited to the size in `training_config.example_input_shape`, which is
+only a TensorBoard-graph-logging dummy input.
+
+**Deploying to TensorRT.** This project does not depend on TensorRT (NVIDIA-only,
+version-brittle, and untestable in CI without a GPU runner). Convert the exported `.onnx`
+yourself with NVIDIA's `trtexec`, which ships with the TensorRT SDK:
+
+```bash
+trtexec --onnx=model.onnx --saveEngine=model.trt \
+    --minShapes=input:1x3x64x64 --optShapes=input:1x3x256x256 --maxShapes=input:1x3x1080x1920
+```
+
+(drop the batch/channel dims to match SRCNN's single-channel Y input). `--minShapes` /
+`--maxShapes` are required because of the dynamic H/W axes above.
+
 ## GPU / CUDA notes
 
 The CUDA-built `torch` / `torchvision` wheels aren't on PyPI, so GPU users install them
