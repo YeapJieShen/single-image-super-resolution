@@ -9,6 +9,11 @@ caches full decoded HR images (raw, uint8) through :class:`~sisr.cache.LMDBCache
 the cached raw array, on every ``__getitem__`` call.
 :class:`ValidationDataset` serves full images cropped to a multiple of
 ``scale``, uncached (each is decoded once per epoch, no repetition).
+
+The resize backend is selectable (see :mod:`sisr.imresize`): ``'matlab'``
+(default) is antialiased and comparable to published paper numbers;
+``'cv2'`` has no antialiasing and is kept only so caches built before this
+module existed stay reproducible.
 """
 
 import hashlib
@@ -16,14 +21,12 @@ import random
 import struct
 from pathlib import Path
 
-import albumentations as A
-import cv2
 import numpy as np
 import torch
-from albumentations.pytorch import ToTensorV2
 from PIL import Image
 
 from ..cache import LMDBCache, LMDBCacheBuildContext
+from ..imresize import ResizeBackend, resize
 from .base import SRDataset
 
 # (height, width) as little-endian uint32 each, prefixed to every cached HR
@@ -64,8 +67,8 @@ class TrainDataset(SRDataset):
     :meth:`~sisr.cache.LMDBCache.get_buffer` view, takes a fresh random
     ``hr_crop_size`` square crop (plain numpy slicing — crop randomness must
     survive the cache, so only the *decode* is memoized, never the crop), and
-    bicubic-downsamples it by ``scale`` (via :class:`albumentations.Resize`
-    with ``cv2.INTER_CUBIC``) to form the LR input. Unlike
+    bicubic-downsamples it by ``scale`` (via :func:`sisr.imresize.resize`) to
+    form the LR input. Unlike
     :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     blur+downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is
@@ -89,6 +92,13 @@ class TrainDataset(SRDataset):
             epoch (the dataset length is ``len(images) * crops_per_image``).
             Each draw re-reads the same cached array (a cheap mmap access, not
             a decode) and takes an independently random crop. Defaults to ``1``.
+        resize_backend (ResizeBackend): ``'matlab'`` (default) — MATLAB-
+            compatible antialiased bicubic, comparable to published paper
+            numbers. ``'cv2'`` — ``cv2.INTER_CUBIC``, no antialiasing; kept
+            so LMDB caches built before this module existed stay
+            reproducible. See :mod:`sisr.imresize`. Only the LR derivation
+            is affected — the HR cache stores raw pixels regardless, so
+            switching backends never invalidates it.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build. Defaults to ``False``.
         cache_dir (str | Path | None): Directory in which to store the LMDB
@@ -110,6 +120,7 @@ class TrainDataset(SRDataset):
         scale: int,
         hr_crop_size: int,
         crops_per_image: int = 1,
+        resize_backend: ResizeBackend = "matlab",
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
@@ -123,17 +134,9 @@ class TrainDataset(SRDataset):
         self.scale = scale
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
+        self.resize_backend = resize_backend
         self.build_num_workers = build_num_workers
-
-        lr_size = hr_crop_size // scale
-        self._lr_pipeline = A.Compose(
-            [
-                A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
-                A.ToFloat(max_value=255.0),
-                ToTensorV2(),
-            ]
-        )
-        self._hr_to_tensor = self._to_tensor_transform()
+        self.lr_size = hr_crop_size // scale
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         checksum = self._compute_checksum()
@@ -227,15 +230,15 @@ class TrainDataset(SRDataset):
             left = random.randint(0, w - self.hr_crop_size)
             hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()
 
-        lr_tensor = self._lr_pipeline(image=hr_arr)["image"]
-        hr_tensor = self._hr_to_tensor(image=hr_arr)["image"]
+        lr_arr = resize(hr_arr, (self.lr_size, self.lr_size), backend=self.resize_backend)
+        lr_tensor = self._to_tensor(lr_arr)
+        hr_tensor = self._to_tensor(hr_arr)
 
         return lr_tensor, hr_tensor
 
 
 class ValidationDataset(SRDataset):
-    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test
-    (AlbumentationsX backend).
+    """Full-image HR with bicubic-downsampled LR for SRResNet validation/test.
 
     Each item is a full image pair. The HR image is cropped to a multiple of
     ``scale`` so the model's ×``scale`` output lands exactly on the HR size;
@@ -245,18 +248,19 @@ class ValidationDataset(SRDataset):
     Args:
         img_dir (str | Path): Directory containing the high-resolution images.
         scale (int): Upscaling factor.
+        resize_backend (ResizeBackend): ``'matlab'`` (default) or ``'cv2'``;
+            see :class:`TrainDataset` / :mod:`sisr.imresize`.
 
     Raises:
         ValueError: If no images are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int):
+    def __init__(self, img_dir: str | Path, scale: int, resize_backend: ResizeBackend = "matlab"):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
-
-        self._to_tensor = self._to_tensor_transform()
+        self.resize_backend = resize_backend
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -276,14 +280,11 @@ class ValidationDataset(SRDataset):
         w_crop = w - (w % self.scale)
         hr_arr = arr[:h_crop, :w_crop, :]  # deterministic exact-corner crop
 
-        lr_pipeline = A.Compose(
-            [
-                A.Resize(h_crop // self.scale, w_crop // self.scale, interpolation=cv2.INTER_CUBIC),
-            ]
+        lr_arr = resize(
+            hr_arr, (h_crop // self.scale, w_crop // self.scale), backend=self.resize_backend
         )
-        lr_arr = lr_pipeline(image=hr_arr)["image"]
 
-        lr_tensor = self._to_tensor(image=lr_arr)["image"]
-        hr_tensor = self._to_tensor(image=hr_arr)["image"]
+        lr_tensor = self._to_tensor(lr_arr)
+        hr_tensor = self._to_tensor(hr_arr)
 
         return lr_tensor, hr_tensor

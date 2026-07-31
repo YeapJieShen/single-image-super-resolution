@@ -1,10 +1,15 @@
 """SRCNN-style data pipeline.
 
-LR is generated from HR via blur → bicubic-down → bicubic-up so the LR
-patches share the spatial size of the HR patches (pre-upsampled SRCNN
+LR is generated from HR via (optional blur →) bicubic-down → bicubic-up so
+the LR patches share the spatial size of the HR patches (pre-upsampled SRCNN
 formulation). :class:`TrainDataset` caches sliding-window sub-images
 through :class:`~sisr.cache.LMDBCache`; :class:`ValidationDataset`
 generates LR pairs on the fly for full images.
+
+The resize/degradation backend is selectable (see :mod:`sisr.imresize`):
+``'matlab'`` (default) is antialiased and needs no separate blur step;
+``'cv2'`` has no antialiasing of its own, so ``blur_sigma`` stands in for it
+and only has an effect on that path.
 """
 
 import hashlib
@@ -12,14 +17,46 @@ import math
 from collections.abc import Iterator
 from pathlib import Path
 
-import albumentations as A
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
 from ..cache import LMDBCache, LMDBCacheBuildContext
+from ..imresize import ResizeBackend, resize
 from .base import SRDataset
+
+
+def _check_blur_sigma(resize_backend: ResizeBackend, blur_sigma: float | None) -> float | None:
+    """Validates the ``blur_sigma``/``resize_backend`` pairing at construction time.
+
+    ``'matlab'``'s antialiasing kernel widening already acts as the low-pass
+    filter; stacking an explicit Gaussian blur on top would double-blur and
+    push PSNR away from published values, so setting ``blur_sigma`` with it
+    is rejected outright rather than silently ignored. ``'cv2'`` has no
+    antialiasing of its own, so it falls back to the historical default of
+    ``1.0`` when unset.
+
+    Args:
+        resize_backend: ``'matlab'`` or ``'cv2'``.
+        blur_sigma: The value passed in, or ``None``.
+
+    Returns:
+        ``None`` for ``'matlab'``; a concrete sigma for ``'cv2'``.
+
+    Raises:
+        ValueError: If ``resize_backend='matlab'`` and *blur_sigma* is set.
+    """
+    if resize_backend == "matlab":
+        if blur_sigma is not None:
+            raise ValueError(
+                "blur_sigma is meaningless with resize_backend='matlab': its antialiasing "
+                "kernel widening already is the low-pass filter, so an explicit Gaussian blur "
+                "on top only double-blurs and pushes PSNR away from published values. Pass "
+                "resize_backend='cv2' if you need blur_sigma, or omit blur_sigma for 'matlab'."
+            )
+        return None
+    return 1.0 if blur_sigma is None else blur_sigma
 
 
 def _iter_patch_origins(
@@ -59,24 +96,24 @@ def _process_subimages(
     sub_img_size: int,
     stride: int,
     scale: int,
-    blur_sigma: float,
+    blur_sigma: float | None,
+    resize_backend: ResizeBackend,
     base_idx: int,
 ) -> list[tuple[str, bytes]]:
     """Extracts all LR/HR sub-image pairs from a single image and returns
     them as keyed pairs ready for LMDB insertion.
 
-    This is a top-level function (not a method) so that it can be
-    pickled by ``ProcessPoolExecutor`` across all platforms. The
-    Albumentations ``Compose`` is constructed inside the function rather
-    than at module level so that workers spawned on Windows do not need
-    to pickle the Compose object across the process boundary.
+    This is a top-level function (not a method) so that it can be pickled by
+    ``ProcessPoolExecutor`` across all platforms.
 
     For each sliding-window position (from the shared
     :func:`_iter_patch_origins` grid) the function:
       1. Crops the HR sub-image with a direct numpy slice (deterministic,
-         pixel-exact — no need for ``A.Crop`` overhead).
-      2. Generates the LR sub-image by Gaussian-blurring then
-         bicubic-downsampling and bicubic-upsampling.
+         pixel-exact).
+      2. Generates the LR sub-image: on ``'cv2'``, Gaussian-blurs first
+         (no antialiasing of its own); either backend then
+         bicubic-downsamples and bicubic-upsamples back to
+         ``sub_img_size`` via :func:`sisr.imresize.resize`.
       3. Converts both sub-images to ``(C, H, W)`` uint8 layout. HR is
          always served as RGB; Y/YCbCr selection happens downstream.
       4. Assigns LMDB keys using ``base_idx`` as the starting offset.
@@ -87,8 +124,10 @@ def _process_subimages(
             extract.
         stride (int): Step size of the sliding window.
         scale (int): Downscaling factor for LR generation.
-        blur_sigma (float): Sigma of the Gaussian blur applied before
-            downsampling.
+        blur_sigma (float | None): Sigma of the Gaussian blur applied before
+            downsampling on the ``'cv2'`` backend; ``None`` on ``'matlab'``.
+        resize_backend (ResizeBackend): ``'matlab'`` or ``'cv2'``; see
+            :mod:`sisr.imresize`.
         base_idx (int): Starting LMDB key index for this image's
             sub-images.
 
@@ -100,22 +139,18 @@ def _process_subimages(
     h, w = arr.shape[:2]
 
     lr_size = sub_img_size // scale
-    kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
-    lr_pipeline = A.Compose(
-        [
-            A.GaussianBlur(
-                blur_limit=(kernel, kernel), sigma_limit=(blur_sigma, blur_sigma), p=1.0
-            ),
-            A.Resize(lr_size, lr_size, interpolation=cv2.INTER_CUBIC),
-            A.Resize(sub_img_size, sub_img_size, interpolation=cv2.INTER_CUBIC),
-        ]
-    )
+    kernel = 2 * math.ceil(3.0 * blur_sigma) + 1 if blur_sigma is not None else None  # odd, ±3σ
 
     keyed_pairs = []
     for offset, (top, left) in enumerate(_iter_patch_origins(h, w, scale, sub_img_size, stride)):
         idx = base_idx + offset
         hr_subimg = arr[top : top + sub_img_size, left : left + sub_img_size, :]
-        lr_subimg = lr_pipeline(image=hr_subimg)["image"]
+
+        to_degrade = hr_subimg
+        if kernel is not None:
+            to_degrade = cv2.GaussianBlur(hr_subimg, (kernel, kernel), sigmaX=blur_sigma)
+        down = resize(to_degrade, (lr_size, lr_size), backend=resize_backend)
+        lr_subimg = resize(down, (sub_img_size, sub_img_size), backend=resize_backend)
 
         hr_chw = hr_subimg.transpose(2, 0, 1)
         lr_chw = lr_subimg.transpose(2, 0, 1)
@@ -148,8 +183,18 @@ class TrainDataset(SRDataset):
             extraction.
         scale (int): Downscaling factor for generating low-resolution
             sub-images.
-        blur_sigma (float): Sigma of the Gaussian blur applied before
-            downsampling.  Defaults to ``1.0``.
+        blur_sigma (float | None): Sigma of the Gaussian blur applied before
+            downsampling. Only meaningful (and must be set) on the ``'cv2'``
+            backend, which has no antialiasing of its own; falls back to the
+            historical default of ``1.0`` if left ``None`` there. Must be
+            ``None`` on ``'matlab'`` (the default) — its kernel widening
+            already is the antialiasing low-pass, so an explicit blur on top
+            only double-blurs; passing a value raises ``ValueError``.
+        resize_backend (ResizeBackend): ``'matlab'`` (default) — MATLAB-
+            compatible antialiased bicubic, comparable to published paper
+            numbers. ``'cv2'`` — ``cv2.INTER_CUBIC``, no antialiasing;
+            kept so LMDB caches built before this module existed stay
+            reproducible. See :mod:`sisr.imresize`.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build.  Defaults to ``False``.
         cache_dir (str | Path | None): Directory in which to store the
@@ -161,7 +206,8 @@ class TrainDataset(SRDataset):
             Only affects cache construction, not data loading.
 
     Raises:
-        ValueError: If no image files are found in ``img_dir``.
+        ValueError: If no image files are found in ``img_dir``, or if
+            *blur_sigma* is set together with ``resize_backend='matlab'``.
     """
 
     def __init__(
@@ -170,7 +216,8 @@ class TrainDataset(SRDataset):
         subimg_size: int,
         stride: int,
         scale: int,
-        blur_sigma: float = 1.0,
+        blur_sigma: float | None = None,
+        resize_backend: ResizeBackend = "matlab",
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
@@ -181,7 +228,8 @@ class TrainDataset(SRDataset):
         self.sub_img_size = subimg_size
         self.stride = stride
         self.scale = scale
-        self.blur_sigma = blur_sigma
+        self.blur_sigma = _check_blur_sigma(resize_backend, blur_sigma)
+        self.resize_backend = resize_backend
         self.build_num_workers = build_num_workers
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
@@ -225,7 +273,8 @@ class TrainDataset(SRDataset):
                 str(self.stride),
                 str(self.scale),
                 str(self.blur_sigma),
-                "transforms_impl=albumentations",
+                f"resize_backend={self.resize_backend}",
+                "transforms_impl=vendored_matlab_imresize_v1",
             ]
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -264,7 +313,14 @@ class TrainDataset(SRDataset):
                 :class:`LMDBCache`.
         """
         process_args = [
-            (self.sub_img_size, self.stride, self.scale, self.blur_sigma, self._img_offsets[i])
+            (
+                self.sub_img_size,
+                self.stride,
+                self.scale,
+                self.blur_sigma,
+                self.resize_backend,
+                self._img_offsets[i],
+            )
             for i in range(len(self.img_paths))
         ]
 
@@ -322,35 +378,43 @@ class ValidationDataset(SRDataset):
 
     Unlike :class:`TrainDataset` this dataset does not extract sub-images.
     Each item is a full image pair where the low-resolution version is
-    produced by applying Gaussian blur followed by bicubic downsampling
-    and bicubic upsampling back to the original size, using AlbumentationsX.
+    produced by (optionally, ``'cv2'``-only) Gaussian-blurring, then
+    bicubic-downsampling and bicubic-upsampling back to the original size.
 
     Args:
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
-        blur_sigma (float): Sigma of the Gaussian blur applied before
+        blur_sigma (float | None): Sigma of the Gaussian blur applied before
             downsampling.  Must match :class:`TrainDataset` to keep train/val
-            LR generation consistent.  Defaults to ``1.0``.
+            LR generation consistent. Same ``resize_backend`` pairing rules
+            as :class:`TrainDataset` apply (``None``-only on ``'matlab'``,
+            defaults to ``1.0`` on ``'cv2'``).
+        resize_backend (ResizeBackend): ``'matlab'`` (default) or ``'cv2'``;
+            see :class:`TrainDataset` / :mod:`sisr.imresize`.
 
     Raises:
-        ValueError: If no image files are found in ``img_dir``.
+        ValueError: If no image files are found in ``img_dir``, or if
+            *blur_sigma* is set together with ``resize_backend='matlab'``.
     """
 
     def __init__(
         self,
         img_dir: str | Path,
         scale: int,
-        blur_sigma: float = 1.0,
+        blur_sigma: float | None = None,
+        resize_backend: ResizeBackend = "matlab",
     ):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
-        self.blur_sigma = blur_sigma
+        self.blur_sigma = _check_blur_sigma(resize_backend, blur_sigma)
+        self.resize_backend = resize_backend
 
-        self._kernel = 2 * math.ceil(3.0 * blur_sigma) + 1  # odd, covers ±3σ
-        self._to_tensor = self._to_tensor_transform()
+        self._kernel = (
+            2 * math.ceil(3.0 * self.blur_sigma) + 1 if self.blur_sigma is not None else None
+        )  # odd, covers ±3σ
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -371,20 +435,13 @@ class ValidationDataset(SRDataset):
         lr_h = h // self.scale
         lr_w = w // self.scale
 
-        lr_pipeline = A.Compose(
-            [
-                A.GaussianBlur(
-                    blur_limit=(self._kernel, self._kernel),
-                    sigma_limit=(self.blur_sigma, self.blur_sigma),
-                    p=1.0,
-                ),
-                A.Resize(lr_h, lr_w, interpolation=cv2.INTER_CUBIC),
-                A.Resize(h, w, interpolation=cv2.INTER_CUBIC),
-            ]
-        )
-        lr_arr = lr_pipeline(image=arr)["image"]
+        to_degrade = arr
+        if self._kernel is not None:
+            to_degrade = cv2.GaussianBlur(arr, (self._kernel, self._kernel), sigmaX=self.blur_sigma)
+        down = resize(to_degrade, (lr_h, lr_w), backend=self.resize_backend)
+        lr_arr = resize(down, (h, w), backend=self.resize_backend)
 
-        lr_tensor = self._to_tensor(image=lr_arr)["image"]
-        hr_tensor = self._to_tensor(image=arr)["image"]
+        lr_tensor = self._to_tensor(lr_arr)
+        hr_tensor = self._to_tensor(arr)
 
         return lr_tensor, hr_tensor

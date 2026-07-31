@@ -25,6 +25,10 @@ model:
     class_path: sisr.models.srresnet.SRResNetEvalConfig
 
 data:
+  # resize_backend defaults to 'matlab' (MATLAB-compatible antialiased bicubic,
+  # comparable to published paper numbers) on every dataset below; 'cv2' exists
+  # solely to reproduce LMDB caches built before the matlab backend existed.
+  # See README.md's benchmark protocol section.
   train_dataset:
     class_path: sisr.datasets.srresnet.TrainDataset
     init_args:

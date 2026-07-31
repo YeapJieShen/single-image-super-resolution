@@ -20,7 +20,8 @@ def shared_srcnn_train_ds(tmp_path_factory) -> TrainDataset:
 
     Module-scoped so the LMDB build runs once instead of once per test;
     build_num_workers=1 forces PR 1's inline (no ProcessPool) build path, which
-    keeps it safe when the whole run is under pytest-xdist workers.
+    keeps it safe when the whole run is under pytest-xdist workers. Uses the
+    default resize_backend='matlab' (blur_sigma stays None to match).
     """
     img_dir = tmp_path_factory.mktemp("shared_srcnn_hr")
     rng = np.random.default_rng(seed=0)
@@ -32,7 +33,6 @@ def shared_srcnn_train_ds(tmp_path_factory) -> TrainDataset:
         subimg_size=20,
         stride=8,
         scale=2,
-        blur_sigma=1.0,
         use_tqdm=False,
         cache_dir=img_dir / ".lmdb_cache_shared",
         build_num_workers=1,
@@ -45,7 +45,6 @@ def _make_train(image_dir: Path, **overrides) -> TrainDataset:
         "subimg_size": 33,
         "stride": 14,
         "scale": 2,
-        "blur_sigma": 1.0,
         "use_tqdm": False,
         "cache_dir": image_dir / ".lmdb_cache_train",
         "build_num_workers": 1,
@@ -97,8 +96,9 @@ def test_train_dataset_checksum_change_triggers_rebuild(tiny_rgb_image_dir: Path
 
 
 def test_train_dataset_checksum_includes_transforms_impl_tag(shared_srcnn_train_ds: TrainDataset):
-    """The checksum input must include 'transforms_impl=albumentations' so caches
-    built under the old PIL implementation invalidate automatically on upgrade."""
+    """The checksum input must include a 'transforms_impl' tag and the
+    resize_backend so caches built under a different resize implementation or
+    backend invalidate automatically rather than silently being reused."""
     import hashlib
 
     ds = shared_srcnn_train_ds
@@ -109,14 +109,15 @@ def test_train_dataset_checksum_includes_transforms_impl_tag(shared_srcnn_train_
             "20",  # subimg_size
             "8",  # stride
             "2",  # scale
-            "1.0",  # blur_sigma
-            "transforms_impl=albumentations",
+            "None",  # blur_sigma (matlab backend)
+            "resize_backend=matlab",
+            "transforms_impl=vendored_matlab_imresize_v1",
         ]
     )
     expected = hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest()
     assert ds._compute_checksum() == expected, (
-        "checksum must include the 'transforms_impl=albumentations' tag — "
-        "without it, caches built under the PIL implementation would be reused."
+        "checksum must include the 'transforms_impl' and 'resize_backend' tags — "
+        "without them, caches built under a different implementation/backend would be reused."
     )
 
 
@@ -166,7 +167,9 @@ def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
     # image must sum to exactly the offset total.
     worker_total = 0
     for i, path in enumerate(ds.img_paths):
-        pairs = _process_subimages(path, 20, 8, 2, 1.0, ds._img_offsets[i])
+        pairs = _process_subimages(
+            path, 20, 8, 2, ds.blur_sigma, ds.resize_backend, ds._img_offsets[i]
+        )
         worker_total += len(pairs) // 2
     assert worker_total == total
 
@@ -176,6 +179,51 @@ def test_patch_grid_derived_from_shared_helper(tiny_rgb_image_dir: Path):
     assert len(origins) == 9
     assert origins[0] == (0, 0)
     assert (16, 16) in origins
+
+
+# ---------------------------------------------------------------------------
+# resize_backend / blur_sigma construction guard (INIT.11)
+# ---------------------------------------------------------------------------
+
+
+def test_train_dataset_matlab_backend_rejects_blur_sigma(tiny_rgb_image_dir: Path):
+    with pytest.raises(ValueError, match="matlab"):
+        _make_train(tiny_rgb_image_dir, resize_backend="matlab", blur_sigma=1.0)
+
+
+def test_train_dataset_cv2_backend_defaults_blur_sigma_when_unset(tiny_rgb_image_dir: Path):
+    ds = _make_train(tiny_rgb_image_dir, resize_backend="cv2")
+    assert ds.blur_sigma == 1.0
+
+
+def test_train_dataset_cv2_backend_uses_provided_blur_sigma(tiny_rgb_image_dir: Path):
+    ds = _make_train(tiny_rgb_image_dir, resize_backend="cv2", blur_sigma=2.5)
+    assert ds.blur_sigma == 2.5
+
+
+def test_train_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
+    ds = _make_train(tiny_rgb_image_dir)
+    assert ds.resize_backend == "matlab"
+    assert ds.blur_sigma is None
+
+
+def test_train_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
+    """The two backends implement different bicubic kernels/antialiasing, so
+    the same crop must not degrade identically under each."""
+    ds_matlab = _make_train(tiny_rgb_image_dir, resize_backend="matlab")
+    ds_cv2 = _make_train(
+        tiny_rgb_image_dir, resize_backend="cv2", cache_dir=tiny_rgb_image_dir / ".lmdb_cache_cv2"
+    )
+    lr_matlab, _ = ds_matlab[0]
+    lr_cv2, _ = ds_cv2[0]
+    assert not torch.allclose(lr_matlab, lr_cv2)
+
+
+def test_validation_dataset_matlab_backend_rejects_blur_sigma(tiny_rgb_image_dir: Path):
+    with pytest.raises(ValueError, match="matlab"):
+        ValidationDataset(
+            img_dir=tiny_rgb_image_dir, scale=2, resize_backend="matlab", blur_sigma=1.0
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +247,14 @@ def test_validation_dataset_no_images_raises(tmp_path: Path):
 
 
 def test_validation_dataset_blur_sigma_propagates(tiny_rgb_image_dir: Path):
-    """ValidationDataset accepts and uses blur_sigma, so two datasets with
-    different sigmas produce different LR outputs."""
-    ds_a = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, blur_sigma=0.1)
-    ds_b = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2, blur_sigma=3.0)
+    """On the 'cv2' backend, ValidationDataset accepts and uses blur_sigma, so
+    two datasets with different sigmas produce different LR outputs."""
+    ds_a = ValidationDataset(
+        img_dir=tiny_rgb_image_dir, scale=2, resize_backend="cv2", blur_sigma=0.1
+    )
+    ds_b = ValidationDataset(
+        img_dir=tiny_rgb_image_dir, scale=2, resize_backend="cv2", blur_sigma=3.0
+    )
     lr_a, _ = ds_a[0]
     lr_b, _ = ds_b[0]
     assert not torch.allclose(lr_a, lr_b), "different blur_sigma must produce different LR"

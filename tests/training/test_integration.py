@@ -51,7 +51,6 @@ def _make_datamodule(image_dir: Path) -> SRDataModule:
             "subimg_size": 33,
             "stride": 14,
             "scale": 2,
-            "blur_sigma": 1.0,
             "use_tqdm": False,
             "cache_dir": str(image_dir / ".lmdb_cache_integration"),
         },
