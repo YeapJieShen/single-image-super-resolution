@@ -12,6 +12,8 @@ Reference: Image Super-Resolution Using Deep Convolutional Networks
 from dataclasses import dataclass, field
 from typing import Literal
 
+from sisr.models.base import SRModel
+from sisr.processors.base import SRProcessor
 from sisr.training.config import SREvalConfig, SRTrainingConfig
 
 
@@ -44,6 +46,33 @@ class SRCNNTrainingConfig(SRTrainingConfig):
 
     layer_lrs: list[float] | None = field(default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5])
     init_strategy: Literal["default", "paper"] = "paper"
+
+    def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
+        """Extend the base checks with SRCNN's ``num_channels``/processor correlation.
+
+        Raises a readable error before the base's forward probe would
+        otherwise surface the same defect as a cryptic Conv2d shape mismatch.
+
+        Args:
+            model: The constructed :class:`~sisr.models.srcnn.SRCNN` instance.
+            processor: The :class:`~sisr.processors.base.SRProcessor` paired
+                with ``model``.
+
+        Raises:
+            ValueError: If ``model``'s ``num_channels`` doesn't match
+                ``processor.model_channels``.
+        """
+        num_channels = model.hparams["num_channels"]
+        if num_channels != processor.model_channels:
+            raise ValueError(
+                f"SRCNN num_channels={num_channels} does not match "
+                f"{type(processor).__name__}.model_channels={processor.model_channels}. "
+                f"num_channels sets both the feature-extraction input and the "
+                f"reconstruction output channel count; pick a processor whose "
+                f"model_channels matches (e.g. YChannelProcessor for num_channels=1, "
+                f"RGBProcessor or YCbCrProcessor for num_channels=3)."
+            )
+        super().validate_against(model, processor)
 
 
 @dataclass

@@ -1,4 +1,7 @@
-from sisr.models.srcnn import SRCNNEvalConfig, SRCNNTrainingConfig
+import pytest
+
+from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
+from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import SREvalConfig, SRTrainingConfig
 
 
@@ -46,3 +49,28 @@ def test_srcnn_training_config_init_defaults():
     assert cfg.init_strategy == "paper"
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
+
+
+# ---------------------------------------------------------------------------
+# validate_against (INIT.16) — SRCNN-specific num_channels/processor check
+# ---------------------------------------------------------------------------
+
+
+def test_srcnn_validate_against_rejects_num_channels_mismatch():
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(ValueError, match="num_channels"):
+        SRCNNTrainingConfig().validate_against(model, YChannelProcessor())
+
+
+def test_srcnn_validate_against_accepts_matching_num_channels():
+    model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    SRCNNTrainingConfig().validate_against(model, YChannelProcessor())  # must not raise
+
+
+def test_srcnn_validate_against_still_runs_base_forward_probe():
+    """SRCNNTrainingConfig.validate_against must chain to the base check
+    (example_input_shape/forward probe) via super(), not just its own."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    cfg = SRCNNTrainingConfig(example_input_shape=(1, 33, 33))  # 1 != processor.model_channels=3
+    with pytest.raises(ValueError, match="example_input_shape"):
+        cfg.validate_against(model, RGBProcessor())

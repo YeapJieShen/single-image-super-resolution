@@ -21,3 +21,13 @@ class SRProcessor(abc.ABC):
     @abc.abstractmethod
     def reconstruct(self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         """Convert the model's output tensor back to SR RGB (``[B, 3, H', W']``)."""
+
+    @property
+    @abc.abstractmethod
+    def model_channels(self) -> int:
+        """Number of channels ``extract`` produces — the model's IO channel count.
+
+        A fact only the processor knows (not a mirror of the model's own
+        config), used to validate a model/processor pairing at construction
+        time (see ``SRTrainingConfig.validate_against``).
+        """

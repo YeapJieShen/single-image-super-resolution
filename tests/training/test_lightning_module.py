@@ -8,6 +8,7 @@ import torch
 import torchmetrics
 
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
+from sisr.models.srresnet import SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import (
     RGBProcessor,
@@ -344,7 +345,7 @@ def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning
     params_arg = args[0] if args else kwargs.get("params")
     metrics_arg = args[1] if len(args) > 1 else kwargs.get("metrics")
 
-    expected_metrics = {f"val_psnr({k})": 0.0 for k in srcnn_rgb_lit._psnr_keys}
+    expected_metrics = {f"val_psnr({k})": 0.0 for k in srcnn_rgb_lit.eval_config.psnr_keys}
     expected_metrics["val_ssim"] = 0.0
 
     assert params_arg == srcnn_rgb_lit.hparams
@@ -405,6 +406,72 @@ def test_srlightning_rejects_non_srprocessor():
             processor=object(),  # not an SRProcessor
             optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
         )
+
+
+def test_srlightning_construction_rejects_mismatched_num_channels():
+    """Regression (INIT.16): SRCNNTrainingConfig.validate_against catches a
+    num_channels/processor mismatch at construction, not silently at train time."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(ValueError, match="num_channels"):
+        SRLightning(
+            model=model,
+            processor=YChannelProcessor(),  # model_channels=1, mismatches num_channels=3
+            training_config=SRCNNTrainingConfig(),
+            eval_config=SREvalConfig(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_srlightning_construction_rejects_mismatched_in_out_channels():
+    """Same regression for SRResNet's in_out_channels/processor correlation."""
+    model = SRResNet(scale=2, num_residual_blocks=1, in_out_channels=3)
+    with pytest.raises(ValueError, match="in_out_channels"):
+        SRLightning(
+            model=model,
+            processor=YChannelProcessor(),  # model_channels=1, mismatches in_out_channels=3
+            training_config=SRResNetTrainingConfig(),
+            eval_config=SREvalConfig(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_srlightning_construction_accepts_matching_channels():
+    """The happy path (matching num_channels/processor) must not raise."""
+    model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    SRLightning(
+        model=model,
+        processor=YChannelProcessor(),
+        training_config=SRCNNTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )  # must not raise
+
+
+def test_srlightning_construction_rejects_mismatched_example_input_shape_channels():
+    """The base (architecture-agnostic) channel check fires even with a plain
+    SRTrainingConfig, via example_input_shape[0] vs processor.model_channels."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(ValueError, match="example_input_shape"):
+        SRLightning(
+            model=model,
+            processor=RGBProcessor(),  # model_channels=3
+            training_config=SRTrainingConfig(example_input_shape=(1, 33, 33)),  # 1 != 3
+            eval_config=SREvalConfig(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_srlightning_construction_forward_probe_succeeds_with_matching_shape():
+    """A correctly-paired example_input_shape runs the real forward probe with
+    no error — the base validate_against no-ops past the channel check."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(example_input_shape=(3, 33, 33)),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )  # must not raise
 
 
 def test_step_calls_processor_extract_and_reconstruct():

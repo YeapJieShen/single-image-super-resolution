@@ -29,3 +29,7 @@ class YChannelProcessor(SRProcessor):
             align_corners=False,
         )
         return ycbcr_to_rgb(torch.cat([sr_y, cbcr], dim=1))
+
+    @property
+    def model_channels(self) -> int:
+        return 1

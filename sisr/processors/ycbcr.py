@@ -15,3 +15,7 @@ class YCbCrProcessor(SRProcessor):
 
     def reconstruct(self, sr_ycbcr: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         return ycbcr_to_rgb(sr_ycbcr)
+
+    @property
+    def model_channels(self) -> int:
+        return 3

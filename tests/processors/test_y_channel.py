@@ -10,6 +10,10 @@ def test_y_channel_processor_is_srprocessor():
     assert isinstance(YChannelProcessor(), SRProcessor)
 
 
+def test_y_channel_model_channels_is_1():
+    assert YChannelProcessor().model_channels == 1
+
+
 def test_y_channel_extract_returns_single_y_channel():
     """extract returns Y of the LR in YCbCr (shape [B,1,H,W])."""
     p = YChannelProcessor()

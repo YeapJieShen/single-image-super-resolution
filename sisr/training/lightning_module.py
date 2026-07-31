@@ -55,11 +55,6 @@ class SRLightning(lightning.LightningModule):
             if ``processor`` is not an :class:`SRProcessor` subclass.
     """
 
-    _CS_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
-        "RGB": ("R", "G", "B"),
-        "YCbCr": ("Y", "Cb", "Cr"),
-    }
-
     def __init__(
         self,
         model: SRModel,
@@ -97,6 +92,8 @@ class SRLightning(lightning.LightningModule):
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
+        self.training_config.validate_against(self.model, self.processor)
+
         if self.training_config.init_strategy == "paper":
             model.reset_parameters(
                 mean=self.training_config.init_mean,
@@ -118,13 +115,6 @@ class SRLightning(lightning.LightningModule):
 
         if self.training_config.example_input_shape is not None:
             self.example_input_array = torch.zeros(1, *self.training_config.example_input_shape)
-
-        metric_keys: list[str] = []
-        for cs in self.eval_config.psnr_channels:
-            if self.eval_config.separate_psnr:
-                metric_keys.extend(self._CS_CHANNEL_NAMES[cs])
-            metric_keys.append(cs)
-        self._psnr_keys = metric_keys
 
     @staticmethod
     def _flatten_hparams(hparams: dict[str, Any], sep: str = "/") -> dict:
@@ -180,7 +170,7 @@ class SRLightning(lightning.LightningModule):
             ``(sr_subset, hr_subset)`` tensor pair ready for PSNR
             computation.
         """
-        keys = set(self._psnr_keys)
+        keys = set(self.eval_config.psnr_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         if keys & {"RGB", "R", "G", "B"}:
@@ -366,7 +356,7 @@ class SRLightning(lightning.LightningModule):
         # primary val loader is at idx 0 of a list that also contains test loaders.
         self.log("val_loss", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
         primary = self.eval_config.psnr_channels[0]
-        for key in self._psnr_keys:
+        for key in self.eval_config.psnr_keys:
             sr_t, hr_t = psnr_tensors[key]
             self.log(
                 f"val_psnr({key})",
@@ -402,7 +392,7 @@ class SRLightning(lightning.LightningModule):
         if not tb_loggers:
             return
         metrics = {
-            **{f"val_psnr({k})": 0.0 for k in self._psnr_keys},
+            **{f"val_psnr({k})": 0.0 for k in self.eval_config.psnr_keys},
             "val_ssim": 0.0,
         }
         for tb in tb_loggers:
