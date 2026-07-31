@@ -141,6 +141,72 @@ def test_test_subcommand_help_exposes_ckpt_path_in_process(capsys, monkeypatch):
     assert "--data.test_datasets" in out
 
 
+def test_export_subcommand_help_exposes_its_args_in_process(capsys, monkeypatch):
+    """`export --help` documents --output_path, --ckpt_path, --opset_version (INIT.7).
+
+    trainer_class is left at SRLightningCLI's default (_ExportTrainer) —
+    building this parser never calls sisr.export.to_onnx's body (only inspects
+    _ExportTrainer.export's signature), so it needs no onnx/onnxruntime install.
+    """
+    from sisr.cli import SRLightningCLI
+    from sisr.training import SRDataModule, SRLightning
+
+    monkeypatch.setattr(sys, "argv", sys.argv[:1])
+    with pytest.raises(SystemExit):
+        SRLightningCLI(
+            model_class=SRLightning,
+            datamodule_class=SRDataModule,
+            auto_configure_optimizers=False,
+            save_config_kwargs={"overwrite": True},
+            args=["export", "--help"],
+            run=True,
+        )
+    out = capsys.readouterr().out
+    assert "--output_path" in out
+    assert "--ckpt_path" in out
+    assert "--opset_version" in out
+
+
+def test_export_subcommand_runs_end_to_end_in_process(tmp_path):
+    """`sisr export --config ... --output_path ...` produces a real ONNX file.
+
+    Exercises the full subcommand wiring (_ExportTrainer.export -> to_onnx)
+    against the shipped SRCNN template, whose dataset dirs need not exist —
+    export never calls SRDataModule.setup(). Skips cleanly without the
+    optional onnx/onnxruntime extra.
+    """
+    pytest.importorskip("onnx")
+    from sisr.cli import SRLightningCLI
+    from sisr.training import SRDataModule, SRLightning
+
+    output_path = tmp_path / "srcnn.onnx"
+    saved_argv = sys.argv
+    sys.argv = saved_argv[:1]
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", message="GPU available but not used.*")
+            SRLightningCLI(
+                model_class=SRLightning,
+                datamodule_class=SRDataModule,
+                auto_configure_optimizers=False,
+                save_config_kwargs={"overwrite": True},
+                args=[
+                    "export",
+                    "--config",
+                    str(TEMPLATE),
+                    "--output_path",
+                    str(output_path),
+                    "--trainer.accelerator=cpu",
+                    "--trainer.devices=1",
+                ],
+            )
+    finally:
+        sys.argv = saved_argv
+
+    assert output_path.is_file()
+
+
 def test_optimizer_lr_override_in_process():
     """Top-level --optimizer.init_args.lr override surfaces in the resolved config."""
     cli = _resolve("--config", str(TEMPLATE), "--optimizer.init_args.lr=5e-3")
