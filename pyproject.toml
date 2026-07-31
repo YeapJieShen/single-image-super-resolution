@@ -127,6 +127,10 @@ line-length = 100
 # removed and ignoring them has no effect" on every run, which is noise in a required
 # check. The isinstance(x, A | B) style it enforced is now convention, not lint.
 select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    # UP038 deprecated upstream in ruff 0.12.0; will silently stop firing on the next bump.
+    "UP038",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Re-export hubs import names purely to surface them under short class paths.
