@@ -9,7 +9,6 @@ training signals; :class:`SRCheckpoint` is a thin
 :class:`SRPredictionWriter` writes ``cli predict`` output to disk as PNGs.
 """
 
-import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -496,8 +495,8 @@ class WeightHistogramLogger(Callback):
             one is written per tracked parameter on every cadence hit — at
             the templates' 1M-step schedule the old default of ``100`` was
             ~10k writes per parameter (multi-GB event files) despite never
-            having been exercised at that scale (this callback is absent
-            from the SRResNet template). ``10000`` drops that to ~100
+            having been exercised at that scale (neither tracked template
+            wires this callback). ``10000`` drops that to ~100
             writes per parameter, still enough to see the weight-drift
             trend across a full run.
     """
