@@ -2,8 +2,14 @@
 
 LR is generated from HR via (optional blur →) bicubic-down → bicubic-up so
 the LR patches share the spatial size of the HR patches (pre-upsampled SRCNN
-formulation). :class:`TrainDataset` caches sliding-window sub-images
-through :class:`~sisr.cache.LMDBCache`; :class:`ValidationDataset`
+formulation). :class:`TrainDataset` caches whole decoded HR images (raw,
+uint8) through :class:`~sisr.cache.LMDBCache`, mirroring
+:mod:`sisr.datasets.srresnet` — decoding a source image once and slicing its
+deterministic sub-images out at load time is far cheaper than re-decoding,
+and it decouples the cache from every LR-generation parameter (``scale``,
+``blur_sigma``, ``resize_backend``) as well as the sub-image grid itself
+(``subimg_size``, ``stride``): none of them affect the raw bytes stored, only
+what gets sliced/degraded from them at read time. :class:`ValidationDataset`
 generates LR pairs on the fly for full images.
 
 The resize/degradation backend is selectable (see :mod:`sisr.imresize`):
@@ -12,6 +18,7 @@ The resize/degradation backend is selectable (see :mod:`sisr.imresize`):
 and only has an effect on that path.
 """
 
+import bisect
 import hashlib
 import math
 from collections.abc import Iterator
@@ -59,6 +66,34 @@ def _check_blur_sigma(resize_backend: ResizeBackend, blur_sigma: float | None) -
     return 1.0 if blur_sigma is None else blur_sigma
 
 
+def _grid_dims(
+    height: int, width: int, scale: int, sub_img_size: int, stride: int
+) -> tuple[int, int]:
+    """Returns the ``(n_rows, n_cols)`` sliding-window sub-image grid for one image.
+
+    Single source of truth for the deterministic patch grid: :func:`_iter_patch_origins`
+    (the enumeration used by tests and the module docstring) and
+    :meth:`TrainDataset.__getitem__` (an O(1) index -> origin lookup, since the
+    cache no longer stores one entry per patch) both derive positions from
+    this, so they can never silently disagree and misalign an index.
+
+    Args:
+        height (int): Full image height in pixels.
+        width (int): Full image width in pixels.
+        scale (int): Downscaling factor; each axis is cropped to a multiple of it.
+        sub_img_size (int): Side length of the square sub-image window.
+        stride (int): Step size of the sliding window.
+
+    Returns:
+        ``(n_rows, n_cols)`` — the number of valid window positions per axis.
+    """
+    h_crop = height - (height % scale)
+    w_crop = width - (width % scale)
+    n_rows = len(range(0, h_crop - sub_img_size + 1, stride))
+    n_cols = len(range(0, w_crop - sub_img_size + 1, stride))
+    return n_rows, n_cols
+
+
 def _iter_patch_origins(
     height: int,
     width: int,
@@ -66,13 +101,11 @@ def _iter_patch_origins(
     sub_img_size: int,
     stride: int,
 ) -> Iterator[tuple[int, int]]:
-    """Yields the ``(top, left)`` origin of every sliding-window sub-image.
+    """Yields the ``(top, left)`` origin of every sliding-window sub-image, row-major.
 
-    Each axis is first cropped to a multiple of *scale* (so the bicubic LR
-    downsample is exact), then a *sub_img_size* window is walked across the
-    cropped grid in *stride* steps.  Both :meth:`TrainDataset._compute_offsets`
-    and :func:`_process_subimages` consume this, so the patch count and ordering
-    can never disagree and misalign the LMDB ``lr_``/``hr_`` keys.
+    Built on :func:`_grid_dims` so this enumeration and
+    :meth:`TrainDataset.__getitem__`'s O(1) index -> origin math can never
+    disagree about ordering or count.
 
     Args:
         height (int): Full image height in pixels.
@@ -84,92 +117,88 @@ def _iter_patch_origins(
     Yields:
         ``(top, left)`` pixel offsets of each sub-image's top-left corner.
     """
-    h_crop = height - (height % scale)
-    w_crop = width - (width % scale)
-    for top in range(0, h_crop - sub_img_size + 1, stride):
-        for left in range(0, w_crop - sub_img_size + 1, stride):
-            yield top, left
+    n_rows, n_cols = _grid_dims(height, width, scale, sub_img_size, stride)
+    for row in range(n_rows):
+        for col in range(n_cols):
+            yield row * stride, col * stride
 
 
-def _process_subimages(
-    path: Path,
-    sub_img_size: int,
-    stride: int,
+def _degrade(
+    hr_arr: np.ndarray,
     scale: int,
+    kernel: int | None,
     blur_sigma: float | None,
     resize_backend: ResizeBackend,
-    base_idx: int,
-) -> list[tuple[str, bytes]]:
-    """Extracts all LR/HR sub-image pairs from a single image and returns
-    them as keyed pairs ready for LMDB insertion.
+) -> np.ndarray:
+    """Derives an LR array from an HR array: (optional blur →) bicubic-down → bicubic-up.
 
-    This is a top-level function (not a method) so that it can be pickled by
-    ``ProcessPoolExecutor`` across all platforms.
+    Restores *hr_arr*'s original spatial size (SRCNN's pre-upsampled
+    formulation). Shared by :class:`TrainDataset` (per sub-image, at read
+    time) and :class:`ValidationDataset` (per full image) so the degradation
+    recipe cannot drift between the two.
 
-    For each sliding-window position (from the shared
-    :func:`_iter_patch_origins` grid) the function:
-      1. Crops the HR sub-image with a direct numpy slice (deterministic,
-         pixel-exact).
-      2. Generates the LR sub-image: on ``'cv2'``, Gaussian-blurs first
-         (no antialiasing of its own); either backend then
-         bicubic-downsamples and bicubic-upsamples back to
-         ``sub_img_size`` via :func:`sisr.imresize.resize`.
-      3. Converts both sub-images to ``(C, H, W)`` uint8 layout. HR is
-         always served as RGB; Y/YCbCr selection happens downstream.
-      4. Assigns LMDB keys using ``base_idx`` as the starting offset.
+    Args:
+        hr_arr (np.ndarray): ``(H, W, 3)`` uint8 RGB array.
+        scale (int): Downscaling factor.
+        kernel (int | None): Odd Gaussian kernel size, or ``None`` on ``'matlab'``.
+        blur_sigma (float | None): Gaussian sigma paired with *kernel*; ignored if
+            *kernel* is ``None``.
+        resize_backend (ResizeBackend): ``'matlab'`` or ``'cv2'``.
+
+    Returns:
+        The degraded array, same ``(H, W, 3)`` shape as *hr_arr*.
+    """
+    h, w = hr_arr.shape[:2]
+    to_degrade = hr_arr
+    if kernel is not None:
+        to_degrade = cv2.GaussianBlur(hr_arr, (kernel, kernel), sigmaX=blur_sigma)
+    down = resize(to_degrade, (h // scale, w // scale), backend=resize_backend)
+    return resize(down, (h, w), backend=resize_backend)
+
+
+def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
+    """Decodes one HR image and returns its single LMDB entry.
+
+    Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
+    across all platforms, mirroring
+    :func:`sisr.datasets.srresnet._process_hr_image`. Sub-image extraction and
+    LR derivation both moved to :meth:`TrainDataset.__getitem__`, so the build
+    only has to decode once per image — independent of
+    ``subimg_size``/``stride``/``scale``.
 
     Args:
         path (Path): File path of the high-resolution image.
-        sub_img_size (int): Spatial size of the square sub-images to
-            extract.
-        stride (int): Step size of the sliding window.
-        scale (int): Downscaling factor for LR generation.
-        blur_sigma (float | None): Sigma of the Gaussian blur applied before
-            downsampling on the ``'cv2'`` backend; ``None`` on ``'matlab'``.
-        resize_backend (ResizeBackend): ``'matlab'`` or ``'cv2'``; see
-            :mod:`sisr.imresize`.
-        base_idx (int): Starting LMDB key index for this image's
-            sub-images.
+        idx (int): This image's position in the manifest — determines its LMDB key.
 
     Returns:
-        A flat list of ``(key_string, value_bytes)`` pairs where keys
-        follow the pattern ``'lr_{idx:08d}'`` / ``'hr_{idx:08d}'``.
+        A single-element list ``[(f'hr_{idx:08d}', raw_bytes)]`` where
+        *raw_bytes* is the ``(H, W, 3)`` uint8 RGB array's bytes.
     """
     arr = np.array(Image.open(path).convert("RGB"))
-    h, w = arr.shape[:2]
-
-    lr_size = sub_img_size // scale
-    kernel = 2 * math.ceil(3.0 * blur_sigma) + 1 if blur_sigma is not None else None  # odd, ±3σ
-
-    keyed_pairs = []
-    for offset, (top, left) in enumerate(_iter_patch_origins(h, w, scale, sub_img_size, stride)):
-        idx = base_idx + offset
-        hr_subimg = arr[top : top + sub_img_size, left : left + sub_img_size, :]
-
-        to_degrade = hr_subimg
-        if kernel is not None:
-            to_degrade = cv2.GaussianBlur(hr_subimg, (kernel, kernel), sigmaX=blur_sigma)
-        down = resize(to_degrade, (lr_size, lr_size), backend=resize_backend)
-        lr_subimg = resize(down, (sub_img_size, sub_img_size), backend=resize_backend)
-
-        hr_chw = hr_subimg.transpose(2, 0, 1)
-        lr_chw = lr_subimg.transpose(2, 0, 1)
-
-        keyed_pairs.append((f"lr_{idx:08d}", lr_chw.tobytes()))
-        keyed_pairs.append((f"hr_{idx:08d}", hr_chw.tobytes()))
-
-    return keyed_pairs
+    return [(f"hr_{idx:08d}", arr.tobytes())]
 
 
 class TrainDataset(SRDataset):
-    """Dataset that serves precomputed LR/HR sub-image pairs from an LMDB cache.
+    """Dataset that serves deterministic LR/HR sub-image pairs, HR served from
+    an LMDB cache of full raw images.
 
-    On first instantiation with a given set of parameters the dataset
-    extracts every sliding-window sub-image from every image, generates the
-    corresponding low-resolution version, and persists both as uint8
-    arrays in an LMDB database.  A SHA-256 checksum over the file
-    manifest and all extraction parameters is stored inside the LMDB so
-    that subsequent runs with identical settings skip the build entirely.
+    On first instantiation with a given set of files, every HR image is
+    decoded once and stored whole (uint8, RGB) in an LMDB database — see the
+    module docstring for why. Each ``__getitem__`` maps its flat index to a
+    source image and a deterministic ``(top, left)`` grid position in O(1)
+    (via :func:`_grid_dims`), reads that image's cached bytes through a
+    zero-copy :meth:`~sisr.cache.LMDBCache.get_buffer` view, slices out the
+    ``subimg_size`` square HR sub-image, and degrades it to LR with
+    :func:`_degrade`. The sliding-window grid itself — which sub-images exist
+    and in what order — is unaffected by this change: it is still derived
+    from exactly one place (:func:`_grid_dims`), so indices can never
+    silently misalign.
+
+    A SHA-256 checksum over the file manifest (plus a format tag) is stored
+    inside the LMDB so subsequent runs over the same files skip the build
+    entirely — the checksum no longer depends on
+    ``subimg_size``/``stride``/``scale``/``blur_sigma``/``resize_backend``,
+    since none of them affect the raw bytes written.
 
     Reference:
         Image Super-Resolution Using Deep Convolutional Networks
@@ -194,7 +223,9 @@ class TrainDataset(SRDataset):
             compatible antialiased bicubic, comparable to published paper
             numbers. ``'cv2'`` — ``cv2.INTER_CUBIC``, no antialiasing;
             kept so LMDB caches built before this module existed stay
-            reproducible. See :mod:`sisr.imresize`.
+            reproducible. See :mod:`sisr.imresize`. Only the LR derivation
+            is affected — the HR cache stores raw pixels regardless, so
+            switching backends never invalidates it.
         use_tqdm (bool): Whether to display a progress bar during the LMDB
             build.  Defaults to ``False``.
         cache_dir (str | Path | None): Directory in which to store the
@@ -231,116 +262,110 @@ class TrainDataset(SRDataset):
         self.blur_sigma = _check_blur_sigma(resize_backend, blur_sigma)
         self.resize_backend = resize_backend
         self.build_num_workers = build_num_workers
+        self._kernel = (
+            2 * math.ceil(3.0 * self.blur_sigma) + 1 if self.blur_sigma is not None else None
+        )  # odd, covers +/-3 sigma
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         checksum = self._compute_checksum()
+        self._img_sizes, self._img_offsets, self._img_n_cols, self._total_patches = (
+            self._compute_grid()
+        )
 
-        self._img_offsets, total_patches = self._compute_offsets()
-
-        patch_bytes = 3 * self.sub_img_size * self.sub_img_size
-        map_size = max(total_patches * 2 * patch_bytes * 2, 512 * 1024 * 1024)
+        # Exact sizes from image headers + 10% slack. If it is ever exceeded,
+        # lmdb raises MapFullError mid-build and the checksum is never written,
+        # so the partial DB reads as stale and is rebuilt rather than silently
+        # serving truncated data. Same unhandled-overflow behaviour as SRResNet's cache.
+        raw_bytes = sum(h * w * 3 for h, w in self._img_sizes)
+        map_size = max(int(raw_bytes * 1.1), 64 * 1024 * 1024)
 
         self._cache = LMDBCache(
             cache_dir=cache_dir,
-            name="srcnn_patches",
+            name="srcnn_hr",
             checksum=checksum,
-            length=total_patches,
+            length=len(self.img_paths),
             map_size=map_size,
-            metadata={
-                "channels": "3",
-                "subimg_size": str(self.sub_img_size),
-            },
+            metadata={"format": "srcnn_hr_v1"},
             build_fn=self._build,
             use_tqdm=use_tqdm,
         )
 
     def _compute_checksum(self) -> str:
-        """Computes a SHA-256 checksum over the file manifest and dataset
-        parameters.
+        """Computes a SHA-256 checksum over the file manifest only.
 
-        The manifest includes every file name and its size (via ``stat``),
-        making it fast (no content hashing) while still detecting added,
-        removed, or resized files.
+        The cache stores whole raw HR images, so — unlike the LR-patch cache
+        this replaced — none of ``subimg_size``/``stride``/``scale``/
+        ``blur_sigma``/``resize_backend`` enter the hash: they only affect
+        what gets sliced and degraded at read time, never what is written to
+        LMDB. The ``format=srcnn_hr_v1`` tag (paired with a new LMDB cache
+        ``name``, see :meth:`__init__`) ensures a pre-HR-only cache is never
+        misread under this format rather than rebuilt.
 
         Returns:
             A hex-encoded SHA-256 digest string.
         """
         file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in self.img_paths)
-        canonical = "|".join(
-            [
-                file_manifest,
-                str(self.sub_img_size),
-                str(self.stride),
-                str(self.scale),
-                str(self.blur_sigma),
-                f"resize_backend={self.resize_backend}",
-                "transforms_impl=vendored_matlab_imresize_v1",
-            ]
-        )
+        canonical = "|".join([file_manifest, "format=srcnn_hr_v1"])
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def _compute_offsets(self) -> tuple[list[int], int]:
-        """Reads image dimensions (without decoding pixels) to compute
-        per-image cumulative sub-image offsets.
+    def _compute_grid(self) -> tuple[list[tuple[int, int]], list[int], list[int], int]:
+        """Reads image dimensions (without decoding pixels) to compute the
+        deterministic sub-image grid for every source image.
+
+        Single source of truth for the patch grid: :meth:`__len__` and
+        :meth:`__getitem__`'s O(1) index -> ``(top, left)`` lookup both derive
+        from the values this returns, so they can never disagree (P2.5).
 
         Returns:
-            A tuple of ``(offsets, total_patches)`` where *offsets* is
-            a list with one starting index per image and *total_patches*
-            is the grand total.
+            ``(sizes, offsets, n_cols, total)`` where *sizes* is each image's
+            ``(h, w)``, *offsets* is the cumulative starting patch index per
+            image, *n_cols* is each image's column count (needed to invert a
+            flat patch index back to a grid position), and *total* is the
+            grand total of patches.
         """
-        offsets = []
+        sizes: list[tuple[int, int]] = []
+        offsets: list[int] = []
+        n_cols_list: list[int] = []
         offset = 0
         for path in self.img_paths:
             img = Image.open(path)
             w, h = img.size
             img.close()
-            n = sum(
-                1 for _ in _iter_patch_origins(h, w, self.scale, self.sub_img_size, self.stride)
-            )
+            n_rows, n_cols = _grid_dims(h, w, self.scale, self.sub_img_size, self.stride)
+            sizes.append((h, w))
+            n_cols_list.append(n_cols)
             offsets.append(offset)
-            offset += n
-        return offsets, offset
+            offset += n_rows * n_cols
+        return sizes, offsets, n_cols_list, offset
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
-        """Populates the LMDB cache using parallel image processing.
-
-        Each image is submitted to a worker process which extracts
-        sub-images and returns keyed byte pairs.  Results are written
-        to LMDB as they arrive using precomputed offsets.
+        """Populates the LMDB cache by decoding each HR image once, in parallel.
 
         Args:
             ctx (LMDBCacheBuildContext): Build context provided by
                 :class:`LMDBCache`.
         """
-        process_args = [
-            (
-                self.sub_img_size,
-                self.stride,
-                self.scale,
-                self.blur_sigma,
-                self.resize_backend,
-                self._img_offsets[i],
-            )
-            for i in range(len(self.img_paths))
-        ]
-
         ctx.parallel_build(
             items=self.img_paths,
-            process_fn=_process_subimages,
-            process_args=process_args,
+            process_fn=_process_hr_image,
+            process_args=[(i,) for i in range(len(self.img_paths))],
             num_workers=self.build_num_workers,
             desc="Building LMDB cache",
         )
 
     def __len__(self) -> int:
-        return self._cache.length
+        return self._total_patches
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Retrieves the LR/HR sub-image pair at the given index.
 
-        Reads the raw uint8 bytes from LMDB, reshapes them into
-        ``(C, H, W)`` arrays, and converts to ``float32`` tensors
-        normalised to ``[0, 1]``.
+        Locates *idx*'s source image and grid position in O(1) via
+        :attr:`_img_offsets`/:attr:`_img_n_cols`, slices the HR sub-image out
+        of that image's cached raw bytes (a zero-copy
+        :meth:`~sisr.cache.LMDBCache.get_buffer` view, copied out before the
+        transaction closes), and derives LR from it with :func:`_degrade` —
+        numerically identical to computing both at build time, just performed
+        at load time instead.
 
         Args:
             idx (int): Zero-based sub-image index.
@@ -348,29 +373,37 @@ class TrainDataset(SRDataset):
         Returns:
             A ``(lr_tensor, hr_tensor)`` tuple of ``float32`` tensors
             with shape ``(C, H, W)`` and values in ``[0, 1]``.
+
+        Raises:
+            IndexError: If *idx* is outside ``[0, len(self))``.
+            KeyError: If the backing LMDB entry for the source image is
+                missing (a corrupt/incomplete cache).
         """
-        C = 3
-        H = W = self.sub_img_size
+        if not 0 <= idx < self._total_patches:
+            raise IndexError(idx)
 
-        lr_key = f"lr_{idx:08d}"
-        hr_key = f"hr_{idx:08d}"
-        env = self._cache.get_env()
-        with env.begin(write=False, buffers=True) as txn:
-            lr_buf = txn.get(lr_key.encode())
-            hr_buf = txn.get(hr_key.encode())
-            # A missing key means a corrupt/incomplete cache; surface the key
-            # rather than letting None flow into np.frombuffer (cryptic TypeError).
-            if lr_buf is None:
-                raise KeyError(lr_key)
-            if hr_buf is None:
-                raise KeyError(hr_key)
-            lr_arr = np.frombuffer(lr_buf, dtype=np.uint8).reshape(C, H, W).copy()
-            hr_arr = np.frombuffer(hr_buf, dtype=np.uint8).reshape(C, H, W).copy()
+        img_idx = bisect.bisect_right(self._img_offsets, idx) - 1
+        local_idx = idx - self._img_offsets[img_idx]
+        row, col = divmod(local_idx, self._img_n_cols[img_idx])
+        top, left = row * self.stride, col * self.stride
+        h, w = self._img_sizes[img_idx]
 
-        lr_tensor = torch.tensor(lr_arr, dtype=torch.float32).div_(255.0)
-        hr_tensor = torch.tensor(hr_arr, dtype=torch.float32).div_(255.0)
+        key = f"hr_{img_idx:08d}"
+        with self._cache.get_buffer(key) as buf:
+            if buf is None:
+                raise KeyError(key)
+            # Read-only view into the LMDB transaction's mmap page — sliced and
+            # copied out below, before the `with` block ends and the view dies.
+            arr = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+            hr_subimg = arr[
+                top : top + self.sub_img_size, left : left + self.sub_img_size, :
+            ].copy()
 
-        return lr_tensor, hr_tensor
+        lr_subimg = _degrade(
+            hr_subimg, self.scale, self._kernel, self.blur_sigma, self.resize_backend
+        )
+
+        return self._to_tensor(lr_subimg), self._to_tensor(hr_subimg)
 
 
 class ValidationDataset(SRDataset):
@@ -431,17 +464,6 @@ class ValidationDataset(SRDataset):
         """
         path = self.img_paths[idx]
         arr = self._load_rgb(path)  # HWC uint8 RGB
-        h, w = arr.shape[:2]
-        lr_h = h // self.scale
-        lr_w = w // self.scale
+        lr_arr = _degrade(arr, self.scale, self._kernel, self.blur_sigma, self.resize_backend)
 
-        to_degrade = arr
-        if self._kernel is not None:
-            to_degrade = cv2.GaussianBlur(arr, (self._kernel, self._kernel), sigmaX=self.blur_sigma)
-        down = resize(to_degrade, (lr_h, lr_w), backend=self.resize_backend)
-        lr_arr = resize(down, (h, w), backend=self.resize_backend)
-
-        lr_tensor = self._to_tensor(lr_arr)
-        hr_tensor = self._to_tensor(arr)
-
-        return lr_tensor, hr_tensor
+        return self._to_tensor(lr_arr), self._to_tensor(arr)
