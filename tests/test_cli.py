@@ -232,26 +232,22 @@ def test_matmul_precision_rejects_invalid_in_process():
         _resolve("--config", str(TEMPLATE), "--matmul_precision=bogus")
 
 
-def test_cudnn_benchmark_accepted_in_process():
-    """--cudnn_benchmark=false overrides the template's shipped 'true' default."""
-    cli = _resolve("--config", str(TEMPLATE), "--cudnn_benchmark=false")
-    assert cli.config.cudnn_benchmark is False
+def test_trainer_benchmark_template_default_is_true_in_process():
+    """cuDNN autotuning rides on Lightning's own trainer.benchmark, not a custom key.
 
-
-def test_cudnn_benchmark_template_default_is_true_in_process():
-    """The shipped templates set cudnn_benchmark: true (free at static crop shapes)."""
+    Trainer(benchmark=...) already assigns torch.backends.cudnn.benchmark and
+    coordinates it with trainer.deterministic; a separate top-level key would
+    bypass that coordination.
+    """
     cli = _resolve("--config", str(TEMPLATE))
-    assert cli.config.cudnn_benchmark is True
+    assert cli.config.trainer.benchmark is True
+    assert not hasattr(cli.config, "cudnn_benchmark")
 
 
 # In-process unit tests for SRLightningCLI.before_instantiate_classes. Subprocess
 # tests above cover argparse wiring; these cover the hook's branching logic so it
 # shows up in line coverage.
-def _make_cli_stub(
-    subcommand: str | None,
-    matmul_precision: str | None,
-    cudnn_benchmark: bool | None = None,
-):
+def _make_cli_stub(subcommand: str | None, matmul_precision: str | None):
     """Build an SRLightningCLI instance bypassing __init__ for direct hook testing."""
     from types import SimpleNamespace
 
@@ -260,13 +256,7 @@ def _make_cli_stub(
     cli = SRLightningCLI.__new__(SRLightningCLI)
     cli.subcommand = subcommand
     cli.config = (
-        {
-            subcommand: SimpleNamespace(
-                matmul_precision=matmul_precision, cudnn_benchmark=cudnn_benchmark
-            )
-        }
-        if subcommand
-        else {}
+        {subcommand: SimpleNamespace(matmul_precision=matmul_precision)} if subcommand else {}
     )
     return cli
 
@@ -305,32 +295,6 @@ def test_before_instantiate_classes_skips_when_no_subcommand(monkeypatch):
     _make_cli_stub(subcommand=None, matmul_precision="medium").before_instantiate_classes()
 
     assert calls == []
-
-
-def test_before_instantiate_classes_sets_cudnn_benchmark(monkeypatch):
-    """When cudnn_benchmark is set, torch.backends.cudnn.benchmark is assigned that value."""
-    import torch
-
-    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
-
-    _make_cli_stub(
-        subcommand="fit", matmul_precision=None, cudnn_benchmark=True
-    ).before_instantiate_classes()
-
-    assert torch.backends.cudnn.benchmark is True
-
-
-def test_before_instantiate_classes_skips_cudnn_benchmark_when_unset(monkeypatch):
-    """When cudnn_benchmark is None, torch.backends.cudnn.benchmark is left untouched."""
-    import torch
-
-    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
-
-    _make_cli_stub(
-        subcommand="fit", matmul_precision=None, cudnn_benchmark=None
-    ).before_instantiate_classes()
-
-    assert torch.backends.cudnn.benchmark is False
 
 
 TEMPLATE_PATHS = sorted((REPO_ROOT / "templates").glob("config.*.template.yaml"))
