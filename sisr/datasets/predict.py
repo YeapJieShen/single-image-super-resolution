@@ -23,8 +23,7 @@ class PredictDataset(SRDataset):
     exactly as it does for the paired training/validation datasets.
 
     Args:
-        img_dir (str | Path): Directory containing the LR images to run
-            inference on.
+        img_dir: Directory of LR images to run inference on.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``, or if two
@@ -53,7 +52,7 @@ class PredictDataset(SRDataset):
         """Returns the LR RGB tensor at ``idx``.
 
         Args:
-            idx (int): Zero-based image index.
+            idx: Zero-based image index.
 
         Returns:
             ``float32`` tensor of shape ``(3, H, W)`` in ``[0, 1]``.

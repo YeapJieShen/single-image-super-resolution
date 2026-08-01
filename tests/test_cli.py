@@ -32,20 +32,15 @@ def _resolve(*args: str):
     from sisr.cli import SRLightningCLI
     from sisr.training import SRDataModule, SRLightning
 
-    # LightningCLI warns when both `args=` and sys.argv[1:] are set (it sees
-    # pytest's own argv). The strict `filterwarnings=["error"]` would turn that
-    # into an error, so blank sys.argv for the duration of the parse.
+    # LightningCLI warns when both `args=` and sys.argv[1:] are set (it sees pytest's
+    # own argv); the strict global filterwarnings=error would turn that into a failure.
     saved_argv = sys.argv
     sys.argv = saved_argv[:1]
     try:
-        # Two framework-internal warnings fire only on the in-process path (the
-        # subprocess --print_config path never surfaced them) and would trip the
-        # global strict "error" filter, so suppress them locally — leaving the
-        # strict filter intact for our own code:
-        #   * jsonargparse DeprecationWarning: lightning's _add_instantiators
-        #     calls add_instantiator / instantiate_classes, deprecated in 4.49.
-        #   * "GPU available but not used": run=False instantiates the Trainer and
-        #     we force accelerator=cpu; harmless on a GPU dev box, absent on CI.
+        # Two framework-internal warnings only fire on this in-process path and would
+        # trip the strict "error" filter, so suppress them locally: jsonargparse's
+        # DeprecationWarning (lightning's deprecated add_instantiator call), and "GPU
+        # available but not used" (run=False + forced accelerator=cpu, harmless).
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning)
             warnings.filterwarnings("ignore", message="GPU available but not used.*")

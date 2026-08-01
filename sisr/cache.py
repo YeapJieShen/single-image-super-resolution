@@ -32,8 +32,8 @@ class LMDBCacheBuildContext:
     Provides helpers for writing data into the LMDB being built.
 
     Args:
-        env (lmdb.Environment): The open LMDB environment (writable).
-        use_tqdm (bool): Whether progress bars should be displayed.
+        env: The open, writable LMDB environment.
+        use_tqdm: Whether to display progress bars.
     """
 
     def __init__(self, env: lmdb.Environment, use_tqdm: bool = False):
@@ -44,7 +44,7 @@ class LMDBCacheBuildContext:
         """Writes a batch of key-value pairs in a single transaction.
 
         Args:
-            pairs (Sequence[tuple[str, bytes]]): Sequence of ``(key, value)`` tuples to write.
+            pairs: Sequence of ``(key, value)`` tuples to write.
         """
         txn = self.env.begin(write=True)
         for key, value in pairs:
@@ -61,27 +61,24 @@ class LMDBCacheBuildContext:
     ) -> None:
         """Processes *items* and writes the results to LMDB.
 
-        The worker function *process_fn* must be a top-level (picklable)
-        callable returning a list of ``(key, value_bytes)`` tuples.  With more
-        than one effective worker a ``ProcessPoolExecutor`` runs a sliding
-        window of *num_workers* in-flight jobs while the main process writes
-        completed results; with ``<= 1`` effective worker the jobs run inline in
-        the calling process (no subprocess).
+        *process_fn* must be a top-level (picklable) callable returning a
+        list of ``(key, value_bytes)`` tuples. With more than one effective
+        worker a ``ProcessPoolExecutor`` runs a sliding window of
+        *num_workers* in-flight jobs while the main process writes completed
+        results; with ``<= 1`` effective worker the jobs run inline (no
+        subprocess).
 
         Args:
-            items (Sequence[Any]): One item per job (e.g. a list of image paths).
-            process_fn (Callable[..., list[tuple[str, bytes]]]): Top-level callable invoked per
-                item.  Receives ``(item, *extra_args)`` and returns keyed pairs.
-            process_args (Sequence[Sequence[Any]], optional): Per-item extra arguments for
-                *process_fn*. If ``None``, each job calls ``process_fn(item)``.
-                If provided, must have the same length as *items* and
-                each element is unpacked as positional args.
-            num_workers (int | None): Maximum number of parallel worker
-                processes.  ``None`` resolves to ``min(os.cpu_count() or 1,
-                len(items))``.  When the effective count is ``<= 1`` (a single
-                core, a lone item, or an explicit ``1``) the build runs inline
-                with no ``ProcessPoolExecutor``.
-            desc (str): Description shown in the ``tqdm`` progress bar.
+            items: One item per job (e.g. a list of image paths).
+            process_fn: Top-level callable invoked per item as
+                ``(item, *extra_args)``, returning its keyed pairs.
+            process_args: Per-item extra arguments for *process_fn*, unpacked
+                as positional args. ``None`` calls ``process_fn(item)`` with
+                no extras.
+            num_workers: Maximum parallel workers. ``None`` resolves to
+                ``min(os.cpu_count() or 1, len(items))``; an effective count
+                ``<= 1`` runs inline with no ``ProcessPoolExecutor``.
+            desc: Description shown on the ``tqdm`` progress bar.
         """
         n_items = len(items)
         if num_workers is None:
@@ -90,9 +87,8 @@ class LMDBCacheBuildContext:
 
         pbar = tqdm(total=n_items, desc=desc, unit="item") if self.use_tqdm else None
 
-        # Inline (no-pool) build. With <= 1 effective worker the
-        # ProcessPoolExecutor spawn/import cost — plus the hazard of nesting a
-        # pool inside a test/xdist worker — isn't worth it, so run jobs here.
+        # <= 1 effective worker: skip the pool. Its spawn/import cost, plus the
+        # hazard of nesting one inside a test/xdist worker, isn't worth it here.
         if num_workers <= 1:
             for i in range(n_items):
                 args = (items[i],)
@@ -138,30 +134,24 @@ class LMDBCache:
     """A checksum-validated LMDB key-value store with parallel build support.
 
     On construction the cache checks whether a valid LMDB database
-    already exists (matched by *checksum*).  If not, it calls
-    ``build_fn`` to populate the database from scratch using a pool of
-    worker processes.
+    already exists (matched by *checksum*). If not, it calls ``build_fn``
+    to populate the database from scratch using a pool of worker processes.
 
-    After construction the cache is read-only.  Call :meth:`get` to
-    retrieve individual entries, or :meth:`get_env` for direct LMDB
-    access.
+    After construction the cache is read-only. Call :meth:`get` to
+    retrieve individual entries, or :meth:`get_env` for direct LMDB access.
 
     Args:
-        cache_dir (str | Path): Parent directory for the LMDB database.
-        name (str): Prefix used in the LMDB folder name
-            (e.g. ``'srcnn_hr'``).
-        checksum (str): Hex digest that uniquely identifies the current
-            configuration.  A mismatch triggers a rebuild.
-        length (int): Total number of entries that will be stored.
-        map_size (int): Maximum size of the LMDB database in bytes.
-        metadata (dict[str, str] | None): Extra key-value pairs to persist alongside the data
-            (e.g. ``{'channels': '3', 'subimg_size': '33'}``).
-        build_fn (Callable[[LMDBCacheBuildContext], None] | None): A callable that populates the
-            database.  It receives a single :class:`LMDBCacheBuildContext` argument exposing
-            a ``write_batch`` helper and an ``env`` handle.  If
-            ``None`` and no valid cache is found, a ``RuntimeError``
-            is raised.
-        use_tqdm (bool): Whether to display a progress bar during the build.
+        cache_dir: Parent directory for the LMDB database.
+        name: Prefix used in the LMDB folder name (e.g. ``'srcnn_hr'``).
+        checksum: Hex digest identifying the current configuration; a
+            mismatch triggers a rebuild.
+        length: Total number of entries that will be stored.
+        map_size: Maximum size of the LMDB database in bytes.
+        metadata: Extra key-value pairs to persist alongside the data.
+        build_fn: Populates the database, receiving a single
+            :class:`LMDBCacheBuildContext`. ``None`` with no valid cache
+            found raises ``RuntimeError``.
+        use_tqdm: Whether to display a progress bar during the build.
     """
 
     def __init__(
@@ -191,31 +181,20 @@ class LMDBCache:
 
     @property
     def path(self) -> Path:
-        """Path to the LMDB database directory.
-
-        Returns:
-            The path where the LMDB database is stored.
-        """
+        """Path to the LMDB database directory."""
         return self._lmdb_path
 
     @property
     def length(self) -> int:
-        """Number of entries stored in the cache.
-
-        Returns:
-            The number of entries.
-        """
+        """Number of entries stored in the cache."""
         return self._length
 
     def get_env(self) -> lmdb.Environment:
         """Returns the LMDB environment, opening it lazily on first call.
 
-        Each ``DataLoader`` worker process must call this independently
-        because LMDB memory-mapped environments cannot be shared across
-        processes created via ``spawn``.
-
-        Returns:
-            A read-only LMDB environment.
+        Each ``DataLoader`` worker process must call this independently:
+        LMDB memory-mapped environments cannot be shared across processes
+        created via ``spawn``.
         """
         if self._env is None:
             self._env = lmdb.open(str(self._lmdb_path), readonly=True, lock=False)
@@ -225,7 +204,7 @@ class LMDBCache:
         """Reads a single value from the cache.
 
         Args:
-            key (str): The string key to look up.
+            key: The string key to look up.
 
         Returns:
             The raw bytes stored under *key*, or ``None`` if absent.
@@ -252,7 +231,7 @@ class LMDBCache:
         actually enter the ``with``.
 
         Args:
-            key (str): The string key to look up.
+            key: The string key to look up.
 
         Yields:
             A ``memoryview`` onto the raw value bytes, or ``None`` if *key* is
@@ -266,11 +245,11 @@ class LMDBCache:
         """Reads multiple values from the cache in a single transaction.
 
         Args:
-            keys (Sequence[str]): Sequence of string keys to look up.
+            keys: Sequence of string keys to look up.
 
         Returns:
-            A list of raw bytes (or ``None`` for missing keys), in the
-            same order as *keys*.
+            A list of raw bytes (or ``None`` for missing keys), in the same
+            order as *keys*.
         """
         env = self.get_env()
         results = []
@@ -281,14 +260,7 @@ class LMDBCache:
         return results
 
     def _try_load(self, checksum: str) -> bool:
-        """Validates an existing LMDB by comparing its stored checksum.
-
-        Args:
-            checksum (str): The expected checksum to validate against.
-
-        Returns:
-            ``True`` if the cache is valid and ready to use.
-        """
+        """Validates an existing LMDB against *checksum*; ``True`` if ready to use."""
         if not self._lmdb_path.exists():
             return False
         try:
@@ -302,10 +274,9 @@ class LMDBCache:
             env.close()
             return True
         except (lmdb.Error, OSError):
-            # Only a genuinely unreadable cache (LMDB corruption, disk/OS
-            # error) counts as "stale" — drop it and rebuild. Anything else
-            # (KeyboardInterrupt, data-shape bugs, ...) must propagate so a
-            # broken system isn't silently mistaken for a stale cache.
+            # Only a genuinely unreadable cache (corruption, disk/OS error)
+            # counts as stale and gets dropped; anything else must propagate
+            # rather than be silently mistaken for a stale cache.
             if self._lmdb_path.exists():
                 shutil.rmtree(self._lmdb_path)
             return False
@@ -318,18 +289,7 @@ class LMDBCache:
         build_fn: Callable[[LMDBCacheBuildContext], None],
         use_tqdm: bool,
     ) -> None:
-        """Creates a fresh LMDB and delegates population to *build_fn*.
-
-        Args:
-            checksum (str): The checksum to store for future validation.
-            length (int): The number of entries that will be stored.
-            map_size (int): The maximum size of the LMDB database in bytes.
-            build_fn (Callable[[LMDBCacheBuildContext], None]): A callable that populates the
-                database.  It receives a single :class:`LMDBCacheBuildContext` argument exposing
-                a ``write_batch`` helper and an ``env`` handle. Must populate the database with
-                exactly *length* entries.
-            use_tqdm (bool): Whether to display a progress bar during the build.
-        """
+        """Creates a fresh LMDB; *build_fn* must populate it with exactly *length* entries."""
         if self._lmdb_path.exists():
             shutil.rmtree(self._lmdb_path)
 
@@ -338,7 +298,7 @@ class LMDBCache:
         ctx = LMDBCacheBuildContext(env=env, use_tqdm=use_tqdm)
         build_fn(ctx)
 
-        # Write metadata — __checksum__ last for incomplete-build detection
+        # __checksum__ written last so an interrupted build reads as stale, not complete.
         txn = env.begin(write=True)
         txn.put(b"__length__", str(length).encode())
         for k, v in self._metadata.items():

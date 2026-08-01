@@ -94,11 +94,9 @@ class BenchmarkImageLogger(Callback):
         when not supplied at construction time.
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being trained
-                (unused).
-            stage (str): Lightning trainer stage (unused — both val and
-                test mappings are built up-front).
+            trainer: The active trainer.
+            pl_module: Unused.
+            stage: Unused — both val and test mappings are built up-front.
         """
         if self.dataset_names is None:
             dm = getattr(trainer, "datamodule", None)
@@ -113,9 +111,8 @@ class BenchmarkImageLogger(Callback):
         """Clear buffers and bump the val-run counter.
 
         Args:
-            trainer (lightning.Trainer): The active trainer (unused).
-            pl_module (lightning.LightningModule): The model being
-                evaluated (unused).
+            trainer: Unused.
+            pl_module: Unused.
         """
         self._val_run_count += 1
         self._buffer = {name: [] for name in self.dataset_names}
@@ -135,16 +132,13 @@ class BenchmarkImageLogger(Callback):
         sets, not the primary val loader at idx 0).
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being
-                evaluated.
-            outputs (Any): The value returned by ``validation_step``
-                (unused — :class:`~sisr.training.SRLightning.validation_step`
-                returns ``None`` for idx >= 1).
-            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
-            batch_idx (int): Index of the batch within the current
-                dataloader.
-            dataloader_idx (int): Index of the loader within
+            trainer: The active trainer.
+            pl_module: The model being evaluated.
+            outputs: Unused — :meth:`SRLightning.validation_step` returns
+                ``None`` for idx >= 1.
+            batch: ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx: Index of the batch within the current dataloader.
+            dataloader_idx: Index of the loader within
                 ``trainer.val_dataloaders``.
         """
         if dataloader_idx not in self._val_mapping:
@@ -166,9 +160,8 @@ class BenchmarkImageLogger(Callback):
         """Log per-set means every val epoch; image strips every N val runs.
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being
-                evaluated.
+            trainer: The active trainer.
+            pl_module: The model being evaluated.
         """
         self._flush_buffer(
             trainer=trainer,
@@ -180,9 +173,8 @@ class BenchmarkImageLogger(Callback):
         """Clear buffers ahead of a test run.
 
         Args:
-            trainer (lightning.Trainer): The active trainer (unused).
-            pl_module (lightning.LightningModule): The model being
-                evaluated (unused).
+            trainer: Unused.
+            pl_module: Unused.
         """
         self._buffer = {name: [] for name in self.dataset_names}
 
@@ -201,16 +193,12 @@ class BenchmarkImageLogger(Callback):
         are test sets (no primary loader at idx 0).
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being
-                evaluated.
-            outputs (Any): The value returned by ``test_step`` (unused —
-                :class:`~sisr.training.SRLightning.test_step` returns
-                ``None``).
-            batch (Any): ``(lr_img, hr_img)`` tuple from the test loader.
-            batch_idx (int): Index of the batch within the current
-                dataloader.
-            dataloader_idx (int): Index of the loader within
+            trainer: The active trainer.
+            pl_module: The model being evaluated.
+            outputs: Unused — :meth:`SRLightning.test_step` returns ``None``.
+            batch: ``(lr_img, hr_img)`` tuple from the test loader.
+            batch_idx: Index of the batch within the current dataloader.
+            dataloader_idx: Index of the loader within
                 ``trainer.test_dataloaders``.
         """
         if dataloader_idx not in self._test_mapping:
@@ -230,9 +218,8 @@ class BenchmarkImageLogger(Callback):
         """Log per-set means and image strips at the end of ``cli test``.
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being
-                evaluated.
+            trainer: The active trainer.
+            pl_module: The model being evaluated.
         """
         self._flush_buffer(
             trainer=trainer,
@@ -260,21 +247,10 @@ class BenchmarkImageLogger(Callback):
         Shared between :meth:`on_validation_batch_end` and
         :meth:`on_test_batch_end`. Border cropping is sourced from
         ``pl_module.eval_config.crop_border`` at the use site.
-
-        Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being evaluated.
-            batch (Any): ``(lr_img, hr_img)`` tuple from the loader.
-            batch_idx (int): Index of the batch within the current
-                dataloader.
-            dataset_name (str): Name of the test set this batch comes from.
-            source_dataloaders: ``trainer.val_dataloaders`` or
-                ``trainer.test_dataloaders`` — used to recover the
-                underlying dataset for filename resolution.
-            dataloader_idx (int): Index into ``source_dataloaders``.
-            should_log_images (bool): When True the LR/SR/HR tensors are
-                cached for image-strip emission in :meth:`_flush_buffer`;
-                otherwise only scalar metrics are buffered.
+        *source_dataloaders* recovers the underlying dataset for filename
+        resolution. When *should_log_images*, LR/SR/HR tensors are cached for
+        image-strip emission in :meth:`_flush_buffer`; otherwise only scalar
+        metrics are buffered.
         """
         lr_img, hr_img = batch
 
@@ -332,14 +308,6 @@ class BenchmarkImageLogger(Callback):
         :meth:`on_test_epoch_end`. Looks up the TensorBoard logger from
         ``trainer.loggers``; silently skips image emission for sets whose
         logger is missing.
-
-        Args:
-            trainer (lightning.Trainer): The active trainer (used for
-                ``global_step`` and the TensorBoard logger lookup).
-            pl_module (lightning.LightningModule): Receives ``log()`` calls
-                for the per-set mean metrics.
-            should_log_images (bool): When True, bicubic|SR|HR image strips
-                are emitted to TensorBoard alongside the scalar means.
         """
         step = trainer.global_step
 
@@ -406,13 +374,6 @@ class BenchmarkImageLogger(Callback):
         Bicubic can overshoot for high-contrast inputs, so the output is
         clamped to the unit interval to keep the panel renderable as a
         normalized image.
-
-        Args:
-            img (torch.Tensor): Image tensor of shape ``(C, H, W)``.
-            target_hw (tuple): Target ``(H, W)`` spatial dimensions.
-
-        Returns:
-            torch.Tensor: Bicubic-resampled tensor of shape ``(C, target_H, target_W)``.
         """
         out = torch.nn.functional.interpolate(
             img.unsqueeze(0), size=target_hw, mode="bicubic", align_corners=False
@@ -421,15 +382,7 @@ class BenchmarkImageLogger(Callback):
 
     @staticmethod
     def _pad_to_match(img: torch.Tensor, target_hw: tuple) -> torch.Tensor:
-        """Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size.
-
-        Args:
-            img (torch.Tensor): Image tensor of shape ``(C, H, W)``.
-            target_hw (tuple): Target ``(H, W)`` spatial dimensions.
-
-        Returns:
-            torch.Tensor: Padded tensor of shape ``(C, target_H, target_W)``.
-        """
+        """Zero-pad a ``(C, H, W)`` tensor to *target_hw* spatial size."""
         target_h, target_w = target_hw
         _, h, w = img.shape
 
@@ -471,8 +424,8 @@ class GradNormLogger(Callback):
         ``.item()`` accumulation loop).
 
         Args:
-            trainer (lightning.Trainer): The trainer instance.
-            pl_module (lightning.LightningModule): The model being trained.
+            trainer: The trainer instance.
+            pl_module: The model being trained.
         """
         if trainer.global_step % self.log_every_n_steps != 0:
             return
@@ -516,11 +469,11 @@ class WeightHistogramLogger(Callback):
         """Log grouped weights as histograms if on the right step cadence.
 
         Args:
-            trainer (lightning.Trainer): The trainer instance.
-            pl_module (lightning.LightningModule): The model being trained.
-            outputs (Any): The outputs of the model.
-            batch (Any): The current batch.
-            batch_idx (int): The index of the batch.
+            trainer: The trainer instance.
+            pl_module: The model being trained.
+            outputs: Unused.
+            batch: Unused.
+            batch_idx: Unused.
         """
         if trainer.global_step % self.log_every_n_steps != 0:
             return
@@ -565,15 +518,12 @@ class SRCheckpoint(ModelCheckpoint):
     handles ``/`` fine.
 
     Args:
-        monitor_metric (str): The validation metric to monitor.
-            Defaults to ``"psnr/val/RGB"``.  Use any ``psnr/val/{key}``
+        monitor_metric: The validation metric to monitor. Any ``psnr/val/{key}``
             logged by the lightning module (e.g. ``"psnr/val/Y"``,
             ``"psnr/val/YCbCr"``) or ``"ssim/val"``.
-        save_top_k (int): Number of best checkpoints to keep.
-            Defaults to ``3``.
-        dirpath (str | None): Directory to save checkpoints.
-        filename_prefix (str): Prefix for checkpoint filenames.
-            Defaults to ``"sr"``.
+        save_top_k: Number of best checkpoints to keep.
+        dirpath: Directory to save checkpoints.
+        filename_prefix: Prefix for checkpoint filenames.
         **kwargs: Extra keyword arguments forwarded to
             :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
     """
@@ -617,14 +567,14 @@ class SRCheckpoint(ModelCheckpoint):
         any training happens.
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being trained;
-                must expose ``eval_config`` (an :class:`SREvalConfig`).
-            stage (str): Lightning trainer stage. Only ``"fit"`` is checked —
-                the monitored tags are val-loop metrics, so they are never
-                logged under ``validate``/``test``/``predict`` and demanding
-                them there would reject configs that are perfectly valid for
-                the stage actually being run.
+            trainer: The active trainer.
+            pl_module: The model being trained; must expose ``eval_config``
+                (an :class:`SREvalConfig`).
+            stage: Lightning trainer stage. Only ``"fit"`` is checked — the
+                monitored tags are val-loop metrics, so they are never logged
+                under ``validate``/``test``/``predict`` and demanding them
+                there would reject configs that are perfectly valid for the
+                stage actually being run.
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a
@@ -685,20 +635,17 @@ class SRPredictionWriter(BasePredictionWriter):
         ``batch`` itself, which is a bare LR tensor with no filename.
 
         Args:
-            trainer (lightning.Trainer): The active trainer.
-            pl_module (lightning.LightningModule): The model being run
-                (unused).
-            prediction (torch.Tensor): ``SRLightning.predict_step`` output —
-                SR RGB batch, ``float32`` in ``[0, 1]``, shape
-                ``(B, 3, H, W)``.
-            batch_indices (Sequence[int] | None): Dataset indices of the
-                samples in this batch, supplied by Lightning's predict loop.
-            batch (Any): The input LR batch (unused — filenames come from
-                ``batch_indices``, not the tensor itself).
-            batch_idx (int): Index of the batch within the current
-                dataloader (unused).
-            dataloader_idx (int): Index of the predict loader — used only
-                when ``trainer.predict_dataloaders`` is a list.
+            trainer: The active trainer.
+            pl_module: Unused.
+            prediction: ``SRLightning.predict_step`` output — SR RGB batch,
+                ``float32`` in ``[0, 1]``, shape ``(B, 3, H, W)``.
+            batch_indices: Dataset indices of the samples in this batch,
+                supplied by Lightning's predict loop.
+            batch: Unused — filenames come from ``batch_indices``, not the
+                tensor itself.
+            batch_idx: Unused.
+            dataloader_idx: Index of the predict loader — used only when
+                ``trainer.predict_dataloaders`` is a list.
         """
         loader = trainer.predict_dataloaders
         if isinstance(loader, list | tuple):

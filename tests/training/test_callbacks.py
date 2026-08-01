@@ -311,11 +311,9 @@ def _make_bare_trainer() -> lightning.Trainer:
     )
 
 
-# _make_bare_trainer logs a "GPU available but not used" PossibleUserWarning on
-# this CUDA-equipped dev box (accelerator="cpu" is deliberate — matches how the
-# templates run in CI, which has no GPU); harmless environment noise, not a
-# library-health signal, but the strict global `filterwarnings=error` config
-# would otherwise fail these tests on it. Same pattern as test_integration.py.
+# _make_bare_trainer's accelerator="cpu" (matching CI, which has no GPU) logs a
+# "GPU available but not used" warning on a CUDA dev box; harmless, but the
+# strict global filterwarnings=error would fail on it otherwise.
 _ignore_gpu_warning = pytest.mark.filterwarnings(
     "ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning"
 )

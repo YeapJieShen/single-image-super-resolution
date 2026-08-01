@@ -41,10 +41,6 @@ def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
     Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
     across all platforms, mirroring :func:`sisr.datasets.srcnn._process_hr_image`.
 
-    Args:
-        path (Path): File path of the high-resolution image.
-        idx (int): This image's position in the manifest — determines its LMDB key.
-
     Returns:
         A single-element list ``[(f'hr_{idx:08d}', header + raw_bytes)]`` where
         *header* is :data:`_SHAPE_HEADER`-packed ``(h, w)`` and *raw_bytes* is
@@ -85,29 +81,25 @@ class TrainDataset(SRDataset):
         Adversarial Network (https://arxiv.org/pdf/1609.04802)
 
     Args:
-        img_dir (str | Path): Directory containing the high-resolution images.
-        scale (int): Upscaling factor. ``hr_crop_size`` must be divisible by it.
-        hr_crop_size (int): Side length of the square HR crop.
-        crops_per_image (int): Number of random crops drawn per image per
-            epoch (the dataset length is ``len(images) * crops_per_image``).
-            Each draw re-reads the same cached array (a cheap mmap access, not
-            a decode) and takes an independently random crop. Defaults to ``1``.
-        resize_backend (ResizeBackend): ``'matlab'`` (default) — MATLAB-
-            compatible antialiased bicubic, comparable to published paper
-            numbers. ``'cv2'`` — ``cv2.INTER_CUBIC``, no antialiasing; kept
-            so LMDB caches built before this module existed stay
-            reproducible. See :mod:`sisr.imresize`. Only the LR derivation
-            is affected — the HR cache stores raw pixels regardless, so
-            switching backends never invalidates it.
-        use_tqdm (bool): Whether to display a progress bar during the LMDB
-            build. Defaults to ``False``.
-        cache_dir (str | Path | None): Directory in which to store the LMDB
-            cache. Defaults to ``img_dir / '.lmdb_cache'``.
-        build_num_workers (int | None): Number of worker processes for the
-            one-time LMDB build. ``None`` (default) uses
-            ``min(os.cpu_count() or 1, num_images)``; a value that resolves to
-            ``<= 1`` effective workers runs an inline, no-subprocess build.
-            Only affects cache construction, not data loading.
+        img_dir: Directory of HR images.
+        scale: Upscaling factor. ``hr_crop_size`` must be divisible by it.
+        hr_crop_size: Side length of the square HR crop.
+        crops_per_image: Random crops drawn per image per epoch (the dataset
+            length is ``len(images) * crops_per_image``). Each draw re-reads
+            the same cached array (a cheap mmap access, not a decode) and
+            takes an independently random crop. Defaults to ``1``.
+        resize_backend: ``'matlab'`` (default) — MATLAB-compatible
+            antialiased bicubic, comparable to published paper numbers.
+            ``'cv2'`` — no antialiasing; kept so LMDB caches built before
+            this module existed stay reproducible. See :mod:`sisr.imresize`.
+            Only the LR derivation is affected — the HR cache stores raw
+            pixels regardless, so switching backends never invalidates it.
+        use_tqdm: Whether to display a progress bar during the LMDB build.
+        cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
+        build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
+            1, num_images)``; ``<= 1`` effective workers runs an inline,
+            no-subprocess build. Only affects cache construction, not data
+            loading.
 
     Raises:
         ValueError: If no images are found, or ``hr_crop_size`` is not

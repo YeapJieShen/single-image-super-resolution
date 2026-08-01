@@ -10,23 +10,19 @@ from sisr.models.base import SRModel
 
 
 class SRCNN(SRModel):
-    """SRCNN (Super-Resolution Convolutional Neural Network) model for single image
-    super-resolution. The architecture consists of three main parts: feature extraction,
-    non-linear mapping, and reconstruction.
+    """SRCNN: feature extraction, non-linear mapping, and reconstruction, in three conv stacks.
 
     Reference:
     - Image Super-Resolution Using Deep Convolutional Networks: https://arxiv.org/pdf/1501.00092
 
     Args:
-        num_channels (int): The number of channels in the input and output images (e.g., 3 for
-            RGB, 1 for Y channel).
-        num_filters (tuple[int, ...]): A tuple containing the number of filters for each
-            convolutional layer (e.g., (64, 32, 1) for the original SRCNN architecture).
-        kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each
-            convolutional layer (e.g., (9, 1, 5) for the original SRCNN architecture).
-        padding (str | int): The padding type or size for the convolutional layers.
-            Can be 'valid', 'same', or an integer specifying the number of pixels to pad.
-            Default is 'valid'.
+        num_channels: Input/output channel count (e.g. 3 for RGB, 1 for Y).
+        num_filters: Filter count per conv layer (e.g. ``(64, 32, 1)`` for
+            the original architecture).
+        kernel_sizes: Kernel size per conv layer (e.g. ``(9, 1, 5)`` for the
+            original architecture).
+        padding: ``'valid'``, ``'same'``, or an explicit pixel count.
+            Defaults to ``'valid'``.
     """
 
     def __init__(
@@ -75,18 +71,7 @@ class SRCNN(SRModel):
         )
 
     def _check_architecture(self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]):
-        """Validates the architecture parameters for the SRCNN model.
-
-        Args:
-            num_filters (tuple[int, ...]): A tuple containing the number of filters for each
-                convolutional layer.
-            kernel_sizes (tuple[int, ...]): A tuple containing the kernel sizes for each
-                convolutional layer.
-
-        Raises:
-            ValueError: If num_filters or kernel_sizes are not tuples, if they have different
-                lengths, or if any of their elements are not positive integers.
-        """
+        """Validates num_filters/kernel_sizes are same-length positive-int tuples."""
         for i, name in zip(
             [num_filters, kernel_sizes], ["num_filters", "kernel_sizes"], strict=False
         ):
@@ -115,15 +100,11 @@ class SRCNN(SRModel):
             )
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
-        """Initializes the weights of the convolutional layers using a normal distribution and
-        sets the biases to zero. Following the initialization method described in the original
-        SRCNN paper (https://arxiv.org/pdf/1501.00092).
+        """Gaussian weight init + zero biases, per the SRCNN paper (https://arxiv.org/pdf/1501.00092).
 
         Args:
-            mean (float): The mean of the normal distribution for weight initialization.
-                Default is 0
-            std (float): The standard deviation of the normal distribution for weight
-                initialization. Default is 0.01
+            mean: Mean of the weight-init normal distribution.
+            std: Standard deviation of the weight-init normal distribution.
         """
         for module in self.modules():
             if isinstance(module, torch.nn.Conv2d):
@@ -136,7 +117,7 @@ class SRCNN(SRModel):
         clamp_output: bool = False,
         clamp_minmax: tuple[float, float] = (0.0, 1.0),
     ) -> torch.Tensor:
-        """Forward pass of the SRCNN model.
+        """Forward pass: feature extraction -> non-linear mapping -> reconstruction.
 
         clamp_output is a direct-call convenience for offline inference: the
         SRLightning training and validation paths always call model(x) without
@@ -144,15 +125,14 @@ class SRCNN(SRModel):
         calls used to clip the raw output into a displayable range.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, num_channels, height, width)
-            clamp_output (bool): Whether to clamp the output to clamp_minmax. Only
-                honoured on direct model(x, clamp_output=True) calls; the SRLightning
-                pipeline never sets it. Default is False.
-            clamp_minmax (tuple[float, float]): The minimum and maximum values for clamping
-                the output. Default is (0.0, 1.0).
+            x: Input tensor, shape ``(B, num_channels, H, W)``.
+            clamp_output: Whether to clamp the output to clamp_minmax. Only
+                honoured on direct ``model(x, clamp_output=True)`` calls; the
+                SRLightning pipeline never sets it.
+            clamp_minmax: Min/max values for clamping the output.
 
         Returns:
-            torch.Tensor: Output tensor of shape (batch_size, num_channels, height, width)
+            Output tensor, same shape as *x*.
         """
         x = self.feat(x)
         x = self.mapping(x)
