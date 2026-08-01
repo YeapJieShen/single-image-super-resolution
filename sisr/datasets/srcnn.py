@@ -44,10 +44,6 @@ def _check_blur_sigma(resize_backend: ResizeBackend, blur_sigma: float | None) -
     antialiasing of its own, so it falls back to the historical default of
     ``1.0`` when unset.
 
-    Args:
-        resize_backend: ``'matlab'`` or ``'cv2'``.
-        blur_sigma: The value passed in, or ``None``.
-
     Returns:
         ``None`` for ``'matlab'``; a concrete sigma for ``'cv2'``.
 
@@ -72,20 +68,8 @@ def _grid_dims(
     """Returns the ``(n_rows, n_cols)`` sliding-window sub-image grid for one image.
 
     Single source of truth for the deterministic patch grid: :func:`_iter_patch_origins`
-    (the enumeration used by tests and the module docstring) and
-    :meth:`TrainDataset.__getitem__` (an O(1) index -> origin lookup, since the
-    cache no longer stores one entry per patch) both derive positions from
-    this, so they can never silently disagree and misalign an index.
-
-    Args:
-        height (int): Full image height in pixels.
-        width (int): Full image width in pixels.
-        scale (int): Downscaling factor; each axis is cropped to a multiple of it.
-        sub_img_size (int): Side length of the square sub-image window.
-        stride (int): Step size of the sliding window.
-
-    Returns:
-        ``(n_rows, n_cols)`` — the number of valid window positions per axis.
+    and :meth:`TrainDataset.__getitem__`'s O(1) index -> origin lookup both derive
+    positions from this, so they can never silently disagree and misalign an index.
     """
     h_crop = height - (height % scale)
     w_crop = width - (width % scale)
@@ -106,16 +90,6 @@ def _iter_patch_origins(
     Built on :func:`_grid_dims` so this enumeration and
     :meth:`TrainDataset.__getitem__`'s O(1) index -> origin math can never
     disagree about ordering or count.
-
-    Args:
-        height (int): Full image height in pixels.
-        width (int): Full image width in pixels.
-        scale (int): Downscaling factor; each axis is cropped to a multiple of it.
-        sub_img_size (int): Side length of the square sub-image window.
-        stride (int): Step size of the sliding window.
-
-    Yields:
-        ``(top, left)`` pixel offsets of each sub-image's top-left corner.
     """
     n_rows, n_cols = _grid_dims(height, width, scale, sub_img_size, stride)
     for row in range(n_rows):
@@ -136,17 +110,6 @@ def _degrade(
     formulation). Shared by :class:`TrainDataset` (per sub-image, at read
     time) and :class:`ValidationDataset` (per full image) so the degradation
     recipe cannot drift between the two.
-
-    Args:
-        hr_arr (np.ndarray): ``(H, W, 3)`` uint8 RGB array.
-        scale (int): Downscaling factor.
-        kernel (int | None): Odd Gaussian kernel size, or ``None`` on ``'matlab'``.
-        blur_sigma (float | None): Gaussian sigma paired with *kernel*; ignored if
-            *kernel* is ``None``.
-        resize_backend (ResizeBackend): ``'matlab'`` or ``'cv2'``.
-
-    Returns:
-        The degraded array, same ``(H, W, 3)`` shape as *hr_arr*.
     """
     h, w = hr_arr.shape[:2]
     to_degrade = hr_arr
@@ -165,10 +128,6 @@ def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
     LR derivation both moved to :meth:`TrainDataset.__getitem__`, so the build
     only has to decode once per image — independent of
     ``subimg_size``/``stride``/``scale``.
-
-    Args:
-        path (Path): File path of the high-resolution image.
-        idx (int): This image's position in the manifest — determines its LMDB key.
 
     Returns:
         A single-element list ``[(f'hr_{idx:08d}', raw_bytes)]`` where
@@ -205,36 +164,28 @@ class TrainDataset(SRDataset):
         https://arxiv.org/pdf/1501.00092
 
     Args:
-        img_dir (str | Path): Directory containing the high-resolution
-            images.
-        subimg_size (int): Spatial size of the square sub-images to extract.
-        stride (int): Step size of the sliding window used for sub-image
-            extraction.
-        scale (int): Downscaling factor for generating low-resolution
-            sub-images.
-        blur_sigma (float | None): Sigma of the Gaussian blur applied before
-            downsampling. Only meaningful (and must be set) on the ``'cv2'``
-            backend, which has no antialiasing of its own; falls back to the
-            historical default of ``1.0`` if left ``None`` there. Must be
-            ``None`` on ``'matlab'`` (the default) — its kernel widening
-            already is the antialiasing low-pass, so an explicit blur on top
-            only double-blurs; passing a value raises ``ValueError``.
-        resize_backend (ResizeBackend): ``'matlab'`` (default) — MATLAB-
-            compatible antialiased bicubic, comparable to published paper
-            numbers. ``'cv2'`` — ``cv2.INTER_CUBIC``, no antialiasing;
-            kept so LMDB caches built before this module existed stay
-            reproducible. See :mod:`sisr.imresize`. Only the LR derivation
-            is affected — the HR cache stores raw pixels regardless, so
+        img_dir: Directory of HR images.
+        subimg_size: Spatial size of the square sub-images to extract.
+        stride: Step size of the sliding window used for sub-image extraction.
+        scale: Downscaling factor for generating LR sub-images.
+        blur_sigma: Only meaningful (and must be set) on the ``'cv2'``
+            backend, which has no antialiasing of its own; falls back to
+            ``1.0`` if left ``None`` there. Must be ``None`` on ``'matlab'``
+            (the default) — its kernel widening already is the antialiasing
+            low-pass, so an explicit blur on top only double-blurs; passing
+            a value raises ``ValueError``.
+        resize_backend: ``'matlab'`` (default) — MATLAB-compatible
+            antialiased bicubic, comparable to published paper numbers.
+            ``'cv2'`` — no antialiasing; kept only so pre-existing LMDB
+            caches stay reproducible. See :mod:`sisr.imresize`. Only affects
+            LR derivation — the HR cache stores raw pixels regardless, so
             switching backends never invalidates it.
-        use_tqdm (bool): Whether to display a progress bar during the LMDB
-            build.  Defaults to ``False``.
-        cache_dir (str | Path | None): Directory in which to store the
-            LMDB cache.  Defaults to ``img_dir / '.lmdb_cache'``.
-        build_num_workers (int | None): Number of worker processes for the
-            one-time LMDB build.  ``None`` (default) uses
-            ``min(os.cpu_count() or 1, num_images)``; a value that resolves to
-            ``<= 1`` effective workers runs an inline, no-subprocess build.
-            Only affects cache construction, not data loading.
+        use_tqdm: Whether to display a progress bar during the LMDB build.
+        cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
+        build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
+            1, num_images)``; ``<= 1`` effective workers runs an inline,
+            no-subprocess build. Only affects cache construction, not data
+            loading.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``, or if

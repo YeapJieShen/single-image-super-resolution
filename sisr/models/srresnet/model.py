@@ -12,14 +12,12 @@ from sisr.models.base import SRModel
 
 
 class SRResidualBlock(torch.nn.Module):
-    """A single residual block used in SRResNet.
-    Each block applies two convolutional layers with batch normalization,
-    and adds the input (identity) as a skip connection.
+    """A single residual block: two conv+BN layers with an identity skip connection.
 
     Args:
-        channels (int): Number of input and output channels.
-        kernel_size (int): Kernel size for both convolutional layers.
-        padding (str | int): Padding for the convolutional layers. Default is 'same'.
+        channels: Input/output channel count.
+        kernel_size: Kernel size for both conv layers.
+        padding: Padding for the conv layers. Defaults to ``'same'``.
     """
 
     def __init__(self, channels: int, kernel_size: int, padding: str | int = "same"):
@@ -37,13 +35,13 @@ class SRResidualBlock(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the residual block.
+        """Forward pass: identity + two conv+BN layers.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, channels, height, width).
+            x: Input tensor, shape ``(B, channels, H, W)``.
 
         Returns:
-            torch.Tensor: Output tensor of shape (batch_size, channels, height, width).
+            Output tensor, same shape as *x*.
         """
         identity = x
         x = self.block1(x)
@@ -52,13 +50,12 @@ class SRResidualBlock(torch.nn.Module):
 
 
 class SRUpsampleBlock(torch.nn.Module):
-    """An upsampling block used in SRResNet that increases spatial resolution using sub-pixel
-    convolution.
+    """Sub-pixel convolution upsampling block: conv -> PixelShuffle -> PReLU.
 
     Args:
-        channels (int): Number of input channels.
-        scale (int): Upscaling factor. Default is 2.
-        kernel_size (int): Kernel size for the convolutional layer. Default is 3.
+        channels: Input channel count.
+        scale: Upscaling factor. Defaults to ``2``.
+        kernel_size: Kernel size for the conv layer. Defaults to ``3``.
     """
 
     def __init__(self, channels: int, scale: int = 2, kernel_size: int = 3):
@@ -73,35 +70,30 @@ class SRUpsampleBlock(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the upsample block.
+        """Forward pass.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, channels, height, width).
+            x: Input tensor, shape ``(B, channels, H, W)``.
 
         Returns:
-            torch.Tensor: Output tensor with height and width scaled by the upscaling factor.
+            Output tensor with H/W scaled by *scale*.
         """
         return self.upsample(x)
 
 
 class SRResNet(SRModel):
-    """SRResNet (Super-Resolution Residual Network) model for single image super-resolution.
-    The architecture consists of an initial feature extraction block, a series of residual blocks
-    with a skip connection, sub-pixel upsample blocks, and a final reconstruction layer.
+    """SRResNet: head conv, residual blocks with a skip connection, sub-pixel upsampling, tail conv.
 
     Reference:
     - Photo-Realistic Single Image Super-Resolution Using a Generative Adversarial Network: https://arxiv.org/pdf/1609.04802
 
     Args:
-        scale (int): The upscaling factor. Must be a power of 2.
-        in_out_channels (int): Number of channels in the input and output images (e.g., 3 for
-            RGB). Default is 3.
-        hidden_channel (int): Number of feature channels used in the residual and upsample
-            blocks. Default is 64.
-        kernel_sizes (tuple[int, ...]): Kernel sizes for the head, residual, and tail
-            convolutional layers. Default is (9, 3, 9).
-        num_residual_blocks (int): Number of residual blocks in the network. Default is 16.
-        padding (str | int): Padding for the convolutional layers. Default is 'same'.
+        scale: Upscaling factor. Must be a power of 2.
+        in_out_channels: Input/output channel count (e.g. 3 for RGB).
+        hidden_channel: Feature channel count used in the residual/upsample blocks.
+        kernel_sizes: Kernel sizes for the head, residual, and tail conv layers.
+        num_residual_blocks: Number of residual blocks in the network.
+        padding: Padding for the conv layers. Defaults to ``'same'``.
     """
 
     def __init__(
@@ -162,31 +154,14 @@ class SRResNet(SRModel):
         )
 
     def _check_scale(self, scale: int):
-        """Validates that the scale factor is a power of 2.
-
-        Args:
-            scale (int): The upscaling factor.
-
-        Raises:
-            ValueError: If scale is not a positive integer or not a power of 2.
-        """
+        """Validates that scale is a positive power of 2."""
         if not isinstance(scale, int) or scale < 1:
             raise ValueError(f"scale must be a positive integer. Got {scale}.")
         if (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
 
     def _check_architecture(self, kernel_sizes: tuple[int, ...], num_residual_blocks: int):
-        """Validates the architecture parameters for the SRResNet model.
-
-        Args:
-            kernel_sizes (tuple[int, ...]): Kernel sizes for the head, residual,
-                and tail convolutional layers.
-            num_residual_blocks (int): Number of residual blocks in the network.
-
-        Raises:
-            ValueError: If kernel_sizes is not a length-3 tuple of positive
-                integers, or if num_residual_blocks is not a positive integer.
-        """
+        """Validates kernel_sizes (length-3, positive ints) and num_residual_blocks (positive)."""
         if not isinstance(kernel_sizes, tuple):
             raise ValueError(f"kernel_sizes must be a tuple. Got {type(kernel_sizes)}.")
         if len(kernel_sizes) != 3:
@@ -209,7 +184,7 @@ class SRResNet(SRModel):
         clamp_output: bool = False,
         clamp_minmax: tuple[float, float] = (-1.0, 1.0),
     ) -> torch.Tensor:
-        """Forward pass of the SRResNet model.
+        """Forward pass: head -> residual blocks -> upsample -> tail.
 
         clamp_output is a direct-call convenience for offline inference: the
         SRLightning training and validation paths always call model(x) without
@@ -217,18 +192,16 @@ class SRResNet(SRModel):
         calls used to clip the raw output into a displayable range.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, in_out_channels, height, width).
-            clamp_output (bool): Whether to clamp the output to clamp_minmax. Only
-                honoured on direct model(x, clamp_output=True) calls; the SRLightning
-                pipeline never sets it. Default is False.
-            clamp_minmax (tuple[float, float]): Bounds for clamping. Defaults to the
-                paper's ``[-1, 1]`` output range (Ledig et al. §3.2, via
-                ``RGBSignedOutputProcessor``); pass ``(0.0, 1.0)`` for weights trained
-                under ``RGBProcessor``.
+            x: Input tensor, shape ``(B, in_out_channels, H, W)``.
+            clamp_output: Whether to clamp the output to clamp_minmax. Only
+                honoured on direct ``model(x, clamp_output=True)`` calls; the
+                SRLightning pipeline never sets it.
+            clamp_minmax: Bounds for clamping. Defaults to the paper's ``[-1, 1]``
+                output range (Ledig et al. §3.2, via ``RGBSignedOutputProcessor``);
+                pass ``(0.0, 1.0)`` for weights trained under ``RGBProcessor``.
 
         Returns:
-            torch.Tensor: Output tensor of shape (batch_size, in_out_channels, height * scale,
-            width * scale).
+            Output tensor, shape ``(B, in_out_channels, H*scale, W*scale)``.
         """
         x = self.head(x)
         identity = x

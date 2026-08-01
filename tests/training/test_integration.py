@@ -70,9 +70,8 @@ def _make_datamodule(image_dir: Path) -> SRDataModule:
 
 
 # num_workers=0 (tiny fixture) and accelerator="cpu" on a CUDA box both raise
-# lightning PossibleUserWarnings — config/environment noise, not a library-health
-# signal. Silence them for THIS test only so the strict global filter stays honest
-# and the test fails specifically on the real FutureWarning when the filter is stale.
+# PossibleUserWarnings — environment noise, not a library-health signal — so
+# silence them for this test only, leaving the strict global filter honest elsewhere.
 @pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
 def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
     tiny_rgb_image_dir: Path,

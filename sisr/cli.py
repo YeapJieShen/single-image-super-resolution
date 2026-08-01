@@ -64,6 +64,8 @@ class _ExportTrainer(Trainer):
         """Export ``model`` to ONNX — thin wrapper around ``sisr.export.to_onnx``.
 
         Args:
+            model: Model to export.
+            datamodule: Unused — see the comment below.
             output_path: Destination ``.onnx`` file path.
             ckpt_path: Optional checkpoint whose weights are loaded into
                 ``model`` before export.

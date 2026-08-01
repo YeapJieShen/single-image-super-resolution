@@ -122,14 +122,6 @@ class SRLightning(lightning.LightningModule):
 
         None values are dropped (they add noise without aiding comparison).
         Class objects are reduced to their ``__name__``.
-
-        Args:
-            hparams: Nested mapping of hparams (may contain dicts, lists,
-                tuples, scalars, or class objects).
-            sep: Separator used to join nested keys. Defaults to ``'/'``.
-
-        Returns:
-            Flat dict with ``sep``-joined keys and scalar leaves.
         """
         result = {}
 
@@ -157,18 +149,9 @@ class SRLightning(lightning.LightningModule):
     def _build_psnr_tensors(
         self, sr: torch.Tensor, hr: torch.Tensor
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Pre-compute (sr, hr) tensor pairs for every tracked PSNR key.
+        """Pre-computes (sr, hr) RGB tensor pairs for every tracked PSNR key.
 
         Colorspace conversions are performed at most once per call.
-
-        Args:
-            sr: SR tensor of shape ``(B, 3, H, W)`` in RGB.
-            hr: HR tensor of shape ``(B, 3, H, W)`` in RGB.
-
-        Returns:
-            Mapping from PSNR key (``'RGB'``, ``'Y'``, ``'Cb'``, ...) to
-            ``(sr_subset, hr_subset)`` tensor pair ready for PSNR
-            computation.
         """
         keys = set(self.eval_config.psnr_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -197,13 +180,6 @@ class SRLightning(lightning.LightningModule):
         mean, so the result is invariant to the val ``batch_size``. This differs
         from pooling the whole batch into one PSNR — the deviation a stateful
         ``PeakSignalNoiseRatio`` with default ``dim`` would introduce.
-
-        Args:
-            sr: SR tensor of shape ``(B, C, H, W)`` in ``[0, 1]``.
-            hr: HR tensor of the same shape.
-
-        Returns:
-            Scalar tensor — the batch mean of the per-image PSNRs.
         """
         return torchmetrics.functional.image.peak_signal_noise_ratio(
             sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"

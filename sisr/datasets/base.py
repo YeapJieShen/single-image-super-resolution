@@ -57,10 +57,6 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         are kept — an allowlist rather than the old ``glob('*.*')``, which
         matched non-image files and dropped extensionless ones by accident.
 
-        Args:
-            img_dir (str | Path): Directory containing the high-resolution
-                images.
-
         Raises:
             ValueError: If no allowlisted image files are found in ``img_dir``.
         """
@@ -75,14 +71,7 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
 
     @staticmethod
     def _load_rgb(path: str | Path) -> np.ndarray:
-        """Load an image file as an ``(H, W, 3)`` uint8 RGB array.
-
-        Args:
-            path (str | Path): Image file path.
-
-        Returns:
-            The decoded image as an HWC uint8 RGB ``numpy`` array.
-        """
+        """Load an image file as an ``(H, W, 3)`` uint8 RGB array."""
         return np.array(Image.open(path).convert("RGB"))
 
     @staticmethod
@@ -91,14 +80,7 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
 
         Byte-identical replacement for the removed AlbumentationsX
         ``ToFloat(255.0)`` + ``ToTensorV2()`` chain (probed against
-        albumentations 2.1.0 with this project's exact call-site
-        parameters).
-
-        Args:
-            image: ``uint8`` array, HWC.
-
-        Returns:
-            ``float32`` tensor, CHW, values in ``[0, 1]``.
+        albumentations 2.1.0 with this project's exact call-site parameters).
         """
         return torch.from_numpy(image).permute(2, 0, 1).float().div(255.0)
 
