@@ -99,7 +99,7 @@ def test_srresnet_config_resolves_in_process():
     cli = _resolve("--config", str(SRRESNET_TEMPLATE))
     m = cli.model
     assert isinstance(m.model, SRResNet)
-    # P2.10: the template ships the paper's [-1, 1] HR/target range.
+    # The template ships the paper's [-1, 1] HR/target range.
     assert isinstance(m.processor, RGBSignedOutputProcessor)
     assert isinstance(m.training_config, SRResNetTrainingConfig)
     assert isinstance(m.eval_config, SRResNetEvalConfig)
@@ -140,7 +140,7 @@ def test_test_subcommand_help_exposes_ckpt_path_in_process(capsys, monkeypatch):
 
 
 def test_export_subcommand_help_exposes_its_args_in_process(capsys, monkeypatch):
-    """`export --help` documents --output_path, --ckpt_path, --opset_version (INIT.7).
+    """`export --help` documents --output_path, --ckpt_path, --opset_version.
 
     trainer_class is left at SRLightningCLI's default (_ExportTrainer) —
     building this parser never calls sisr.export.to_onnx's body (only inspects

@@ -242,7 +242,7 @@ def test_build_metric_tensors_rgb_only_when_neither_metric_requests_y():
 
 
 def test_build_metric_tensors_union_of_psnr_and_ssim_keys():
-    """Regression (P3.8): a colorspace requested only by ssim_channels (not
+    """Regression: a colorspace requested only by ssim_channels (not
     psnr_channels) must still get a tensor entry — the tensor map is built
     from the *union* of psnr_keys and ssim_keys, not psnr_keys alone, so
     SSIM-only keys aren't silently missing."""
@@ -295,7 +295,7 @@ def test_build_metric_tensors_ycbcr_does_conversion():
 
 
 def test_build_metric_tensors_ycbcr_uses_studio_range_not_full_range():
-    """Regression (P2.8): the metric-side YCbCr conversion must be BT.601
+    """Regression: the metric-side YCbCr conversion must be BT.601
     studio range, not the full-range conversion SRProcessor subclasses train
     in — locked by comparing against sisr.colorspace directly."""
     from sisr.colorspace import rgb_to_ycbcr, rgb_to_ycbcr_studio
@@ -465,7 +465,7 @@ def test_srlightning_rejects_non_srprocessor():
 
 
 def test_srlightning_construction_rejects_mismatched_num_channels():
-    """Regression (INIT.16): SRCNNTrainingConfig.validate_against catches a
+    """Regression: SRCNNTrainingConfig.validate_against catches a
     num_channels/processor mismatch at construction, not silently at train time."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     with pytest.raises(ValueError, match="num_channels"):
@@ -614,7 +614,7 @@ def test_saved_tb_hparams_contain_processor_name():
 
 
 # ---------------------------------------------------------------------------
-# predict_rgb public inference seam (P2.1)
+# predict_rgb public inference seam
 # ---------------------------------------------------------------------------
 
 
@@ -648,14 +648,14 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
 
 
 # ---------------------------------------------------------------------------
-# P4.14 — metric-path clamp to [0, 1], applied once in _forward_lr
+# Metric-path clamp to [0, 1], applied once in _forward_lr
 # ---------------------------------------------------------------------------
 
 
 def _overshooting_rgb_lit() -> SRLightning:
     """SRCNN + RGBProcessor (identity reconstruct) with the tail conv biased
     hugely positive, so sr_rgb genuinely overshoots [0, 1] on any input — the
-    scenario the P4.14 clamp exists for."""
+    scenario the metric-path clamp exists for."""
     model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
     torch.nn.init.constant_(model.recon.bias, 5.0)
     return SRLightning(
@@ -668,7 +668,7 @@ def _overshooting_rgb_lit() -> SRLightning:
 
 
 def test_step_clamps_sr_rgb_but_not_the_loss_target():
-    """Regression (P4.14): sr_rgb returned by _step is clamped to [0, 1] even
+    """Regression: sr_rgb returned by _step is clamped to [0, 1] even
     though the model genuinely overshoots, while the loss — read from
     sr_model_out, never sr_rgb — is exactly the unclamped MSE. A clamp that
     leaked into the loss would kill gradients on saturated pixels (constraint
@@ -694,7 +694,7 @@ def test_step_clamps_sr_rgb_but_not_the_loss_target():
 
 
 def test_step_psnr_matches_hand_clamped_reference_not_raw_output():
-    """Regression (P4.14): PSNR scored on the validation_step path must equal
+    """Regression: PSNR scored on the validation_step path must equal
     a hand-clamped reference computed from the raw model output, not the PSNR
     the unclamped output would give — proving overshoot is being penalised
     away rather than silently scored."""
@@ -714,7 +714,7 @@ def test_step_psnr_matches_hand_clamped_reference_not_raw_output():
 
 
 def test_predict_rgb_clamps_for_benchmark_logger_consumer():
-    """Regression (P4.14): predict_rgb — the seam BenchmarkImageLogger reads
+    """Regression: predict_rgb — the seam BenchmarkImageLogger reads
     for benchmark/test-set metrics — must return the same clamped sr_rgb as
     the validation_step path, not a re-implemented, unclamped forward."""
     lit = _overshooting_rgb_lit()
@@ -738,12 +738,12 @@ def test_predict_step_output_also_clamped_via_shared_forward_lr():
 
 
 # ---------------------------------------------------------------------------
-# P2.2 — no dead stateful metric accumulator
+# No dead stateful metric accumulator
 # ---------------------------------------------------------------------------
 
 
 def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
-    """Regression (P2.2): PSNR/SSIM are computed via torchmetrics.functional,
+    """Regression: PSNR/SSIM are computed via torchmetrics.functional,
     so SRLightning registers no stateful torchmetrics.Metric accumulators that
     would grow unread and unreset across a validation run."""
     stateful = [m for m in srcnn_y_lit.modules() if isinstance(m, torchmetrics.Metric)]
@@ -753,12 +753,12 @@ def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
 
 
 # ---------------------------------------------------------------------------
-# P2.4 — nested config dataclasses expand into HParams columns
+# Nested config dataclasses expand into HParams columns
 # ---------------------------------------------------------------------------
 
 
 def test_tb_hparams_expand_nested_config_fields():
-    """Regression (P2.4): training_config/eval_config dataclasses expand into
+    """Regression: training_config/eval_config dataclasses expand into
     individual HParams columns (via dataclasses.asdict) using the '/' separator,
     instead of a single stringified blob under the bare key — in the TB-only
     flattened view, since self.hparams itself must stay nested (see below)."""
@@ -804,12 +804,12 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
 
 
 # ---------------------------------------------------------------------------
-# P2.6 — val PSNR is the per-image mean, invariant to batch size
+# val PSNR is the per-image mean, invariant to batch size
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# predict_step — LR-only inference seam (P3.7)
+# predict_step — LR-only inference seam
 # ---------------------------------------------------------------------------
 
 
@@ -864,7 +864,7 @@ def test_predict_step_dataloader_idx_default_is_ignored(srcnn_rgb_lit: SRLightni
 
 
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
-    """Regression (P2.6): PSNR for a batch equals the mean of the per-image
+    """Regression: PSNR for a batch equals the mean of the per-image
     PSNRs (SR-standard reduction, invariant to val batch_size), not the
     batch-pooled PSNR that a default-dim PeakSignalNoiseRatio would give."""
     from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_fn

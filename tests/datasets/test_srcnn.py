@@ -215,7 +215,7 @@ def test_grid_index_mapping_matches_iteration_order(tiny_rgb_image_dir: Path):
     divmod over _img_offsets/_img_n_cols) must agree, position-for-position,
     with _iter_patch_origins' explicit enumeration across every image in a
     multi-image dataset -- so an index can never silently point at the wrong
-    sub-image (the single-source-of-truth guarantee P2.5 established)."""
+    sub-image (the single-source-of-truth guarantee this design established)."""
     import bisect
 
     from sisr.datasets.srcnn import _iter_patch_origins
@@ -321,7 +321,7 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# SRDataset contract (P3.6 / P5.4)
+# SRDataset contract
 # ---------------------------------------------------------------------------
 
 

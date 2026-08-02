@@ -49,7 +49,7 @@ def test_index_images_populates_img_paths_as_paths(tmp_path: Path):
 
 
 def test_index_images_skips_non_image_and_extensionless_files(tmp_path: Path):
-    """P5.4: the allowlist keeps only real image extensions — a .txt file and
+    """The allowlist keeps only real image extensions — a .txt file and
     an extensionless file are excluded (the old glob('*.*') matched the .txt
     and dropped the extensionless one silently)."""
     _write_png(tmp_path / "img_00.png")

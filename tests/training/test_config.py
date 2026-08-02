@@ -65,7 +65,7 @@ def test_sr_eval_config_field_names():
 
 
 def test_eval_config_rejects_unknown_psnr_channel():
-    """Regression (P2.3): a colorspace outside {RGB, YCbCr} fails fast at
+    """Regression: a colorspace outside {RGB, YCbCr} fails fast at
     construction with an actionable message — not an opaque KeyError deep in
     SRLightning."""
     SREvalConfig(psnr_channels=["RGB", "YCbCr"])  # valid — must not raise
@@ -74,7 +74,7 @@ def test_eval_config_rejects_unknown_psnr_channel():
 
 
 def test_eval_config_rejects_unknown_psnr_channel_still_raises_alongside_bare_y():
-    """Regression (P2.9): adding bare single-channel entries to the allowlist
+    """Regression: adding bare single-channel entries to the allowlist
     must not widen it into accepting arbitrary strings — 'HSV' stays invalid
     even though 'Y' is now first-class."""
     SREvalConfig(psnr_channels=["RGB", "Y"])  # valid — must not raise
@@ -83,7 +83,7 @@ def test_eval_config_rejects_unknown_psnr_channel_still_raises_alongside_bare_y(
 
 
 def test_eval_config_rejects_unknown_ssim_channel():
-    """(P3.8): ssim_channels reuses the same allowlist as psnr_channels, and
+    """ssim_channels reuses the same allowlist as psnr_channels, and
     the error names the offending field so it's actionable."""
     SREvalConfig(ssim_channels=["RGB", "Y", "YCbCr"])  # valid — must not raise
     with pytest.raises(ValueError, match="ssim_channels"):
@@ -100,7 +100,7 @@ def test_eval_config_rejects_unknown_channel_in_either_field_independently():
 
 
 # ---------------------------------------------------------------------------
-# psnr_keys (INIT.16) — the public seam B1/C1 depend on
+# psnr_keys — the public seam SRLightning and BenchmarkImageLogger depend on
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ def test_psnr_keys_matches_legacy_loop_derivation(psnr_channels, separate_psnr):
     """psnr_keys must reproduce exactly the loop SRLightning.__init__ used to
     inline (self._psnr_keys) before this property existed. Downstream PRs
     (benchmark PSNR-key selection, TensorBoard tag rename) depend on this
-    exact ordering. Bare single-channel entries (P2.9) map to () — nothing to
+    exact ordering. Bare single-channel entries map to () — nothing to
     expand — so they always contribute exactly one key."""
     channel_names = {
         "RGB": ("R", "G", "B"),
@@ -146,7 +146,7 @@ def test_psnr_keys_matches_legacy_loop_derivation(psnr_channels, separate_psnr):
 
 
 def test_psnr_keys_bare_y_entry_yields_exactly_one_key():
-    """Regression (P2.9): a bare 'Y' entry must not decompose into anything
+    """Regression: a bare 'Y' entry must not decompose into anything
     else — it is already a single channel, unlike 'YCbCr'."""
     cfg = SREvalConfig(psnr_channels=["RGB", "Y"])
     assert cfg.psnr_keys == ["RGB", "Y"]
@@ -160,7 +160,7 @@ def test_psnr_keys_is_not_a_dataclass_field():
 
 
 # ---------------------------------------------------------------------------
-# ssim_keys (P3.8) — mirrors psnr_keys, minus the separate_psnr expansion
+# ssim_keys — mirrors psnr_keys, minus the separate_psnr expansion
 # ---------------------------------------------------------------------------
 
 
@@ -187,7 +187,7 @@ def test_ssim_keys_is_not_a_dataclass_field():
 
 
 # ---------------------------------------------------------------------------
-# SRTrainingConfig.validate_against (INIT.16) — the construction-time seam
+# SRTrainingConfig.validate_against — the construction-time seam
 # ---------------------------------------------------------------------------
 
 

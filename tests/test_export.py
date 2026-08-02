@@ -1,4 +1,4 @@
-"""Tests for sisr.export.to_onnx (INIT.7).
+"""Tests for sisr.export.to_onnx.
 
 Skips cleanly when the optional `onnx` / `onnxruntime` extra is absent, so the
 suite stays green for contributors who don't install `.[export]`. The CI

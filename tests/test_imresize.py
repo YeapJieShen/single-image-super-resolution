@@ -1,4 +1,4 @@
-"""Tests for the vendored MATLAB-compatible :mod:`sisr.imresize` (INIT.11).
+"""Tests for the vendored MATLAB-compatible :mod:`sisr.imresize`.
 
 Two layers of evidence:
 

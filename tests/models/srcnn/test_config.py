@@ -16,7 +16,7 @@ def test_srcnn_training_config_paper_defaults():
 
 
 def test_srcnn_eval_config_paper_defaults():
-    """Regression (P2.9): defaults must report the paper's own Y-channel
+    """Regression: defaults must report the paper's own Y-channel
     metric, not the YCbCr 3-channel aggregate (which reads optimistically
     high since chroma planes are far smoother than luma)."""
     cfg = SRCNNEvalConfig()
@@ -63,7 +63,7 @@ def test_srcnn_training_config_init_defaults():
 
 
 # ---------------------------------------------------------------------------
-# validate_against (INIT.16) — SRCNN-specific num_channels/processor check
+# validate_against — SRCNN-specific num_channels/processor check
 # ---------------------------------------------------------------------------
 
 

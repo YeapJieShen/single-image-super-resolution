@@ -190,7 +190,7 @@ def test_grad_norm_logger_handles_none_grads():
 
 
 def test_grad_norm_logger_uses_grad_detach_not_grad_data():
-    """P5.3: gradient-norm accumulation must read gradients via
+    """Gradient-norm accumulation must read gradients via
     ``p.grad.detach()``, not the legacy ``p.grad.data`` attribute — and must
     still compute the correct L2 norm. The source check gives the red->green
     signal (``.grad.data`` does not raise a Python warning on the pinned torch,
@@ -261,14 +261,14 @@ def test_srcheckpoint_custom_filename_prefix():
 
 
 def test_srcheckpoint_default_filename_prefix_is_neutral_sr():
-    """P5.5: the generic checkpoint's default prefix must be arch-neutral 'sr',
+    """The generic checkpoint's default prefix must be arch-neutral 'sr',
     not the SRCNN-specific 'srcnn'."""
     ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
     assert ckpt.filename.startswith("sr-")
 
 
 def test_srcheckpoint_disables_auto_insert_metric_name():
-    """INIT.8 prerequisite: auto_insert_metric_name must be off, since it is the
+    """auto_insert_metric_name must be off, since it is the
     mechanism that would otherwise splice the raw (possibly `/`-bearing) metric
     name into the filename as literal text."""
     ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
@@ -276,7 +276,7 @@ def test_srcheckpoint_disables_auto_insert_metric_name():
 
 
 def test_srcheckpoint_slash_monitor_renders_flat_filename(tmp_path: Path):
-    """INIT.8 prerequisite: a `/`-bearing monitor_metric (e.g. a future
+    """A `/`-bearing monitor_metric (e.g. a future
     `psnr/val/RGB` TensorBoard-hierarchy tag) must render to a flat basename
     with no path separator. Lightning's `_format_checkpoint_name` does no
     sanitisation of its own — with the default `auto_insert_metric_name=True`
@@ -340,7 +340,7 @@ def test_srcheckpoint_setup_accepts_val_ssim_monitor(tmp_path: Path):
 
 @_ignore_gpu_warning
 def test_srcheckpoint_setup_rejects_monitor_not_in_psnr_keys(tmp_path: Path):
-    """P5.9/INIT.8: monitoring a PSNR key eval_config never requests (here 'Y',
+    """Monitoring a PSNR key eval_config never requests (here 'Y',
     since psnr_channels=['RGB'] and separate_psnr=False) must raise
     MisconfigurationException at setup() time — startup, not 20k steps into
     training once Lightning's own val_loop._has_run-gated check would fire."""
@@ -978,7 +978,7 @@ def test_benchmark_collect_batch_routes_through_processor():
 
 
 def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_false():
-    """P2.7 regression: a real run's metrics.csv contained 8 PSNR keys
+    """Regression: a real run's metrics.csv contained 8 PSNR keys
     (RGB/R/G/B/YCbCr/Y/Cb/Cr) for a config requesting only ['RGB', 'YCbCr']
     with separate_psnr=False — because _collect_batch iterated every tensor
     `_build_psnr_tensors` populates for the colorspace *family*, not the
@@ -1043,7 +1043,7 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true
 
 
 # ---------------------------------------------------------------------------
-# BenchmarkImageLogger consumes the public predict_rgb seam + SRDataset (P2.1)
+# BenchmarkImageLogger consumes the public predict_rgb seam + SRDataset
 # ---------------------------------------------------------------------------
 
 
