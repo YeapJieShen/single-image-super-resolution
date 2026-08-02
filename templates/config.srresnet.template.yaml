@@ -58,6 +58,11 @@ data:
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
+    BSD100:
+      class_path: sisr.datasets.srresnet.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
   train_dataloader_kwargs:
     batch_size: 16
     num_workers: 16
