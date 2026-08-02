@@ -1051,3 +1051,68 @@ def test_on_fit_start_noop_when_example_input_shape_unset():
     """No shape to probe with — must not raise, not fabricate an input."""
     lit = _make_compilable_lit(compile_backend="eager", example_input_shape=None)
     lit.on_fit_start()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# on_save_checkpoint — sisr_meta provenance (public Lightning hook)
+# ---------------------------------------------------------------------------
+
+
+def test_on_save_checkpoint_injects_sisr_meta(srcnn_rgb_lit: SRLightning):
+    checkpoint = {"global_step": 500, "epoch": 2, "state_dict": srcnn_rgb_lit.state_dict()}
+    srcnn_rgb_lit.on_save_checkpoint(checkpoint)
+    meta = checkpoint["sisr_meta"]
+    assert meta["format"] == "sisr-meta-v1"
+    assert meta["model"]["class_path"] == "sisr.models.srcnn.model.SRCNN"
+    assert meta["training"]["global_step"] == 500
+    assert meta["training"]["epoch"] == 2
+
+
+def test_on_save_checkpoint_leaves_monitor_unset():
+    """A full .ckpt isn't tied to any one monitored metric (zero, one, or
+    several SRCheckpoint callbacks may independently watch it), unlike
+    SRWeightsCheckpoint's per-save monitor/monitor_value."""
+    lit = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    checkpoint = {"global_step": 1, "epoch": 0}
+    lit.on_save_checkpoint(checkpoint)
+    assert checkpoint["sisr_meta"]["training"]["monitor"] is None
+    assert checkpoint["sisr_meta"]["training"]["monitor_value"] is None
+
+
+def test_on_save_checkpoint_does_not_touch_other_checkpoint_keys(srcnn_rgb_lit: SRLightning):
+    """Only adds sisr_meta — must not mutate hyper_parameters (the key
+    LightningCLI._parse_ckpt_path actually reads for --ckpt_path resumption)
+    or any other existing entry."""
+    checkpoint = {
+        "global_step": 1,
+        "epoch": 0,
+        "hyper_parameters": {"foo": "bar"},
+        "pytorch-lightning_version": "2.6.5",
+    }
+    srcnn_rgb_lit.on_save_checkpoint(checkpoint)
+    assert checkpoint["hyper_parameters"] == {"foo": "bar"}
+    assert checkpoint["pytorch-lightning_version"] == "2.6.5"
+    assert "sisr_meta" in checkpoint
+
+
+def test_on_save_checkpoint_round_trips_weights_only(tmp_path, srcnn_rgb_lit: SRLightning):
+    """The whole checkpoint, sisr_meta included, must survive
+    torch.load(..., weights_only=True) — the safe-loading contract every
+    consumer (including LightningCLI's own ckpt_path parsing) depends on."""
+    checkpoint = {
+        "global_step": 10,
+        "epoch": 0,
+        "state_dict": srcnn_rgb_lit.state_dict(),
+    }
+    srcnn_rgb_lit.on_save_checkpoint(checkpoint)
+
+    path = tmp_path / "test.ckpt"
+    torch.save(checkpoint, path)
+    loaded = torch.load(path, weights_only=True)
+
+    assert loaded["sisr_meta"] == checkpoint["sisr_meta"]
+    assert set(loaded["state_dict"].keys()) == set(srcnn_rgb_lit.state_dict().keys())
