@@ -125,3 +125,21 @@ def test_upsample_block_quadruples_with_scale_4():
     x = torch.zeros(1, 16, 4, 4)
     out = block(x)
     assert out.shape == (1, 16, 16, 16)
+
+
+def test_clamp_output_default_bounds_are_the_paper_signed_range():
+    """Default clamp bounds must be [-1, 1], matching RGBSignedOutputProcessor.
+
+    A (0.0, 1.0) default would floor every negative activation at 0 — half the
+    paper's tonal range, silently. Driving the tail bias negative makes the two
+    candidate defaults produce different floors, so this fails decisively on the
+    wrong one rather than merely reading the signature back.
+    """
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    torch.nn.init.constant_(model.tail.bias, -5.0)
+
+    out = model(torch.zeros(1, 3, 8, 8), clamp_output=True)
+
+    assert torch.isclose(out.min(), torch.tensor(-1.0), atol=1e-6), (
+        f"floor was {out.min().item()}; a (0.0, 1.0) default floors at 0.0"
+    )

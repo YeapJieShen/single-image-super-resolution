@@ -207,7 +207,7 @@ class SRResNet(SRModel):
         self,
         x: torch.Tensor,
         clamp_output: bool = False,
-        clamp_minmax: tuple[float, float] = (0.0, 1.0),
+        clamp_minmax: tuple[float, float] = (-1.0, 1.0),
     ) -> torch.Tensor:
         """Forward pass of the SRResNet model.
 
@@ -221,14 +221,10 @@ class SRResNet(SRModel):
             clamp_output (bool): Whether to clamp the output to clamp_minmax. Only
                 honoured on direct model(x, clamp_output=True) calls; the SRLightning
                 pipeline never sets it. Default is False.
-            clamp_minmax (tuple[float, float]): The minimum and maximum values for clamping
-                the output. Default is (0.0, 1.0), which is correct only for weights
-                trained under ``RGBProcessor``. **Pass (-1.0, 1.0) for the paper's
-                recipe:** Ledig et al. §3.2 scales HR to [-1, 1], so a model trained
-                with ``RGBSignedOutputProcessor`` emits [-1, 1] and the default would
-                clip away everything below mid-grey. The right bounds are a property of
-                the processor the weights were trained under, not of this architecture —
-                which is why they are a caller's argument and not a per-model default.
+            clamp_minmax (tuple[float, float]): Bounds for clamping. Defaults to the
+                paper's ``[-1, 1]`` output range (Ledig et al. §3.2, via
+                ``RGBSignedOutputProcessor``); pass ``(0.0, 1.0)`` for weights trained
+                under ``RGBProcessor``.
 
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, in_out_channels, height * scale,
