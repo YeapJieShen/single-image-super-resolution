@@ -151,8 +151,13 @@ Consumers are expected to have `sisr` importable and call `processor.extract` /
 computes, rather than silently baking in Python-side pre/post-processing an ONNX runtime
 can't see.
 
-- **SRResNet is unaffected by this**: `RGBProcessor.extract` / `reconstruct` are identity
-  functions, so the exported graph already is the complete LR-RGB → SR-RGB pipeline.
+- **SRResNet with `RGBProcessor` is unaffected by this**: `extract` / `reconstruct` are
+  identity functions, so the exported graph already is the complete LR-RGB → SR-RGB
+  pipeline.
+- **SRResNet with `RGBSignedOutputProcessor` needs one step**: that processor trains the
+  model to emit `[-1, 1]` (the SRGAN paper's HR range), so the graph's output must be
+  rescaled by `(out + 1) / 2` to land back in `[0, 1]`. The input side needs nothing —
+  the model consumes `[0, 1]` either way.
 - **SRCNN is not**: it trains on the Y channel, so the exported graph only maps Y → Y. A
   non-Python consumer of an SRCNN ONNX graph must reimplement the surrounding steps
   itself — extract Y from the LR RGB image (`sisr.colorspace.rgb_to_ycbcr`), run the
