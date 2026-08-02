@@ -16,6 +16,7 @@ def test_srresnet_training_config_paper_defaults():
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
     assert cfg.layer_lrs is None  # SRResNet has BatchNorm/PReLU; layer_lrs would error
+    assert cfg.scale == 4  # Ledig et al. §3.2's SRResNet baseline is fixed at 4x
 
 
 def test_srresnet_eval_config_paper_defaults():
@@ -60,14 +61,27 @@ def test_srresnet_validate_against_rejects_in_out_channels_mismatch():
 
 
 def test_srresnet_validate_against_accepts_matching_in_out_channels():
-    model = SRResNet(scale=2, num_residual_blocks=1, in_out_channels=3)
+    # scale=4 matches SRResNetTrainingConfig's paper-fixed default; the point
+    # of this test is the channel check, not scale.
+    model = SRResNet(scale=4, num_residual_blocks=1, in_out_channels=3)
     SRResNetTrainingConfig().validate_against(model, RGBProcessor())  # must not raise
 
 
 def test_srresnet_validate_against_still_runs_base_forward_probe():
     """SRResNetTrainingConfig.validate_against must chain to the base check
     (example_input_shape/forward probe) via super(), not just its own."""
-    model = SRResNet(scale=2, num_residual_blocks=1, in_out_channels=3)
+    # scale=4 matches the default config's scale so only the intended
+    # example_input_shape channel mismatch fires.
+    model = SRResNet(scale=4, num_residual_blocks=1, in_out_channels=3)
     cfg = SRResNetTrainingConfig(example_input_shape=(1, 16, 16))  # 1 != model_channels=3
     with pytest.raises(ValueError, match="example_input_shape"):
         cfg.validate_against(model, RGBProcessor())
+
+
+def test_srresnet_validate_against_rejects_scale_mismatch():
+    """Regression: SRResNetTrainingConfig's paper-fixed scale=4 default must
+    actually be checked, not merely recorded — pairing it with a
+    differently-scaled model is a real misconfiguration."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    with pytest.raises(ValueError, match="scale"):
+        SRResNetTrainingConfig().validate_against(model, RGBProcessor())
