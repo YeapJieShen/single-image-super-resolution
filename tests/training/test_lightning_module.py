@@ -401,7 +401,9 @@ def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning
     expected_metrics = {f"psnr/val/{k}": 0.0 for k in srcnn_rgb_lit.eval_config.psnr_keys}
     expected_metrics.update({f"ssim/val/{k}": 0.0 for k in srcnn_rgb_lit.eval_config.ssim_keys})
 
-    assert params_arg == srcnn_rgb_lit.hparams
+    # The TB-only flattened view (_tb_hparams), not self.hparams — the latter must stay
+    # nested/unflattened so checkpoints round-trip through --ckpt_path (see lightning_module.py).
+    assert params_arg == srcnn_rgb_lit._tb_hparams
     assert metrics_arg == expected_metrics
 
 
@@ -594,8 +596,8 @@ def test_paper_init_polymorphic_on_non_overriding_subclass():
     # No exception = success. (The actual weights are whatever PyTorch's default init produced.)
 
 
-def test_saved_hparams_contain_processor_name():
-    """The processor's class name is saved into Lightning hparams for TensorBoard distinction."""
+def test_saved_tb_hparams_contain_processor_name():
+    """The processor's class name is saved into the TB-only hparams view for TensorBoard."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -604,8 +606,10 @@ def test_saved_hparams_contain_processor_name():
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
-    # Lightning's self.hparams is a flat dict after the _flatten_hparams step.
-    assert lit.hparams.get("processor") == "RGBProcessor"
+    assert lit._tb_hparams.get("processor") == "RGBProcessor"
+    # Regression guard: self.hparams (what checkpoints save) must NOT carry this —
+    # it's ignored on purpose so --ckpt_path reload never has to reparse it.
+    assert "processor" not in lit.hparams
 
 
 # ---------------------------------------------------------------------------
@@ -752,10 +756,11 @@ def test_val_metrics_hold_no_stateful_accumulators(srcnn_y_lit: SRLightning):
 # ---------------------------------------------------------------------------
 
 
-def test_hparams_expand_nested_config_fields():
+def test_tb_hparams_expand_nested_config_fields():
     """Regression (P2.4): training_config/eval_config dataclasses expand into
     individual HParams columns (via dataclasses.asdict) using the '/' separator,
-    instead of a single stringified blob under the bare key."""
+    instead of a single stringified blob under the bare key — in the TB-only
+    flattened view, since self.hparams itself must stay nested (see below)."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -764,12 +769,37 @@ def test_hparams_expand_nested_config_fields():
         eval_config=SREvalConfig(crop_border=7),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
-    flat = dict(lit.hparams)
+    flat = dict(lit._tb_hparams)
     assert flat.get("eval_config/crop_border") == 7
     assert flat.get("training_config/init_strategy") == "default"
     # regression guard: no stringified dataclass blob under the bare key
     assert "eval_config" not in flat
     assert "training_config" not in flat
+
+
+def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
+    """Regression: self.hparams (what Lightning writes into the checkpoint's
+    `hyper_parameters`) must stay a plain nested dict — no '/'-flattening and
+    no live SRTrainingConfig/SREvalConfig objects. LightningCLI._parse_ckpt_path
+    re-parses this dict as CLI options (model.<key>), so a '/' in a key breaks
+    every --ckpt_path invocation, and a live dataclass object there breaks
+    weights_only=True checkpoint loading."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=7),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.hparams["eval_config"] == {
+        "crop_border": 7,
+        "psnr_channels": ["RGB"],
+        "separate_psnr": False,
+        "ssim_channels": ["RGB", "Y"],
+    }
+    assert isinstance(lit.hparams["training_config"], dict)
+    assert not any("/" in k for k in lit.hparams)
 
 
 # ---------------------------------------------------------------------------

@@ -81,10 +81,6 @@ class SRLightning(lightning.LightningModule):
                 f"SRProcessor."
             )
 
-        self.save_hyperparameters(
-            ignore=["model", "processor", "criterion", "optimizer", "lr_scheduler"]
-        )
-
         self.model = model
         self.processor = processor
         self.training_config = training_config or SRTrainingConfig()
@@ -101,13 +97,27 @@ class SRLightning(lightning.LightningModule):
                 std=self.training_config.init_std,
             )
 
-        # Merge model.hparams + processor identity into Lightning hparams for TensorBoard HParams.
-        # Configs are expanded via dataclasses.asdict so each field becomes its own HParams column.
-        self._hparams = self._flatten_hparams(
+        # Save exactly this plain dict — bypasses save_hyperparameters' frame/given_hparams
+        # introspection, so the checkpoint's `hyper_parameters` is identical whether this
+        # module is built directly or via SRLightningCLI. dataclasses.asdict (not the live
+        # training_config/eval_config objects) keeps it weights_only=True loadable and free
+        # of the two dataclass types, which torch.load's safe-globals allowlist doesn't know.
+        # This dict is what LightningCLI._parse_ckpt_path reads back and re-parses as CLI
+        # options (model.<key>) on `--ckpt_path` reload — it must stay nested, not flattened
+        # with _flatten_hparams' '/' separator, which jsonargparse can't parse as an option name.
+        self.save_hyperparameters(
             {
-                **self._hparams,
                 "training_config": dataclasses.asdict(self.training_config),
                 "eval_config": dataclasses.asdict(self.eval_config),
+            }
+        )
+
+        # TensorBoard-only view: flattened (see _flatten_hparams) and enriched with the
+        # model's own hparams + processor/criterion identity for HParams columns. Kept off
+        # self.hparams (and so off the checkpoint) — on_train_start logs this instead.
+        self._tb_hparams = self._flatten_hparams(
+            {
+                **self.hparams,
                 "model": model.hparams,
                 "processor": type(processor).__name__,
                 "criterion": type(self.criterion).__name__,
@@ -417,7 +427,7 @@ class SRLightning(lightning.LightningModule):
             **{f"ssim/val/{k}": 0.0 for k in self.eval_config.ssim_keys},
         }
         for tb in tb_loggers:
-            tb.log_hyperparams(self.hparams, metrics)
+            tb.log_hyperparams(self._tb_hparams, metrics)
 
     def test_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
