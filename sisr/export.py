@@ -8,6 +8,12 @@ oversight: a consumer of the exported graph is expected to have ``sisr``
 importable and call ``processor.extract`` / ``processor.reconstruct``
 themselves.
 
+The exported graph also carries the same provenance metadata as the checkpoint
+sinks (:func:`sisr.training.metadata.build_metadata`), written one field per
+``onnx.ModelProto.metadata_props`` entry rather than a single opaque JSON blob —
+Netron renders per-field props as a readable table, which is most of the value.
+``metadata_props`` is string->string only, so non-string fields are JSON-encoded.
+
 For :class:`~sisr.processors.RGBProcessor` architectures (SRResNet), those
 methods are identity functions, so the bare graph is already an end-to-end
 LR-RGB -> SR-RGB pipeline. Under
@@ -27,6 +33,7 @@ actually invoked.
 
 from __future__ import annotations
 
+import json
 import warnings
 from os import PathLike
 from typing import TYPE_CHECKING
@@ -89,9 +96,21 @@ def to_onnx(
     """
     _require_onnx()
 
+    global_step: int | None = None
+    epoch: int | None = None
+    monitor: str | None = None
+    monitor_value: float | None = None
     if ckpt_path is not None:
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         module.load_state_dict(checkpoint["state_dict"])
+        # Carry the source checkpoint's own provenance forward when present (only
+        # populated on checkpoints saved after SRLightning.on_save_checkpoint shipped;
+        # absent on older ones, in which case these stay None).
+        global_step = checkpoint.get("global_step")
+        epoch = checkpoint.get("epoch")
+        ckpt_training = checkpoint.get("sisr_meta", {}).get("training", {})
+        monitor = ckpt_training.get("monitor")
+        monitor_value = ckpt_training.get("monitor_value")
 
     if input_sample is None:
         shape = module.training_config.example_input_shape
@@ -138,3 +157,57 @@ def to_onnx(
             )
     finally:
         model.train(was_training)
+
+    _write_metadata_props(
+        module,
+        file_path,
+        global_step=global_step,
+        epoch=epoch,
+        monitor=monitor,
+        monitor_value=monitor_value,
+    )
+
+
+def _write_metadata_props(
+    module: SRLightning,
+    file_path: str | PathLike,
+    *,
+    global_step: int | None,
+    epoch: int | None,
+    monitor: str | None,
+    monitor_value: float | None,
+) -> None:
+    """Stamp the shared provenance metadata onto the just-exported ONNX file.
+
+    Loads the model ``torch.onnx.export`` just wrote, adds one
+    ``metadata_props`` entry per top-level :func:`~sisr.training.metadata.build_metadata`
+    field, and re-saves in place. ``metadata_props`` is ``string -> string`` only, so
+    ``str`` fields (``format``, ``created``) are stored as-is and every other
+    (dict-valued) field is JSON-encoded — per-field rather than one opaque blob, so a
+    tool like Netron renders them as a readable table.
+
+    Args:
+        module: The :class:`~sisr.training.SRLightning` instance that was exported.
+        file_path: Path to the ``.onnx`` file just written by ``torch.onnx.export``.
+        global_step: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
+        epoch: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
+        monitor: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
+        monitor_value: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
+    """
+    import onnx
+
+    from .training.metadata import build_metadata
+
+    meta = build_metadata(
+        module,
+        global_step=global_step,
+        epoch=epoch,
+        monitor=monitor,
+        monitor_value=monitor_value,
+    )
+    onnx_model = onnx.load(str(file_path))
+    for key, value in meta.items():
+        entry = onnx_model.metadata_props.add()
+        entry.key = key
+        entry.value = value if isinstance(value, str) else json.dumps(value)
+    onnx.save(onnx_model, str(file_path))

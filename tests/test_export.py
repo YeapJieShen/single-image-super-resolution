@@ -6,6 +6,7 @@ suite stays green for contributors who don't install `.[export]`. The CI
 tests actually run somewhere.
 """
 
+import json
 import sys
 
 import numpy as np
@@ -150,3 +151,102 @@ def test_to_onnx_missing_onnx_raises_import_error_with_extra_hint(monkeypatch):
 
     with pytest.raises(ImportError, match=r"\[export\]"):
         to_onnx(module, "unused.onnx")
+
+
+# ---------------------------------------------------------------------------
+# metadata_props (provenance)
+# ---------------------------------------------------------------------------
+
+
+def test_to_onnx_writes_metadata_props(tmp_path):
+    """Every top-level build_metadata field lands as its own metadata_props
+    entry — per-field, not one opaque blob, so Netron renders a table.
+    str fields are stored as-is; every other field is JSON-encoded."""
+    module = _make_srcnn_module(example_input_shape=(1, 16, 16))
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path)
+
+    onnx_model = onnx.load(str(onnx_path))
+    props = {p.key: p.value for p in onnx_model.metadata_props}
+    assert set(props.keys()) == {
+        "format",
+        "created",
+        "versions",
+        "model",
+        "processor",
+        "io",
+        "eval_config",
+        "training",
+    }
+    assert props["format"] == "sisr-meta-v1"  # stored as-is: already a str
+
+    model_field = json.loads(props["model"])
+    assert model_field["class_path"] == "sisr.models.srcnn.model.SRCNN"
+    assert model_field["init_args"] == {
+        "num_channels": 1,
+        "num_filters": [8, 4],
+        "kernel_sizes": [5, 1, 3],
+        "padding": 0,
+    }
+
+    io_field = json.loads(props["io"])
+    assert io_field["input"] == "pre_upsampled"
+    assert io_field["input_channels"] == 1
+    assert io_field["output_range"] == [0.0, 1.0]
+
+    training_field = json.loads(props["training"])
+    assert training_field == {
+        "global_step": None,
+        "epoch": None,
+        "monitor": None,
+        "monitor_value": None,
+    }
+
+
+def test_to_onnx_metadata_props_carry_ckpt_provenance_forward(tmp_path):
+    """When ckpt_path is given, the source checkpoint's own global_step/epoch/
+    sisr_meta.training (monitor, monitor_value) are carried into the exported
+    graph's metadata_props rather than left blank."""
+    module = _make_srcnn_module(example_input_shape=(1, 16, 16))
+    ckpt_path = tmp_path / "trained.ckpt"
+    torch.save(
+        {
+            "state_dict": module.state_dict(),
+            "global_step": 999,
+            "epoch": 3,
+            "sisr_meta": {"training": {"monitor": "psnr/val/RGB", "monitor_value": 31.2}},
+        },
+        ckpt_path,
+    )
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path, ckpt_path=ckpt_path)
+
+    onnx_model = onnx.load(str(onnx_path))
+    props = {p.key: p.value for p in onnx_model.metadata_props}
+    training_field = json.loads(props["training"])
+    assert training_field == {
+        "global_step": 999,
+        "epoch": 3,
+        "monitor": "psnr/val/RGB",
+        "monitor_value": 31.2,
+    }
+
+
+def test_to_onnx_metadata_props_skip_cleanly_without_ckpt_sisr_meta(tmp_path):
+    """A ckpt_path saved before sisr_meta existed (no 'sisr_meta' key) must not
+    crash export — training fields simply stay None."""
+    module = _make_srcnn_module(example_input_shape=(1, 16, 16))
+    ckpt_path = tmp_path / "old_style.ckpt"
+    torch.save({"state_dict": module.state_dict()}, ckpt_path)
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path, ckpt_path=ckpt_path)
+
+    onnx_model = onnx.load(str(onnx_path))
+    props = {p.key: p.value for p in onnx_model.metadata_props}
+    training_field = json.loads(props["training"])
+    assert training_field["monitor"] is None
+    assert training_field["monitor_value"] is None
+    assert training_field["global_step"] is None
