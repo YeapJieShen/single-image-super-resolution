@@ -15,22 +15,28 @@ Reference data (not committed — ``data/`` is gitignored):
     Source: https://cv.snu.ac.kr/research/EDSR/benchmark.tar
     (Lim et al., "Enhanced Deep Residual Networks for Single Image
     Super-Resolution", CVPRW 2017 — the EDSR authors' own benchmark
-    distribution; Set5/Set14 HR + MATLAB-``imresize``-generated
+    distribution; Set5/Set14/B100 HR + MATLAB-``imresize``-generated
     ``LR_bicubic`` X2/X3/X4 pairs, the same lineage BasicSR/EDSR-derived
     repos distribute.)
     SHA-256 of the full 250112000-byte tar: 80c21c333bbf6ceb5308b7243761f82
     84478274413a97b96f1d63e9045fd93e8
 
 To enable the byte-equality test, download that URL, verify the checksum,
-then extract only the ``Set5`` and ``Set14`` subtrees into::
+then extract only the ``Set5``, ``Set14`` and ``B100`` subtrees into::
 
     data/reference/Set5/{HR,LR_bicubic/{X2,X3,X4}}
     data/reference/Set14/{HR,LR_bicubic/{X2,X3,X4}}
+    data/reference/B100/{HR,LR_bicubic/{X2,X3,X4}}
 
-e.g. ``tar -xf benchmark.tar --wildcards 'benchmark/Set5/*' 'benchmark/Set14/*'``
-then move both dirs under ``data/reference/``. The test skips cleanly (not
-an error, not a silent no-op) when that directory is absent, so CI stays
-hermetic and contributors without the archive get a green suite.
+e.g. (Windows ``tar`` needs ``--force-local`` or a ``C:`` path is parsed as
+a remote host, and ``--wildcards`` for the subtree globs to expand)::
+
+    tar --force-local -xf benchmark.tar --wildcards \
+        'benchmark/Set5/*' 'benchmark/Set14/*' 'benchmark/B100/*'
+
+then move all three dirs under ``data/reference/``. The test skips cleanly
+(not an error, not a silent no-op) when that directory is absent, so CI
+stays hermetic and contributors without the archive get a green suite.
 """
 
 from pathlib import Path
@@ -158,7 +164,7 @@ def test_resize_unknown_backend_raises():
 
 def _reference_cases() -> list[tuple[str, Path, Path, int]]:
     cases = []
-    for dataset in ("Set5", "Set14"):
+    for dataset in ("Set5", "Set14", "B100"):
         hr_dir = REFERENCE_DIR / dataset / "HR"
         if not hr_dir.is_dir():
             continue
