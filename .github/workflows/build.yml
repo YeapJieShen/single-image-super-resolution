@@ -32,7 +32,7 @@ jobs:
       - name: Smoke import
         run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
       # Ports the old tests/test_cli.py::test_cli_help_lists_subcommands subprocess
-      # smoke here (P5.11): it cost ~10s of the pytest suite re-importing torch +
+      # smoke here: it cost ~10s of the pytest suite re-importing torch +
       # lightning just to print --help, and this job already installs the wheel and
       # smoke-imports it, so it's the natural home for a packaging-level check.
       - name: CLI entry point lists subcommands

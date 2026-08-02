@@ -1,4 +1,4 @@
-# github-actions only (INIT.6): a PEP 621 pyproject with `>=` lower bounds and no
+# github-actions only: a PEP 621 pyproject with `>=` lower bounds and no
 # lock file gives the pip updater almost nothing to do, and enabling it would need
 # an `ignore` entry for albumentationsx (capped at <=2.1.0 for a documented Windows
 # import failure, see pyproject.toml) that a later PR is about to make obsolete anyway.
