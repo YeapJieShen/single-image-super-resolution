@@ -53,8 +53,7 @@ def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
 
 
 class TrainDataset(SRDataset):
-    """Random-crop HR/LR pairs for SRResNet-style training, HR served from an
-    LMDB cache of full raw images.
+    """Random-crop HR/LR pairs for SRResNet-style training, HR held in an LMDB cache.
 
     On first instantiation with a given set of parameters, every HR image is
     decoded once and stored whole (uint8, RGB, with its own ``(H, W)`` header)

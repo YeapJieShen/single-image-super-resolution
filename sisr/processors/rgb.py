@@ -9,13 +9,16 @@ class RGBProcessor(SRProcessor):
     """No-op processor: model trains and emits RGB directly."""
 
     def extract(self, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Return lr_rgb unchanged — RGB in, RGB out."""
         return lr_rgb
 
     def reconstruct(self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Return sr_model_out unchanged — already RGB."""
         return sr_model_out
 
     @property
     def model_channels(self) -> int:
+        """Number of model IO channels — 3 (RGB)."""
         return 3
 
 
@@ -40,14 +43,18 @@ class RGBSignedOutputProcessor(SRProcessor):
     """
 
     def extract(self, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Return lr_rgb unchanged; the model consumes RGB in ``[0, 1]``."""
         return lr_rgb
 
     def extract_target(self, hr_rgb: torch.Tensor) -> torch.Tensor:
+        """Map HR from ``[0, 1]`` to the model's ``[-1, 1]`` output range."""
         return hr_rgb * 2.0 - 1.0
 
     def reconstruct(self, sr_model_out: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Map the model's ``[-1, 1]`` output back to ``[0, 1]``."""
         return (sr_model_out + 1.0) / 2.0
 
     @property
     def model_channels(self) -> int:
+        """Number of model IO channels — 3 (RGB)."""
         return 3

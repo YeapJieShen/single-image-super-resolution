@@ -1,10 +1,10 @@
-"""LightningCLI entrypoint for SR training.
+r"""LightningCLI entrypoint for SR training.
 
 Usage:
     sisr fit --config templates/config.srcnn.template.yaml
-    sisr test --config templates/config.srcnn.template.yaml \\
+    sisr test --config templates/config.srcnn.template.yaml \
               --ckpt_path <best.ckpt>
-    sisr export --config templates/config.srcnn.template.yaml \\
+    sisr export --config templates/config.srcnn.template.yaml \
                 --output_path model.onnx --ckpt_path <best.ckpt>
 
 The ``sisr`` console script is registered by ``pyproject.toml``; ``python -m

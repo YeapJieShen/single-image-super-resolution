@@ -138,8 +138,7 @@ def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
 
 
 class TrainDataset(SRDataset):
-    """Dataset that serves deterministic LR/HR sub-image pairs, HR served from
-    an LMDB cache of full raw images.
+    """Dataset serving deterministic LR/HR sub-image pairs, HR held in an LMDB cache.
 
     On first instantiation with a given set of files, every HR image is
     decoded once and stored whole (uint8, RGB) in an LMDB database — see the
@@ -260,8 +259,7 @@ class TrainDataset(SRDataset):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _compute_grid(self) -> tuple[list[tuple[int, int]], list[int], list[int], int]:
-        """Reads image dimensions (without decoding pixels) to compute the
-        deterministic sub-image grid for every source image.
+        """Computes the deterministic sub-image grid from image dimensions alone.
 
         Single source of truth for the patch grid: :meth:`__len__` and
         :meth:`__getitem__`'s O(1) index -> ``(top, left)`` lookup both derive
