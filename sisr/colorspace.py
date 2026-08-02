@@ -28,11 +28,15 @@ import torch
 # [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
 
 _RGB_TO_Y = (0.299, 0.587, 0.114)
-_RGB_TO_CB = (-0.169, -0.331, 0.500)  # output offset +0.5
-_RGB_TO_CR = (0.500, -0.419, -0.081)  # output offset +0.5
+# Ratios of MATLAB's published rgb2ycbcr studio-range matrix (see
+# rgb_to_ycbcr_studio below) over the chroma legal-range scale of 224 —
+# kept as literal ratios rather than pre-divided decimals so the MATLAB
+# source constants stay visible and transcription cannot silently drift.
+_RGB_TO_CB = (-37.797 / 224, -74.203 / 224, 112 / 224)  # output offset +0.5
+_RGB_TO_CR = (112 / 224, -93.786 / 224, -18.214 / 224)  # output offset +0.5
 _YCBCR_TO_R = 1.402  # cr coefficient
-_YCBCR_TO_G_CB = -0.344  # cb coefficient
-_YCBCR_TO_G_CR = -0.714  # cr coefficient
+_YCBCR_TO_G_CB = -0.344136  # cb coefficient
+_YCBCR_TO_G_CR = -0.714136  # cr coefficient
 _YCBCR_TO_B = 1.772  # cb coefficient
 
 # BT.601 studio-range ("limited"/"TV" range) rescale, applied on top of the
