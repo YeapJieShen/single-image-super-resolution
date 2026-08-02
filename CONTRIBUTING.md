@@ -1,137 +1,77 @@
 # Contributing
 
-Thanks for your interest in `single-image-super-resolution` — a PyTorch Lightning
-framework for reproducing single-image super-resolution (SISR) papers. This guide
-covers how to set up a development environment, run the tests, and land a change.
+## Setup
 
-## Development setup
-
-Requires **Python ≥ 3.12**.
+Requires Python 3.12+.
 
 ```bash
-# Clone your fork:
 git clone https://github.com/YeapJieShen/single-image-super-resolution.git
 cd single-image-super-resolution
 
-# Create an isolated environment (conda shown; any virtualenv works):
-conda create -n sisr python=3.13
-conda activate sisr
-
-# Install uv into the environment, then install the project with dev extras:
-pip install uv
-python -m uv pip install -e ".[dev]"
+pip install -e ".[dev]"
 ```
 
-Invoke it as `python -m uv`, not bare `uv`: uv resolves `VIRTUAL_ENV` ahead of the active
-conda env, so the bare binary installs into whatever virtualenv happens to be active,
-while `python -m uv` targets the interpreter you just activated.
+[uv](https://github.com/astral-sh/uv) is a faster alternative if you prefer it:
+`python -m uv pip install -e ".[dev]"`.
 
-`uv` is a much faster drop-in replacement for `pip install`. Installing it *into* the
-environment keeps it self-contained — removing the environment removes uv with it. Plain
-`pip install -e ".[dev]"` remains fully supported; CI's **build** check verifies the
-end-user `pip install .` path on all four matrix legs.
+On a CUDA GPU, install the `torch` / `torchvision` wheels from PyTorch's index first, as
+described in the [README](README.md#install).
 
-The `[dev]` extra adds the test and lint toolchain (`pytest`, `pytest-cov`,
-`pytest-xdist`, `pyyaml`, `ruff`). `pyproject.toml` is the single source of truth for
-dependencies — there is no `requirements.txt`.
-
-If you develop on a CUDA GPU, install the CUDA `torch` / `torchvision` wheels from
-PyTorch's own index **first** (the `+cu###` wheels are not on PyPI), then install the
-project — see the README's *GPU / CUDA notes*.
-
-## Running the tests
+## Tests
 
 ```bash
-# Full suite:
-pytest
-
-# With coverage (matches CI):
-pytest --cov=sisr --cov-report=term
+pytest                                  # full suite
+pytest --cov=sisr --cov-report=term     # with coverage, as CI runs it
 ```
 
-Tests live under `tests/`, mirroring the `sisr/` package layout
-(e.g. `sisr/training/lightning_module.py` → `tests/training/test_lightning_module.py`).
+`tests/` mirrors `sisr/`, so `sisr/training/lightning_module.py` maps to
+`tests/training/test_lightning_module.py`.
 
-### Strict-warnings policy
+Warnings are errors (`filterwarnings = ["error", ...]`). If your change raises a new one,
+fix the cause. Only add an ignore for a third-party deprecation you can't control, with a
+comment saying why.
 
-The suite runs under `filterwarnings = ["error", ...]`: **any unexpected warning fails
-the test run.** A short, explicit ignore-list in `pyproject.toml` covers known upstream
-deprecations only. If your change surfaces a new warning, fix the cause rather than
-broadening the ignore-list; add a narrowly-scoped ignore only for a genuine third-party
-deprecation you cannot control, and note why.
+When you fix a bug, add a test that fails before the fix and passes after. Name it after
+the failure it catches.
 
-### Regression tests
+**Debugging a dataset?** The templates use `num_workers: 16`, so `__getitem__` runs in
+subprocesses where breakpoints never fire. Run with
+`--data.train_dataloader_kwargs.num_workers=0` to get it back in-process.
 
-When you fix a bug, add one test that **fails on the old behavior and passes on the new**.
-Name it after what the failure catches, not after the fix.
+## Making a change
 
-### Debugging dataset code
+Branch off `main`, add tests with your change, run `pytest`, open a PR. Three checks have
+to pass: **test** (pytest + coverage), **build** (`pip install .` and imports work), and
+**lint** (`ruff check` + `ruff format --check`). `main` keeps linear history.
 
-To step through `Dataset.__getitem__` (SRCNN/SRResNet dataset code, `sisr/imresize.py`,
-etc.) with breakpoints, run with `--data.train_dataloader_kwargs.num_workers=0`:
+Commits:
 
-```bash
-sisr fit --config templates/config.srcnn.template.yaml --data.train_dataloader_kwargs.num_workers=0
-```
+- Imperative subject, for example "Add ...", "Fix ...", "Remove ...".
+- Docs-only changes go in their own commit, never mixed with code.
 
-The tracked templates set `num_workers: 16`, so by default every `__getitem__` call runs
-in a `DataLoader` worker **subprocess** — breakpoints set in the main process never fire
-there. `num_workers=0` runs the dataset in-process instead, at the cost of losing
-parallel data loading; use it only for debugging, not for real training runs.
+## Style
 
-## The change workflow
-
-1. Branch off `main`.
-2. Make your change; add or update tests alongside it.
-3. Run `pytest` locally and make sure it is green.
-4. Open a pull request against `main`.
-
-All PRs must pass three GitHub Actions checks before they can merge:
-
-- **test** — installs `.[dev]` and runs `pytest` with coverage (uploaded to Codecov).
-- **build** — verifies `pip install .` and that `sisr` / `sisr.cli.main` import cleanly.
-- **lint** — `ruff check` and `ruff format --check`.
-
-`main` uses linear history (rebase/squash, no merge commits) and requires PRs.
-
-## Commit conventions
-
-- **Imperative subject line** ("Add …", "Fix …", "Refactor …", "Document …").
-- Where a commit closes a tracked item, reference it in the subject
-  (e.g. a PR number like `(#12)`).
-- **Keep documentation-only changes in commits separate from code changes.** A commit
-  either touches code or touches docs, not both.
-
-## Code style
-
-- **Terse code, minimal comments.** Comment only non-obvious *why*, never narrate *what*.
-- **Google-style docstrings** on every public class / function / method in `sisr/`
-  (one-line summary opener, then `Args:` / `Returns:` / `Raises:` when the signature
-  warrants). Class-level `Args:` documents `__init__`; `__init__` itself stays bare.
-- **Modern type hints** — PEP 585 (`list`, `dict`, `tuple`) and PEP 604 (`X | None`);
-  import `Callable` / `Sequence` from `collections.abc`.
-- **No backward-compatibility shims when refactoring.** Prefer clean breaks — drop the
-  old API, remove the unused parameter, delete the dead branch.
+- Terse code. Comment the non-obvious *why*, never the *what*.
+- Google-style docstrings on everything public in `sisr/`. Class docstrings document
+  `__init__` args; `__init__` itself stays bare.
+- Modern type hints: `list[str]`, `X | None`, and `collections.abc` for `Callable` /
+  `Sequence`.
+- No back-compat shims. Drop the old API, delete the dead branch.
 
 ## Adding a new architecture
 
-The training stack is generic: one `SRLightning` module composes an `SRModel`
-(pure tensor network) with an `SRProcessor` (colorspace adapter), fed by a generic
-`SRDataModule`. To add an architecture you do **not** write a new Lightning subclass —
-instead:
+You don't write a Lightning module. `SRLightning` already composes an `SRModel` with an
+`SRProcessor`, fed by `SRDataModule`.
 
-1. Subclass `sisr.models.base.SRModel` with your network (`forward`, `self._hparams`,
-   and an optional `reset_parameters(**kwargs)` init hook).
-2. Define `<Arch>TrainingConfig` / `<Arch>EvalConfig` dataclasses with the paper's
-   defaults (mirroring `sisr/models/srcnn/config.py`).
-3. Pick an existing `SRProcessor` (`RGBProcessor`, `RGBSignedOutputProcessor`,
-   `YChannelProcessor`, `YCbCrProcessor`) or add a new one.
-4. Copy a template in `templates/`, point `model.model` / `model.processor` /
-   `model.training_config` / `model.eval_config` and each dataset `class_path` at your
-   new classes, and run `sisr fit --config <your.yaml>`.
+1. Subclass `sisr.models.base.SRModel`: `forward`, `self._hparams`, and optionally
+   `reset_parameters(**kwargs)` for a paper-faithful init.
+2. Add `<Arch>TrainingConfig` / `<Arch>EvalConfig` with the paper's defaults, copying the
+   shape of `sisr/models/srcnn/config.py`.
+3. Pick a processor (`RGBProcessor`, `RGBSignedOutputProcessor`, `YChannelProcessor`,
+   `YCbCrProcessor`) or write one.
+4. Copy a template, repoint the `class_path`s, run `sisr fit`.
 
 ## License
 
-This project is MIT-licensed and all of its dependencies are MIT-compatible.
-`sisr/imresize.py` vendors a small MIT-licensed MATLAB-`imresize` port rather than
-depending on it — see that file's header for the source repo and required attribution.
+MIT. Dependencies are MIT-compatible. `sisr/imresize.py` vendors an MIT-licensed
+MATLAB-`imresize` port, so keep its attribution header intact.
