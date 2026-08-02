@@ -2,13 +2,15 @@
 
 LR is generated from HR via bicubic-down → bicubic-up so the LR patches share
 the spatial size of the HR patches (pre-upsampled SRCNN formulation).
-:class:`TrainDataset` caches whole decoded HR images (raw, uint8) through
-:class:`~sisr.cache.LMDBCache`, mirroring :mod:`sisr.datasets.srresnet` —
-decoding a source image once and slicing its deterministic sub-images out at
-load time is far cheaper than re-decoding, and it decouples the cache from
-every LR-generation parameter (``scale``) as well as the sub-image grid
-itself (``subimg_size``, ``stride``): none of them affect the raw bytes
-stored, only what gets sliced/degraded from them at read time.
+:class:`TrainDataset` caches whole decoded HR images (raw, uint8, headered)
+through :mod:`~sisr.datasets.hr_cache`, shared verbatim with
+:mod:`sisr.datasets.srresnet` — the same image directory produces exactly one
+cache regardless of which architecture builds it first. Decoding a source
+image once and slicing its deterministic sub-images out at load time is far
+cheaper than re-decoding, and it decouples the cache from every
+LR-generation parameter (``scale``) as well as the sub-image grid itself
+(``subimg_size``, ``stride``): none of them affect the raw bytes stored, only
+what gets sliced/degraded from them at read time.
 :class:`ValidationDataset` generates LR pairs on the fly for full images.
 
 LR degradation uses MATLAB-compatible antialiased bicubic resizing (see
@@ -17,7 +19,6 @@ low-pass filter, so no separate blur step is needed.
 """
 
 import bisect
-import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from PIL import Image
 from ..cache import LMDBCache, LMDBCacheBuildContext
 from ..imresize import resize
 from .base import SRDataset
+from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
+from .hr_cache import process_hr_image as _process_hr_image
 
 
 def _grid_dims(
@@ -76,24 +79,6 @@ def _degrade(hr_arr: np.ndarray, scale: int) -> np.ndarray:
     h, w = hr_arr.shape[:2]
     down = resize(hr_arr, (h // scale, w // scale))
     return resize(down, (h, w))
-
-
-def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
-    """Decodes one HR image and returns its single LMDB entry.
-
-    Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
-    across all platforms, mirroring
-    :func:`sisr.datasets.srresnet._process_hr_image`. Sub-image extraction and
-    LR derivation both moved to :meth:`TrainDataset.__getitem__`, so the build
-    only has to decode once per image — independent of
-    ``subimg_size``/``stride``/``scale``.
-
-    Returns:
-        A single-element list ``[(f'hr_{idx:08d}', raw_bytes)]`` where
-        *raw_bytes* is the ``(H, W, 3)`` uint8 RGB array's bytes.
-    """
-    arr = np.array(Image.open(path).convert("RGB"))
-    return [(f"hr_{idx:08d}", arr.tobytes())]
 
 
 class TrainDataset(SRDataset):
@@ -161,20 +146,13 @@ class TrainDataset(SRDataset):
             self._compute_grid()
         )
 
-        # Exact sizes from image headers + 10% slack. If it is ever exceeded,
-        # lmdb raises MapFullError mid-build and the checksum is never written,
-        # so the partial DB reads as stale and is rebuilt rather than silently
-        # serving truncated data. Same unhandled-overflow behaviour as SRResNet's cache.
-        raw_bytes = sum(h * w * 3 for h, w in self._img_sizes)
-        map_size = max(int(raw_bytes * 1.1), 64 * 1024 * 1024)
-
         self._cache = LMDBCache(
             cache_dir=cache_dir,
-            name="srcnn_hr",
+            name=CACHE_NAME,
             checksum=checksum,
             length=len(self.img_paths),
-            map_size=map_size,
-            metadata={"format": "srcnn_hr_v1"},
+            map_size=estimate_map_size(self._img_sizes),
+            metadata={"format": FORMAT_TAG},
             build_fn=self._build,
             use_tqdm=use_tqdm,
         )
@@ -185,17 +163,15 @@ class TrainDataset(SRDataset):
         The cache stores whole raw HR images, so — unlike the LR-patch cache
         this replaced — none of ``subimg_size``/``stride``/``scale`` enter the
         hash: they only affect what gets sliced and degraded at read time,
-        never what is written to LMDB. The ``format=srcnn_hr_v1`` tag (paired
-        with a new LMDB cache ``name``, see :meth:`__init__`) ensures a
-        pre-HR-only cache is never misread under this format rather than
-        rebuilt.
+        never what is written to LMDB. Delegates to
+        :func:`~sisr.datasets.hr_cache.compute_checksum`, shared verbatim with
+        :mod:`sisr.datasets.srresnet` so the same file set hashes identically
+        regardless of which architecture asks first.
 
         Returns:
             A hex-encoded SHA-256 digest string.
         """
-        file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in self.img_paths)
-        canonical = "|".join([file_manifest, "format=srcnn_hr_v1"])
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return compute_checksum(self.img_paths)
 
     def _compute_grid(self) -> tuple[list[tuple[int, int]], list[int], list[int], int]:
         """Computes the deterministic sub-image grid from image dimensions alone.
@@ -282,7 +258,9 @@ class TrainDataset(SRDataset):
                 raise KeyError(key)
             # Read-only view into the LMDB transaction's mmap page — sliced and
             # copied out below, before the `with` block ends and the view dies.
-            arr = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+            # (h, w) come from _compute_grid (the source file), not the header:
+            # only its byte offset matters here, consistent with SRResNet's read.
+            arr = np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
             hr_subimg = arr[
                 top : top + self.sub_img_size, left : left + self.sub_img_size, :
             ].copy()

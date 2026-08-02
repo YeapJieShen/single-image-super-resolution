@@ -2,11 +2,14 @@
 
 LR is the bicubic downscale of HR by ``scale`` (no upsample round-trip);
 the model is responsible for the ×``scale`` upsampling. :class:`TrainDataset`
-caches full decoded HR images (raw, uint8) through :class:`~sisr.cache.LMDBCache`
-— decoding a DIV2K PNG costs ~109ms, while the 96x96 crop kept from it costs
-~1ms, so re-decoding per crop is ~99% wasted work. The random crop itself is
-**not** cached (that would defeat crop randomness); it is drawn fresh, from
-the cached raw array, on every ``__getitem__`` call.
+caches full decoded HR images (raw, uint8, headered) through
+:mod:`~sisr.datasets.hr_cache`, shared verbatim with :mod:`sisr.datasets.srcnn`
+— the same image directory produces exactly one cache regardless of which
+architecture builds it first. Decoding a DIV2K PNG costs ~109ms, while the
+96x96 crop kept from it costs ~1ms, so re-decoding per crop is ~99% wasted
+work. The random crop itself is **not** cached (that would defeat crop
+randomness); it is drawn fresh, from the cached raw array, on every
+``__getitem__`` call.
 :class:`ValidationDataset` serves full images cropped to a multiple of
 ``scale``, uncached (each is decoded once per epoch, no repetition).
 
@@ -14,9 +17,7 @@ LR is derived via MATLAB-compatible antialiased bicubic resizing (see
 :mod:`sisr.imresize`), comparable to published paper numbers.
 """
 
-import hashlib
 import random
-import struct
 from pathlib import Path
 
 import numpy as np
@@ -26,28 +27,8 @@ from PIL import Image
 from ..cache import LMDBCache, LMDBCacheBuildContext
 from ..imresize import resize
 from .base import SRDataset
-
-# (height, width) as little-endian uint32 each, prefixed to every cached HR
-# value so a per-image shape (DIV2K images vary in size) travels with its
-# pixel data in one LMDB read instead of a second lookup.
-_SHAPE_HEADER = struct.Struct("<II")
-
-
-def _process_hr_image(path: Path, idx: int) -> list[tuple[str, bytes]]:
-    """Decodes one HR image and returns its single LMDB entry.
-
-    Top-level (not a method) so it can be pickled by ``ProcessPoolExecutor``
-    across all platforms, mirroring :func:`sisr.datasets.srcnn._process_hr_image`.
-
-    Returns:
-        A single-element list ``[(f'hr_{idx:08d}', header + raw_bytes)]`` where
-        *header* is :data:`_SHAPE_HEADER`-packed ``(h, w)`` and *raw_bytes* is
-        the ``(H, W, 3)`` uint8 RGB array's bytes.
-    """
-    arr = np.array(Image.open(path).convert("RGB"))
-    h, w = arr.shape[:2]
-    value = _SHAPE_HEADER.pack(h, w) + arr.tobytes()
-    return [(f"hr_{idx:08d}", value)]
+from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
+from .hr_cache import process_hr_image as _process_hr_image
 
 
 class TrainDataset(SRDataset):
@@ -121,19 +102,14 @@ class TrainDataset(SRDataset):
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         checksum = self._compute_checksum()
-        # Exact sizes from image headers + 10% slack. If it is ever exceeded,
-        # lmdb raises MapFullError mid-build and the checksum is never written,
-        # so the partial DB reads as stale and is rebuilt rather than silently
-        # serving truncated data. Same unhandled-overflow behaviour as SRCNN's cache.
-        map_size = max(int(self._estimate_raw_bytes() * 1.1), 64 * 1024 * 1024)
 
         self._cache = LMDBCache(
             cache_dir=cache_dir,
-            name="srresnet_hr",
+            name=CACHE_NAME,
             checksum=checksum,
             length=len(self.img_paths),
-            map_size=map_size,
-            metadata={"format": "raw_rgb_v1"},
+            map_size=estimate_map_size(self._collect_sizes()),
+            metadata={"format": FORMAT_TAG},
             build_fn=self._build,
             use_tqdm=use_tqdm,
         )
@@ -143,30 +119,29 @@ class TrainDataset(SRDataset):
 
         No crop/scale parameter enters this hash: the cache stores whole raw
         images, so it is valid for any ``hr_crop_size``/``crops_per_image``/
-        ``scale`` combination over the same file set.
-        :meth:`sisr.datasets.srcnn.TrainDataset._compute_checksum` now does the
-        same — both datasets cache HR only.
+        ``scale`` combination over the same file set. Delegates to
+        :func:`~sisr.datasets.hr_cache.compute_checksum`, shared verbatim with
+        :mod:`sisr.datasets.srcnn` so the same file set hashes identically
+        regardless of which architecture asks first.
 
         Returns:
             A hex-encoded SHA-256 digest string.
         """
-        file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in self.img_paths)
-        canonical = "|".join([file_manifest, "format=raw_rgb_v1"])
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return compute_checksum(self.img_paths)
 
-    def _estimate_raw_bytes(self) -> int:
-        """Sums each image's decoded byte size from its header, without decoding pixels.
+    def _collect_sizes(self) -> list[tuple[int, int]]:
+        """Reads each image's ``(h, w)`` from its file header, without decoding pixels.
 
         Returns:
-            Total bytes the LMDB build will write (header + raw RGB per image).
+            Each source image's ``(height, width)``, in :attr:`img_paths` order.
         """
-        total = 0
+        sizes = []
         for path in self.img_paths:
             img = Image.open(path)
             w, h = img.size
             img.close()
-            total += _SHAPE_HEADER.size + h * w * 3
-        return total
+            sizes.append((h, w))
+        return sizes
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
         """Populates the LMDB cache by decoding each HR image once in parallel.
@@ -199,7 +174,7 @@ class TrainDataset(SRDataset):
         with self._cache.get_buffer(key) as buf:
             if buf is None:
                 raise KeyError(key)
-            h, w = _SHAPE_HEADER.unpack_from(buf, 0)
+            h, w = HEADER.unpack_from(buf, 0)
             if w < self.hr_crop_size or h < self.hr_crop_size:
                 raise ValueError(
                     f"Image {self.img_paths[img_idx].name} ({w}x{h}) is smaller than "
@@ -207,7 +182,7 @@ class TrainDataset(SRDataset):
                 )
             # Read-only view into the LMDB transaction's mmap page — sliced and
             # copied out below, before the `with` block ends and the view dies.
-            arr = np.frombuffer(buf, dtype=np.uint8, offset=_SHAPE_HEADER.size).reshape(h, w, 3)
+            arr = np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
             top = random.randint(0, h - self.hr_crop_size)
             left = random.randint(0, w - self.hr_crop_size)
             hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()

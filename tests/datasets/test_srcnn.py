@@ -145,7 +145,7 @@ def test_train_dataset_checksum_ignores_grid_and_lr_params(shared_srcnn_train_ds
 
     ds = shared_srcnn_train_ds
     file_manifest = ",".join(f"{p.name}:{p.stat().st_size}" for p in ds.img_paths)
-    expected_canonical = "|".join([file_manifest, "format=srcnn_hr_v1"])
+    expected_canonical = "|".join([file_manifest, "format=hr_rgb_v1"])
     expected = hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest()
     assert ds._compute_checksum() == expected
 
