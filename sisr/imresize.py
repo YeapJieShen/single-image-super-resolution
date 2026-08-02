@@ -1,4 +1,4 @@
-"""MATLAB-compatible bicubic image resizing (INIT.10 / INIT.11).
+"""MATLAB-compatible bicubic image resizing.
 
 Vendored -- not a dependency -- from ``fatheral/matlab_imresize``
 (https://github.com/fatheral/matlab_imresize/blob/master/imresize.py), MIT

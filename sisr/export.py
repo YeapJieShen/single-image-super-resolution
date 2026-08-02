@@ -1,4 +1,4 @@
-"""Bare-model ONNX export (INIT.7).
+"""Bare-model ONNX export.
 
 Exports ``module.model`` — the wrapped :class:`~sisr.models.base.SRModel`,
 *without* the :class:`~sisr.processors.SRProcessor` — so the graph matches

@@ -287,9 +287,9 @@ class BenchmarkImageLogger(Callback):
             if n > 0:
                 sr_4d = sr_4d[..., n:-n, n:-n]
                 hr_4d = hr_4d[..., n:-n, n:-n]
-            # Still a private reach (P5.9): the colorspace split has no public
-            # seam, and duplicating it here would recreate the divergence P2.1
-            # removed. Keys now come from eval_config, so this is a value
+            # Still a private reach: the colorspace split has no public
+            # seam, and duplicating it here would recreate a divergence
+            # this design removed. Keys now come from eval_config, so this is a value
             # lookup only — the callback no longer decides *which* keys exist.
             metric_tensors = pl_module._build_metric_tensors(sr_4d, hr_4d)
             psnr_dict = {

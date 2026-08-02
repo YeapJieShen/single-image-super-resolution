@@ -265,7 +265,7 @@ class SRLightning(lightning.LightningModule):
         # Clamp display-space output only, here, once — every reconstruct()
         # consumer (_forward_sr's callers, predict_step) reads through this
         # one line, so PSNR/SSIM never diverge from what an 8-bit image would
-        # score (P4.14). sr_model_out (the loss target) is untouched: clamping
+        # score. sr_model_out (the loss target) is untouched: clamping
         # it would kill gradients on saturated pixels. Idempotent where
         # reconstruct() already clamps (YCbCrProcessor/YChannelProcessor's
         # ycbcr_to_rgb) — don't move this into forward() or a processor, or
