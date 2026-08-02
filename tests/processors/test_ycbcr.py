@@ -39,7 +39,7 @@ def test_ycbcr_reconstruct_matches_bt601_inverse_not_just_clamp():
     # Hand-computed BT.601 full-range inverse (coefficients from sisr.colorspace).
     cb, cr = 0.1, -0.1
     r = 0.5 + 1.402 * cr
-    g = 0.5 - 0.344 * cb - 0.714 * cr
+    g = 0.5 - 0.344136 * cb - 0.714136 * cr
     b = 0.5 + 1.772 * cb
     expected = torch.tensor([r, g, b]).view(1, 3, 1, 1).expand(1, 3, 2, 2)
 
@@ -50,12 +50,13 @@ def test_ycbcr_reconstruct_matches_bt601_inverse_not_just_clamp():
 def test_ycbcr_roundtrip_recovers_input():
     """extract -> reconstruct approximately recovers the input RGB.
 
-    Tolerance is 1e-3 because the BT.601 coefficients in :mod:`sisr.colorspace`
-    are truncated to 3 decimal places (e.g. ``-0.169`` vs the exact
-    ``-0.168736``), so the forward and inverse matrices aren't perfect
-    inverses. Observed worst-case error is ~5e-4 across the chroma channels.
+    Tolerance is 2e-6: the BT.601 coefficients in :mod:`sisr.colorspace` are
+    now full-precision ratios of MATLAB's published matrix, so the forward
+    and inverse matrices are near-perfect inverses (observed worst-case
+    error ~1.3e-6 across the chroma channels — see test_colorspace.py's
+    round-trip test for the same bound derived directly).
     """
     p = YCbCrProcessor()
     lr = torch.rand(2, 3, 8, 8)
     roundtrip = p.reconstruct(p.extract(lr), lr_rgb=lr)
-    assert torch.allclose(roundtrip, lr, atol=1e-3)
+    assert torch.allclose(roundtrip, lr, atol=2e-6)

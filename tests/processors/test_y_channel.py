@@ -42,9 +42,9 @@ def test_y_channel_reconstruct_same_size_roundtrips_to_lr():
         rgb_to_ycbcr(lr)[:, 1:], size=(16, 16), mode="bicubic", align_corners=False
     )
     assert torch.equal(same, rgb_to_ycbcr(lr)[:, 1:])  # bicubic@same-size == identity
-    # Tolerance 1e-3: the BT.601 coeffs in sisr.colorspace are truncated to 3 dp, so
-    # the forward/inverse matrices aren't perfect inverses (worst-case ~5e-4).
-    assert torch.allclose(out, lr, atol=1e-3)
+    # sisr.colorspace's BT.601 coefficients are full-precision (see its tests),
+    # so the forward/inverse matrices are near-perfect inverses (worst-case ~1.4e-6).
+    assert torch.allclose(out, lr, atol=2e-6)
 
 
 def test_y_channel_reconstruct_upscaled_stitches_bicubic_chroma():

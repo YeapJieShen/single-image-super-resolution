@@ -37,20 +37,36 @@ def test_rgb_to_ycbcr_known_values_black():
 
 
 def test_rgb_to_ycbcr_known_values_red():
-    # Pure red: (1, 0, 0) -> Y=0.299, Cb=0.5−0.169, Cr=0.5+0.500
+    # Pure red: (1, 0, 0) -> Y=0.299, Cb=0.5-37.797/224, Cr=0.5+112/224
     x = torch.tensor([[[[1.0]], [[0.0]], [[0.0]]]])
     y = rgb_to_ycbcr(x)
-    expected = torch.tensor([[[[0.299]], [[0.331]], [[1.000]]]])
-    assert torch.allclose(y, expected, atol=1e-5)
+    expected = torch.tensor([[[[0.299]], [[0.5 - 37.797 / 224]], [[1.000]]]])
+    assert torch.allclose(y, expected, atol=1e-6)
+
+
+def test_rgb_to_ycbcr_coefficients_match_matlab_matrix():
+    """Locks the full-precision BT.601 chroma coefficients to MATLAB's
+    published rgb2ycbcr studio-range matrix (divided by the 224 chroma
+    scale) so the old 3-decimal truncation (~2.6e-4/~3.1e-4 error) cannot
+    silently return."""
+    from sisr.colorspace import _RGB_TO_CB, _RGB_TO_CR, _RGB_TO_Y
+
+    assert _RGB_TO_Y == pytest.approx((65.481 / 219, 128.553 / 219, 24.966 / 219), abs=1e-12)
+    assert _RGB_TO_CB == pytest.approx((-37.797 / 224, -74.203 / 224, 112 / 224), abs=1e-12)
+    assert _RGB_TO_CR == pytest.approx((112 / 224, -93.786 / 224, -18.214 / 224), abs=1e-12)
 
 
 def test_round_trip_within_coefficient_precision():
-    # BT.601 coefficients are 3-decimal-place; round-trip error floor ~5e-4.
+    # Full-precision BT.601 chroma ratios drop the round-trip error floor
+    # from ~5e-4 (3-decimal-place truncation) to ~1.3e-6, the residual from
+    # the inverse G coefficients' own 6-decimal literals plus float32
+    # rounding (a bound confirmed at the unit-cube vertices, since the
+    # round trip is affine in R/G/B).
     torch.manual_seed(0)
     x = torch.rand(1, 3, 16, 16)
     y = ycbcr_to_rgb(rgb_to_ycbcr(x))
     err = (y - x).abs().max().item()
-    assert err < 5e-4
+    assert err < 2e-6
 
 
 # ---------------------------------------------------------------------------
