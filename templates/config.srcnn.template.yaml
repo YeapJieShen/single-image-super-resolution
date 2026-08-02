@@ -23,7 +23,10 @@ model:
   training_config:
     class_path: sisr.models.srcnn.SRCNNTrainingConfig
     init_args:
-      example_input_shape: [1, 224, 224]  # For TensorBoard graph (1-channel Y)
+      # Must match the real training input: 1-channel Y at subimg_size x subimg_size.
+      # No longer only a TensorBoard-graph dummy -- it also shapes the compile warm-up
+      # (a wrong size compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+      example_input_shape: [1, 33, 33]
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 
