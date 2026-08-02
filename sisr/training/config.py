@@ -101,6 +101,27 @@ class SRTrainingConfig:
             inferred from ``trainer.datamodule.train_dataset.scale``: that
             attribute lives outside the ``SRDataset`` contract (``PredictDataset``
             has none at all), whereas per-paper knobs already live here.
+
+        compile_backend: Name of a ``torch._dynamo`` backend (e.g.
+            ``'cudagraphs'``, ``'inductor'``) to compile the training-mode
+            forward with via ``torch.compile``; ``None`` (default) trains
+            eager. Only ``training_step`` is compiled — ``SRLightning``
+            dispatches on ``self.training``, so validation/test/predict
+            always run eager, which the widely varying benchmark image
+            sizes require (CUDA-graph-style backends need static shapes).
+            An unrecognized name raises immediately at ``SRLightning``
+            construction (``torch._dynamo.exc.InvalidBackend``); a
+            recognized name whose toolchain is missing (e.g. ``'inductor'``
+            without a Triton install) only fails on first call, which
+            ``SRLightning.on_fit_start`` turns into an immediate failure via
+            a warm-up forward instead of an arbitrary mid-run crash.
+            Measured on one RTX 5060 Laptop (SRResNet, batch 16, 24x24 LR):
+            ``'cudagraphs'`` gave +4% steps/s over eager — it only captures
+            the model forward, so backward and the optimizer step stay
+            eager and most kernel launches in a training step are never
+            captured. ``'inductor'`` fails outright there (no upstream
+            Windows Triton wheel). Defaults to ``None`` so this mostly-
+            unproven-on-this-project path never ships on by default.
     """
 
     layer_lrs: list[float] | None = None
@@ -109,6 +130,7 @@ class SRTrainingConfig:
     init_mean: float = 0.0
     init_std: float = 0.01
     scale: int | None = None
+    compile_backend: str | None = None
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Validate this config against the model/processor it will pair with.
