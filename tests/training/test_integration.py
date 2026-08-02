@@ -1,4 +1,4 @@
-"""End-to-end Trainer integration for the SR training stack (P3.1).
+"""End-to-end Trainer integration for the SR training stack.
 
 A single ``Trainer(fast_dev_run=True)`` fit+test over the tiny fixture images
 exercises the wiring the per-method unit tests in ``test_lightning_module.py``
@@ -7,7 +7,7 @@ cannot reach: ``training_step`` / ``validation_step`` under a real loop,
 the metric names actually logged, and the module -> datamodule ->
 ``BenchmarkImageLogger`` integration (the callback auto-discovers ``Set5`` from
 ``datamodule.test_names``). It is also the suite's canary for the lightning
-``LeafSpec`` pytree ``FutureWarning`` (P4.8): only a real Trainer loop emits it,
+``LeafSpec`` pytree ``FutureWarning``: only a real Trainer loop emits it,
 and the strict ``filterwarnings=error`` config turns it into a failure unless
 the scoped ignore in ``pyproject.toml`` is in place.
 """
@@ -112,7 +112,7 @@ def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
 
 
 # ---------------------------------------------------------------------------
-# cli predict end-to-end (P3.7) — LR-only inference path, both architectures
+# cli predict end-to-end — LR-only inference path, both architectures
 # ---------------------------------------------------------------------------
 
 

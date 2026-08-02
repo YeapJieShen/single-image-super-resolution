@@ -70,7 +70,7 @@ def test_round_trip_within_coefficient_precision():
 
 
 # ---------------------------------------------------------------------------
-# rgb_to_ycbcr_studio (P2.8) — BT.601 studio range, metric-only
+# rgb_to_ycbcr_studio — BT.601 studio range, metric-only
 # ---------------------------------------------------------------------------
 
 
@@ -113,13 +113,13 @@ def _psnr(a: torch.Tensor, b: torch.Tensor, data_range: float = 1.0) -> torch.Te
 
 
 def test_y_channel_studio_psnr_offset_matches_algebraic_identity():
-    """The decisive test (P2.8): studio-range Y is an affine rescale of
+    """The decisive test: studio-range Y is an affine rescale of
     full-range Y by a constant factor (219/255, offset 16/255) — the diff
     (and hence MSE) scales by (219/255)**2 regardless of the actual image
     content, so PSNR_studio - PSNR_full is the *exact* constant
     20*log10(255/219) for any pair of images with nonzero error. This is the
-    algebraic fact the empirical Set5/Set14 corroboration in triage P2.8
-    (30.56 raw + 1.3219 ~= 31.88 vs. the paper's 32.05) depends on.
+    algebraic fact the empirical Set5/Set14 measurement (30.56 raw + 1.3219
+    ~= 31.88 vs. the paper's 32.05) depends on.
     """
     expected_delta = 20 * math.log10(255 / 219)
     g = torch.Generator().manual_seed(0)

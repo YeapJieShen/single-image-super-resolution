@@ -96,7 +96,7 @@ def test_train_dataset_random_crop_varies_across_calls(tiny_rgb_image_dir: Path)
 
 
 # ---------------------------------------------------------------------------
-# TrainDataset LMDB HR cache (INIT.13)
+# TrainDataset LMDB HR cache
 # ---------------------------------------------------------------------------
 
 
@@ -309,7 +309,7 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# SRDataset contract (P3.6 / P5.4)
+# SRDataset contract
 # ---------------------------------------------------------------------------
 
 

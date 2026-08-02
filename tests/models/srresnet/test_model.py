@@ -80,14 +80,14 @@ def test_check_scale_non_int_raises():
 
 
 def test_check_architecture_wrong_kernel_sizes_length_raises():
-    """P5.6: a kernel_sizes tuple that isn't length-3 must raise a clear
+    """A kernel_sizes tuple that isn't length-3 must raise a clear
     ValueError at construction, not an IndexError deep in layer wiring."""
     with pytest.raises(ValueError, match="kernel_sizes"):
         SRResNet(scale=2, kernel_sizes=(9, 3))
 
 
 def test_check_architecture_nonpositive_num_residual_blocks_raises():
-    """P5.6: num_residual_blocks <= 0 must raise a clear ValueError instead of
+    """num_residual_blocks <= 0 must raise a clear ValueError instead of
     silently building an empty residual Sequential."""
     with pytest.raises(ValueError, match="num_residual_blocks"):
         SRResNet(scale=2, num_residual_blocks=0)
