@@ -22,9 +22,11 @@ from sisr.training.config import SREvalConfig, SRTrainingConfig
 class SRResNetTrainingConfig(SRTrainingConfig):
     """SRResNet-paper-faithful training defaults.
 
-    The paper trains on full RGB (selected at the YAML layer by pairing
-    with :class:`~sisr.processors.RGBProcessor`) using Adam (lr 1e-4) and
-    no per-layer LRs.
+    The paper trains on full RGB using Adam (lr 1e-4) and no per-layer LRs.
+    Colorspace *and* intensity range are both selected at the YAML layer by
+    the processor: :class:`~sisr.processors.RGBSignedOutputProcessor` for
+    the paper's LR ``[0, 1]`` / HR ``[-1, 1]`` asymmetry,
+    :class:`~sisr.processors.RGBProcessor` for plain ``[0, 1]`` throughout.
 
     The paper does not specify a weight-initialization scheme.
     ``init_strategy='paper'`` is reserved for a future PR that wires up a
