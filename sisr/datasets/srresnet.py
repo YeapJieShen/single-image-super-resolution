@@ -10,10 +10,8 @@ the cached raw array, on every ``__getitem__`` call.
 :class:`ValidationDataset` serves full images cropped to a multiple of
 ``scale``, uncached (each is decoded once per epoch, no repetition).
 
-The resize backend is selectable (see :mod:`sisr.imresize`): ``'matlab'``
-(default) is antialiased and comparable to published paper numbers;
-``'cv2'`` has no antialiasing and is kept only so caches built before this
-module existed stay reproducible.
+LR is derived via MATLAB-compatible antialiased bicubic resizing (see
+:mod:`sisr.imresize`), comparable to published paper numbers.
 """
 
 import hashlib
@@ -26,7 +24,7 @@ import torch
 from PIL import Image
 
 from ..cache import LMDBCache, LMDBCacheBuildContext
-from ..imresize import ResizeBackend, resize
+from ..imresize import resize
 from .base import SRDataset
 
 # (height, width) as little-endian uint32 each, prefixed to every cached HR
@@ -87,12 +85,6 @@ class TrainDataset(SRDataset):
             length is ``len(images) * crops_per_image``). Each draw re-reads
             the same cached array (a cheap mmap access, not a decode) and
             takes an independently random crop. Defaults to ``1``.
-        resize_backend: ``'matlab'`` (default) — MATLAB-compatible
-            antialiased bicubic, comparable to published paper numbers.
-            ``'cv2'`` — no antialiasing; kept so LMDB caches built before
-            this module existed stay reproducible. See :mod:`sisr.imresize`.
-            Only the LR derivation is affected — the HR cache stores raw
-            pixels regardless, so switching backends never invalidates it.
         use_tqdm: Whether to display a progress bar during the LMDB build.
         cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
         build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
@@ -111,7 +103,6 @@ class TrainDataset(SRDataset):
         scale: int,
         hr_crop_size: int,
         crops_per_image: int = 1,
-        resize_backend: ResizeBackend = "matlab",
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
@@ -125,7 +116,6 @@ class TrainDataset(SRDataset):
         self.scale = scale
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
-        self.resize_backend = resize_backend
         self.build_num_workers = build_num_workers
         self.lr_size = hr_crop_size // scale
 
@@ -222,7 +212,7 @@ class TrainDataset(SRDataset):
             left = random.randint(0, w - self.hr_crop_size)
             hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()
 
-        lr_arr = resize(hr_arr, (self.lr_size, self.lr_size), backend=self.resize_backend)
+        lr_arr = resize(hr_arr, (self.lr_size, self.lr_size))
         lr_tensor = self._to_tensor(lr_arr)
         hr_tensor = self._to_tensor(hr_arr)
 
@@ -240,19 +230,16 @@ class ValidationDataset(SRDataset):
     Args:
         img_dir (str | Path): Directory containing the high-resolution images.
         scale (int): Upscaling factor.
-        resize_backend (ResizeBackend): ``'matlab'`` (default) or ``'cv2'``;
-            see :class:`TrainDataset` / :mod:`sisr.imresize`.
 
     Raises:
         ValueError: If no images are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int, resize_backend: ResizeBackend = "matlab"):
+    def __init__(self, img_dir: str | Path, scale: int):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
-        self.resize_backend = resize_backend
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -272,9 +259,7 @@ class ValidationDataset(SRDataset):
         w_crop = w - (w % self.scale)
         hr_arr = arr[:h_crop, :w_crop, :]  # deterministic exact-corner crop
 
-        lr_arr = resize(
-            hr_arr, (h_crop // self.scale, w_crop // self.scale), backend=self.resize_backend
-        )
+        lr_arr = resize(hr_arr, (h_crop // self.scale, w_crop // self.scale))
 
         lr_tensor = self._to_tensor(lr_arr)
         hr_tensor = self._to_tensor(hr_arr)

@@ -30,10 +30,10 @@ All arithmetic runs in float64 throughout (MATLAB computes ``imresize`` in
 double; a float32 port drifts by fractions of a level -- invisible until a
 uint8 cast turns it into scattered +/-1 errors).
 
-The two real deltas this closes vs. ``cv2.INTER_CUBIC``: MATLAB widens the
-kernel by ``1/scale`` when downscaling (antialiasing -- cv2 does not
-antialias at all, the dominant term) and the bicubic coefficient differs
-(MATLAB a=-0.5, OpenCV a=-0.75).
+The two real deltas this closes vs. a naive OpenCV-style bicubic resize:
+MATLAB widens the kernel by ``1/scale`` when downscaling (antialiasing --
+OpenCV does not antialias at all, the dominant term) and the bicubic
+coefficient differs (MATLAB a=-0.5, OpenCV a=-0.75).
 
 ------------------------------------------------------------------------------
 MIT License
@@ -61,14 +61,10 @@ SOFTWARE.
 """
 
 from math import ceil
-from typing import Literal
 
-import cv2
 import numpy as np
 
 _KERNEL_WIDTH = 4.0  # bicubic support width; MATLAB's a=-0.5 coefficient (OpenCV uses a=-0.75)
-
-ResizeBackend = Literal["matlab", "cv2"]
 
 
 def _cubic(x: np.ndarray) -> np.ndarray:
@@ -191,29 +187,18 @@ def matlab_imresize(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndar
     return arr[:, :, 0] if flag2d else arr
 
 
-def resize(
-    image: np.ndarray, size: tuple[int, int], backend: ResizeBackend = "matlab"
-) -> np.ndarray:
+def resize(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     """Resizes a uint8 image to ``(height, width) = size``.
+
+    MATLAB-``imresize``-compatible antialiased bicubic (a=-0.5), so benchmark
+    numbers stay comparable to published papers. Thin wrapper over
+    :func:`matlab_imresize`, kept as the stable import site for callers.
 
     Args:
         image: uint8 array, ``(H, W)`` or ``(H, W, C)``.
         size: Target ``(height, width)``.
-        backend: ``'matlab'`` (default) -- antialiased bicubic, a=-0.5,
-            matching MATLAB's ``imresize`` so benchmark numbers are
-            comparable to published papers. ``'cv2'`` -- ``cv2.INTER_CUBIC``
-            (a=-0.75, no antialiasing); kept only so LMDB caches built
-            before this module existed stay reproducible.
 
     Returns:
         Resized uint8 array.
-
-    Raises:
-        ValueError: If *backend* is not ``'matlab'`` or ``'cv2'``.
     """
-    if backend == "matlab":
-        return matlab_imresize(image, size)
-    if backend == "cv2":
-        height, width = size
-        return cv2.resize(image, (width, height), interpolation=cv2.INTER_CUBIC)
-    raise ValueError(f"Unknown resize backend {backend!r}; expected 'matlab' or 'cv2'.")
+    return matlab_imresize(image, size)

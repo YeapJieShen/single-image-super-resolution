@@ -21,8 +21,7 @@ def shared_srcnn_train_ds(tmp_path_factory) -> TrainDataset:
 
     Module-scoped so the LMDB build runs once instead of once per test;
     build_num_workers=1 forces PR 1's inline (no ProcessPool) build path, which
-    keeps it safe when the whole run is under pytest-xdist workers. Uses the
-    default resize_backend='matlab' (blur_sigma stays None to match).
+    keeps it safe when the whole run is under pytest-xdist workers.
     """
     img_dir = tmp_path_factory.mktemp("shared_srcnn_hr")
     rng = np.random.default_rng(seed=0)
@@ -102,10 +101,9 @@ def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
 
 
 def test_train_dataset_cache_independent_of_grid_params(tiny_rgb_image_dir: Path):
-    """The cache stores whole images, so changing subimg_size/stride/scale/
-    blur_sigma/resize_backend over the same file set must NOT trigger a
-    rebuild (contrast the pre-HR-only cache, whose checksum baked all of
-    those in)."""
+    """The cache stores whole images, so changing subimg_size/stride/scale
+    over the same file set must NOT trigger a rebuild (contrast the
+    pre-HR-only cache, whose checksum baked all of those in)."""
     cache_dir = tiny_rgb_image_dir / ".lmdb_cache_shared_grid"
     _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2, cache_dir=cache_dir)
     with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
@@ -114,8 +112,6 @@ def test_train_dataset_cache_independent_of_grid_params(tiny_rgb_image_dir: Path
             subimg_size=24,
             stride=10,
             scale=4,
-            resize_backend="cv2",
-            blur_sigma=2.0,
             cache_dir=cache_dir,
         )
         mock_proc.assert_not_called()
@@ -143,8 +139,8 @@ def test_train_dataset_checksum_change_triggers_rebuild(tmp_path: Path):
 
 def test_train_dataset_checksum_ignores_grid_and_lr_params(shared_srcnn_train_ds: TrainDataset):
     """_compute_checksum must depend only on the file manifest (+ a format
-    tag) -- not on subimg_size/stride/scale/blur_sigma/resize_backend, since
-    the HR-only cache stores raw pixels unaffected by any of them."""
+    tag) -- not on subimg_size/stride/scale, since the HR-only cache stores
+    raw pixels unaffected by any of them."""
     import hashlib
 
     ds = shared_srcnn_train_ds
@@ -154,18 +150,12 @@ def test_train_dataset_checksum_ignores_grid_and_lr_params(shared_srcnn_train_ds
     assert ds._compute_checksum() == expected
 
 
-def test_train_dataset_backend_and_grid_do_not_affect_checksum(tiny_rgb_image_dir: Path):
-    ds_a = _make_train(
-        tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2, resize_backend="matlab"
-    )
-    ds_b = _make_train(
-        tiny_rgb_image_dir,
-        subimg_size=24,
-        stride=10,
-        scale=4,
-        resize_backend="cv2",
-        blur_sigma=1.5,
-    )
+def test_train_dataset_grid_params_do_not_affect_checksum(tiny_rgb_image_dir: Path):
+    """The HR cache stores raw pixels only; degradation/grid parameters are
+    applied at read time, so two datasets differing only in
+    subimg_size/stride/scale must produce the same checksum."""
+    ds_a = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2)
+    ds_b = _make_train(tiny_rgb_image_dir, subimg_size=24, stride=10, scale=4)
     assert ds_a._compute_checksum() == ds_b._compute_checksum()
 
 
@@ -301,51 +291,6 @@ def test_train_dataset_hr_subimage_matches_exact_grid_position(tiny_rgb_image_di
 
 
 # ---------------------------------------------------------------------------
-# resize_backend / blur_sigma construction guard (INIT.11)
-# ---------------------------------------------------------------------------
-
-
-def test_train_dataset_matlab_backend_rejects_blur_sigma(tiny_rgb_image_dir: Path):
-    with pytest.raises(ValueError, match="matlab"):
-        _make_train(tiny_rgb_image_dir, resize_backend="matlab", blur_sigma=1.0)
-
-
-def test_train_dataset_cv2_backend_defaults_blur_sigma_when_unset(tiny_rgb_image_dir: Path):
-    ds = _make_train(tiny_rgb_image_dir, resize_backend="cv2")
-    assert ds.blur_sigma == 1.0
-
-
-def test_train_dataset_cv2_backend_uses_provided_blur_sigma(tiny_rgb_image_dir: Path):
-    ds = _make_train(tiny_rgb_image_dir, resize_backend="cv2", blur_sigma=2.5)
-    assert ds.blur_sigma == 2.5
-
-
-def test_train_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
-    ds = _make_train(tiny_rgb_image_dir)
-    assert ds.resize_backend == "matlab"
-    assert ds.blur_sigma is None
-
-
-def test_train_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
-    """The two backends implement different bicubic kernels/antialiasing, so
-    the same crop must not degrade identically under each."""
-    ds_matlab = _make_train(tiny_rgb_image_dir, resize_backend="matlab")
-    ds_cv2 = _make_train(
-        tiny_rgb_image_dir, resize_backend="cv2", cache_dir=tiny_rgb_image_dir / ".lmdb_cache_cv2"
-    )
-    lr_matlab, _ = ds_matlab[0]
-    lr_cv2, _ = ds_cv2[0]
-    assert not torch.allclose(lr_matlab, lr_cv2)
-
-
-def test_validation_dataset_matlab_backend_rejects_blur_sigma(tiny_rgb_image_dir: Path):
-    with pytest.raises(ValueError, match="matlab"):
-        ValidationDataset(
-            img_dir=tiny_rgb_image_dir, scale=2, resize_backend="matlab", blur_sigma=1.0
-        )
-
-
-# ---------------------------------------------------------------------------
 # ValidationDataset
 # ---------------------------------------------------------------------------
 
@@ -363,20 +308,6 @@ def test_validation_dataset_serves_full_image_pairs(tiny_rgb_image_dir: Path):
 def test_validation_dataset_no_images_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="No images"):
         ValidationDataset(img_dir=tmp_path, scale=2)
-
-
-def test_validation_dataset_blur_sigma_propagates(tiny_rgb_image_dir: Path):
-    """On the 'cv2' backend, ValidationDataset accepts and uses blur_sigma, so
-    two datasets with different sigmas produce different LR outputs."""
-    ds_a = ValidationDataset(
-        img_dir=tiny_rgb_image_dir, scale=2, resize_backend="cv2", blur_sigma=0.1
-    )
-    ds_b = ValidationDataset(
-        img_dir=tiny_rgb_image_dir, scale=2, resize_backend="cv2", blur_sigma=3.0
-    )
-    lr_a, _ = ds_a[0]
-    lr_b, _ = ds_b[0]
-    assert not torch.allclose(lr_a, lr_b), "different blur_sigma must produce different LR"
 
 
 def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):

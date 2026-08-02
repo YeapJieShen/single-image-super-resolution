@@ -126,35 +126,14 @@ def test_matlab_imresize_output_is_uint8_and_clipped():
 
 
 # ---------------------------------------------------------------------------
-# resize() backend dispatcher
+# resize()
 # ---------------------------------------------------------------------------
 
 
-def test_resize_matlab_backend_matches_matlab_imresize():
+def test_resize_matches_matlab_imresize():
     rng = np.random.default_rng(2)
     img = rng.integers(0, 256, size=(24, 24, 3), dtype=np.uint8)
-    assert np.array_equal(resize(img, (8, 8), backend="matlab"), matlab_imresize(img, (8, 8)))
-
-
-def test_resize_cv2_backend_matches_cv2_directly():
-    import cv2
-
-    rng = np.random.default_rng(3)
-    img = rng.integers(0, 256, size=(24, 24, 3), dtype=np.uint8)
-    expected = cv2.resize(img, (8, 8), interpolation=cv2.INTER_CUBIC)
-    assert np.array_equal(resize(img, (8, 8), backend="cv2"), expected)
-
-
-def test_resize_defaults_to_matlab_backend():
-    rng = np.random.default_rng(4)
-    img = rng.integers(0, 256, size=(24, 24, 3), dtype=np.uint8)
     assert np.array_equal(resize(img, (8, 8)), matlab_imresize(img, (8, 8)))
-
-
-def test_resize_unknown_backend_raises():
-    img = np.zeros((4, 4, 3), dtype=np.uint8)
-    with pytest.raises(ValueError, match="pillow"):
-        resize(img, (2, 2), backend="pillow")
 
 
 # ---------------------------------------------------------------------------
