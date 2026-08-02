@@ -1,5 +1,7 @@
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -363,3 +365,164 @@ def test_parallel_build_none_workers_builds_single_item_inline(tmp_path: Path):
         )
     mock_pool.assert_not_called()
     assert cache.get("n_7") == b"49"
+
+
+# ---------------------------------------------------------------------------
+# Advisory build lock
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_lock_uncontended_creates_sentinel_and_returns_true(tmp_path: Path):
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="lock",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    lock_path = cache._lock_path()
+    assert not lock_path.exists(), "the build's own lock must be released once it completes"
+
+    assert cache._acquire_lock("abc", poll_interval=0.01, timeout=0.05) is True
+    assert lock_path.exists()
+    assert lock_path.read_text() == str(os.getpid())
+
+
+def test_release_lock_removes_sentinel_and_is_idempotent(tmp_path: Path):
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="lock",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    cache._acquire_lock("abc", poll_interval=0.01, timeout=0.05)
+    assert cache._lock_path().exists()
+
+    cache._release_lock()
+    assert not cache._lock_path().exists()
+    cache._release_lock()  # must not raise when there is nothing to remove
+
+
+_RACE_WORKER_SCRIPT = """
+import sys, time
+from sisr.cache import LMDBCache
+
+def build(ctx):
+    with open(sys.argv[2], "a") as f:
+        f.write("build\\n")
+    time.sleep(0.3)
+    ctx.write_batch([("key_0", b"v0")])
+
+cache = LMDBCache(
+    cache_dir=sys.argv[1], name="race", checksum="racecs", length=1,
+    map_size=16 * 1024 * 1024, build_fn=build,
+    lock_poll_interval=0.02, lock_timeout=5.0,
+)
+with open(sys.argv[3], "w") as f:
+    f.write((cache.get("key_0") or b"").decode())
+"""
+
+
+def test_lmdb_cache_builds_exactly_once_across_two_racing_processes(tmp_path: Path):
+    """Two OS processes racing to build the identical (cache_dir, name,
+    checksum) -- two concurrent training runs pointed at one cache_dir, the
+    scenario this lock exists for -- must call build_fn exactly once; the
+    loser waits on the winner's lock and reuses its result.
+
+    Runs genuinely separate interpreters (not threads): LMDB itself refuses a
+    second Environment on the same path within one process, so an in-process
+    thread-based "race" would trip that same-process restriction rather than
+    exercising the actual cross-process lock this guards. Each process gets
+    its own result file -- two processes appending to one shared file isn't
+    reliably atomic on Windows and would make the harness itself flaky.
+    """
+    build_log = tmp_path / "build_log.txt"  # only the winner ever writes here
+    result_1, result_2 = tmp_path / "result_1.txt", tmp_path / "result_2.txt"
+    script = tmp_path / "race_worker.py"
+    script.write_text(_RACE_WORKER_SCRIPT)
+
+    p1 = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), str(build_log), str(result_1)]
+    )
+    time.sleep(0.05)  # give p1 a head start so it wins the lock, not a coin flip
+    p2 = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), str(build_log), str(result_2)]
+    )
+    assert p1.wait(timeout=15) == 0
+    assert p2.wait(timeout=15) == 0
+
+    assert build_log.read_text().splitlines() == ["build"], (
+        "build_fn must run exactly once across two racing processes"
+    )
+    assert result_1.read_text() == "v0"
+    assert result_2.read_text() == "v0"
+
+
+def test_acquire_lock_times_out_and_builds_anyway_on_stale_lock(tmp_path: Path):
+    """A lock sentinel with no corresponding valid cache (a crashed builder
+    that never released it) must not block forever: after lock_timeout
+    elapses, the caller proceeds to build rather than waiting indefinitely."""
+    name, checksum = "stale", "sc1"
+    lock_path = tmp_path / f"{name}_{checksum[:16]}.build.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, b"999999")  # simulates a crashed builder's leftover pid
+    os.close(fd)
+
+    call_count = []
+
+    def build(ctx: LMDBCacheBuildContext) -> None:
+        call_count.append(1)
+        ctx.write_batch([("key_0", b"v0")])
+
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name=name,
+        checksum=checksum,
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=build,
+        lock_poll_interval=0.02,
+        lock_timeout=0.1,
+    )
+    assert call_count == [1], "must build despite the stale lock once the timeout elapses"
+    assert cache.get("key_0") == b"v0"
+    assert not lock_path.exists(), "taking over from a stale lock should also clean it up"
+
+
+def test_acquire_lock_polling_returns_false_once_try_load_succeeds(tmp_path: Path):
+    """While waiting on a held lock, _try_load succeeding (a concurrent
+    builder finished) must end the poll and report "no build needed" --
+    without waiting anywhere near the full timeout.
+
+    _try_load itself is exercised elsewhere; this isolates _acquire_lock's
+    poll/timeout contract by faking it to report "valid" on its 3rd call,
+    rather than racing a second real LMDB build (which LMDB's own
+    same-process single-Environment-per-path rule makes unrepresentable with
+    threads -- see the cross-process test above for the real end-to-end path).
+    """
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="poll",
+        checksum="pc1",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    lock_path = cache._lock_path()
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.close(fd)
+
+    calls = []
+
+    def fake_try_load(checksum):
+        calls.append(checksum)
+        return len(calls) >= 3
+
+    with patch.object(cache, "_try_load", side_effect=fake_try_load):
+        acquired = cache._acquire_lock("pc1", poll_interval=0.01, timeout=5.0)
+
+    assert acquired is False
+    assert calls == ["pc1", "pc1", "pc1"]

@@ -16,6 +16,7 @@ torch-free; colorspace math lives in :mod:`sisr.colorspace` for this reason.
 
 import os
 import shutil
+import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
@@ -140,9 +141,20 @@ class LMDBCache:
     After construction the cache is read-only. Call :meth:`get` to
     retrieve individual entries, or :meth:`get_env` for direct LMDB access.
 
+    Two independent processes building the same cache (same *cache_dir*,
+    *name*, *checksum*) race by design — LMDB itself already serialises
+    writers and ``__checksum__`` is written last, so a half-built cache is
+    never mistaken for a complete one. An advisory file lock (see
+    :meth:`_acquire_lock`) exists only to *avoid duplicate work*, not to
+    provide correctness: a losing process polls for the winner's result and
+    joins it, but if the winner never finishes (e.g. it crashed while
+    holding the lock) the loser builds anyway once *lock_timeout* elapses.
+    Waiting forever on a stale lock is the one failure mode this must never
+    have; rebuilding a cache that already exists is merely wasted time.
+
     Args:
         cache_dir: Parent directory for the LMDB database.
-        name: Prefix used in the LMDB folder name (e.g. ``'srcnn_hr'``).
+        name: Prefix used in the LMDB folder name (e.g. ``'hr_raw'``).
         checksum: Hex digest identifying the current configuration; a
             mismatch triggers a rebuild.
         length: Total number of entries that will be stored.
@@ -152,6 +164,9 @@ class LMDBCache:
             :class:`LMDBCacheBuildContext`. ``None`` with no valid cache
             found raises ``RuntimeError``.
         use_tqdm: Whether to display a progress bar during the build.
+        lock_poll_interval: Seconds between checks for a concurrent
+            builder's result while waiting on its lock.
+        lock_timeout: Seconds to wait on a held lock before building anyway.
     """
 
     def __init__(
@@ -164,6 +179,8 @@ class LMDBCache:
         metadata: dict[str, str] | None = None,
         build_fn: Callable[[LMDBCacheBuildContext], None] | None = None,
         use_tqdm: bool = False,
+        lock_poll_interval: float = 0.5,
+        lock_timeout: float = 600.0,
     ):
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -177,7 +194,14 @@ class LMDBCache:
                 raise RuntimeError(
                     f"No valid LMDB cache found at {self._lmdb_path} and no build_fn was provided."
                 )
-            self._build(checksum, length, map_size, build_fn, use_tqdm)
+            if self._acquire_lock(checksum, lock_poll_interval, lock_timeout):
+                try:
+                    # Re-check: a concurrent builder may have finished (and released
+                    # its lock) between our first _try_load and winning this one.
+                    if not self._try_load(checksum):
+                        self._build(checksum, length, map_size, build_fn, use_tqdm)
+                finally:
+                    self._release_lock()
 
     @property
     def path(self) -> Path:
@@ -260,26 +284,79 @@ class LMDBCache:
         return results
 
     def _try_load(self, checksum: str) -> bool:
-        """Validates an existing LMDB against *checksum*; ``True`` if ready to use."""
+        """Validates an existing LMDB against *checksum*; ``True`` if ready to use.
+
+        Failing to even *open* the environment is presumed genuine corruption
+        (bad format, truncated files) and the directory is dropped so a later
+        call can rebuild it. A failure *after* a successful open — reading the
+        transaction — is treated as merely not-ready-yet, without deleting
+        anything: opened with ``lock=False``, this read can raise on Windows
+        while a concurrent writer *in another process* is still active (the
+        exact scenario :meth:`_acquire_lock` exists for), even though nothing
+        is actually corrupt. Deleting the directory there would destroy that
+        other process's in-progress or just-finished build instead of merely
+        costing this call a retry.
+        """
         if not self._lmdb_path.exists():
             return False
         try:
             env = lmdb.open(str(self._lmdb_path), readonly=True, lock=False)
-            with env.begin(write=False) as txn:
-                stored = txn.get(b"__checksum__")
-                if stored is None or stored.decode() != checksum:
-                    env.close()
-                    return False
-                self._length = int(txn.get(b"__length__").decode())
-            env.close()
-            return True
         except (lmdb.Error, OSError):
-            # Only a genuinely unreadable cache (corruption, disk/OS error)
-            # counts as stale and gets dropped; anything else must propagate
-            # rather than be silently mistaken for a stale cache.
             if self._lmdb_path.exists():
                 shutil.rmtree(self._lmdb_path)
             return False
+
+        try:
+            with env.begin(write=False) as txn:
+                stored = txn.get(b"__checksum__")
+                if stored is None or stored.decode() != checksum:
+                    return False
+                self._length = int(txn.get(b"__length__").decode())
+            return True
+        except (lmdb.Error, OSError):
+            return False
+        finally:
+            env.close()
+
+    def _lock_path(self) -> Path:
+        """Sentinel path for the advisory build lock, scoped to this checksum."""
+        return self._lmdb_path.with_name(self._lmdb_path.name + ".build.lock")
+
+    def _acquire_lock(self, checksum: str, poll_interval: float, timeout: float) -> bool:
+        """Becomes the sole builder for *checksum*, or waits on whoever already is.
+
+        Returns:
+            ``True`` if the caller should proceed to build — either it won
+            the lock outright, or it waited out *timeout* without seeing a
+            valid cache appear (a stale/crashed lock holder must not deadlock
+            every later run, so this falls through to a duplicate build
+            rather than waiting forever). ``False`` if a concurrent builder
+            produced a valid cache while waiting — :meth:`_try_load` has
+            already refreshed :attr:`_length` in that case.
+        """
+        lock_path = self._lock_path()
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            pass
+        else:
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._try_load(checksum):
+                return False
+            time.sleep(poll_interval)
+        return True
+
+    def _release_lock(self) -> None:
+        """Removes the lock sentinel this process created in :meth:`_acquire_lock`."""
+        try:
+            self._lock_path().unlink()
+        except FileNotFoundError:
+            pass
 
     def _build(
         self,
