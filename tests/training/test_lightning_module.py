@@ -643,6 +643,96 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
 
 
 # ---------------------------------------------------------------------------
+# P4.14 — metric-path clamp to [0, 1], applied once in _forward_lr
+# ---------------------------------------------------------------------------
+
+
+def _overshooting_rgb_lit() -> SRLightning:
+    """SRCNN + RGBProcessor (identity reconstruct) with the tail conv biased
+    hugely positive, so sr_rgb genuinely overshoots [0, 1] on any input — the
+    scenario the P4.14 clamp exists for."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    torch.nn.init.constant_(model.recon.bias, 5.0)
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_step_clamps_sr_rgb_but_not_the_loss_target():
+    """Regression (P4.14): sr_rgb returned by _step is clamped to [0, 1] even
+    though the model genuinely overshoots, while the loss — read from
+    sr_model_out, never sr_rgb — is exactly the unclamped MSE. A clamp that
+    leaked into the loss would kill gradients on saturated pixels (constraint
+    1) and would also make this hand-computed loss equal the "wrong_loss"
+    below instead."""
+    lit = _overshooting_rgb_lit()
+    lr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(0))
+    hr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(1))
+
+    sr_model_out, _ = lit._forward_lr(lr)
+    assert sr_model_out.max() > 1.0, "fixture must genuinely overshoot [0, 1]"
+
+    loss, _, _, sr_rgb, hr_cropped = lit._step((lr, hr))
+
+    assert sr_rgb.min() >= 0.0
+    assert sr_rgb.max() <= 1.0
+
+    expected_loss = torch.nn.functional.mse_loss(sr_model_out, hr_cropped)
+    torch.testing.assert_close(loss, expected_loss)
+
+    wrong_loss = torch.nn.functional.mse_loss(sr_rgb, hr_cropped)
+    assert not torch.allclose(loss, wrong_loss)
+
+
+def test_step_psnr_matches_hand_clamped_reference_not_raw_output():
+    """Regression (P4.14): PSNR scored on the validation_step path must equal
+    a hand-clamped reference computed from the raw model output, not the PSNR
+    the unclamped output would give — proving overshoot is being penalised
+    away rather than silently scored."""
+    lit = _overshooting_rgb_lit()
+    lr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(0))
+    hr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(1))
+
+    sr_model_out, _ = lit._forward_lr(lr)
+    _, _, _, sr_rgb, hr_cropped = lit._step((lr, hr))
+
+    scored_psnr = SRLightning._mean_psnr(sr_rgb, hr_cropped)
+    hand_clamped_psnr = SRLightning._mean_psnr(sr_model_out.clamp(0.0, 1.0), hr_cropped)
+    unclamped_psnr = SRLightning._mean_psnr(sr_model_out, hr_cropped)
+
+    torch.testing.assert_close(scored_psnr, hand_clamped_psnr)
+    assert not torch.allclose(scored_psnr, unclamped_psnr)
+
+
+def test_predict_rgb_clamps_for_benchmark_logger_consumer():
+    """Regression (P4.14): predict_rgb — the seam BenchmarkImageLogger reads
+    for benchmark/test-set metrics — must return the same clamped sr_rgb as
+    the validation_step path, not a re-implemented, unclamped forward."""
+    lit = _overshooting_rgb_lit()
+    lr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(0))
+    hr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(1))
+
+    sr_rgb, _ = lit.predict_rgb(lr, hr)
+    assert sr_rgb.min() >= 0.0
+    assert sr_rgb.max() <= 1.0
+
+
+def test_predict_step_output_also_clamped_via_shared_forward_lr():
+    """predict_step shares _forward_lr with _forward_sr (see its docstring),
+    so the same clamp covers it as a side effect — locks that the seam really
+    is shared rather than duplicated across the two call sites."""
+    lit = _overshooting_rgb_lit()
+    lr = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(0))
+    out = lit.predict_step(lr, batch_idx=0)
+    assert out.min() >= 0.0
+    assert out.max() <= 1.0
+
+
+# ---------------------------------------------------------------------------
 # P2.2 — no dead stateful metric accumulator
 # ---------------------------------------------------------------------------
 
