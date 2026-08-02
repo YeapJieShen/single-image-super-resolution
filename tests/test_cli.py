@@ -92,12 +92,13 @@ def test_srresnet_config_resolves_in_process():
         SRResNetEvalConfig,
         SRResNetTrainingConfig,
     )
-    from sisr.processors import RGBProcessor
+    from sisr.processors import RGBSignedOutputProcessor
 
     cli = _resolve("--config", str(SRRESNET_TEMPLATE))
     m = cli.model
     assert isinstance(m.model, SRResNet)
-    assert isinstance(m.processor, RGBProcessor)
+    # P2.10: the template ships the paper's [-1, 1] HR/target range.
+    assert isinstance(m.processor, RGBSignedOutputProcessor)
     assert isinstance(m.training_config, SRResNetTrainingConfig)
     assert isinstance(m.eval_config, SRResNetEvalConfig)
     assert m.eval_config.crop_border == 4  # inherited-default check
