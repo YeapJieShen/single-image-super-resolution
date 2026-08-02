@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import lightning
 import pytest
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from sisr.models.srcnn import SRCNN
@@ -18,6 +19,7 @@ from sisr.training import (
     SRLightning,
     SRPredictionWriter,
     SRTrainingConfig,
+    SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
 
@@ -359,6 +361,158 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     assert "psnr/val/RGB" in str(exc_info.value)
     assert "ssim/val/RGB" in str(exc_info.value)
     assert "ssim/val/Y" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# SRWeightsCheckpoint
+# ---------------------------------------------------------------------------
+
+
+def test_sr_weights_checkpoint_file_extension_is_pt():
+    ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath="/tmp/x")
+    assert ckpt.FILE_EXTENSION == ".pt"
+
+
+def test_sr_weights_checkpoint_default_filename_prefix_is_sr_weights():
+    """Distinct from SRCheckpoint's 'sr' default so a shared dirpath's top-k
+    deletion passes can never mistake one callback's files for the other's."""
+    ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath="/tmp/x")
+    assert ckpt.filename.startswith("sr-weights-")
+
+
+def test_sr_weights_checkpoint_custom_filename_prefix():
+    ckpt = SRWeightsCheckpoint(
+        monitor_metric="psnr/val/RGB", dirpath="/tmp/x", filename_prefix="myrun"
+    )
+    assert ckpt.filename.startswith("myrun-")
+
+
+def test_sr_weights_checkpoint_default_max_mode():
+    ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath="/tmp/x")
+    assert ckpt.mode == "max"
+
+
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_setup_rejects_unknown_monitor(tmp_path: Path):
+    """setup() validation is inherited (delegated to SRCheckpoint.setup), so a
+    monitor eval_config never logs must raise at startup here too."""
+    pl_module = _make_real_pl_module()
+    ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/Y", dirpath=str(tmp_path))
+    with pytest.raises(MisconfigurationException, match=r"psnr/val/Y"):
+        ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
+
+
+def test_sr_weights_checkpoint_save_checkpoint_is_actually_overridden():
+    """Cheap static guard: the override must exist as a distinct method, not
+    silently inherit ModelCheckpoint's (which would write full, optimizer-bearing
+    checkpoints under the .pt extension). The real, functional guard against a
+    Lightning release routing saves through a different private method entirely
+    is test_sr_weights_checkpoint_writes_bare_payload_via_real_fit below, which
+    exercises the actual save path end-to-end."""
+    assert SRWeightsCheckpoint._save_checkpoint is not ModelCheckpoint._save_checkpoint
+
+
+def _make_srcnn_datamodule(image_dir: Path):
+    """Tiny SRDataModule (3 fixture images) mirroring test_integration.py's helper —
+    real Trainer.fit needs a real datamodule to reach ModelCheckpoint's save path."""
+    from sisr.training import SRDataModule
+
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+            "use_tqdm": False,
+            "cache_dir": str(image_dir / ".lmdb_cache_weights_ckpt_test"),
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(image_dir), "scale": 2},
+    }
+    return SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
+        val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """End-to-end proof that Lightning's real save path invokes our
+    ``_save_checkpoint`` override, that ``SRCheckpoint``/``SRWeightsCheckpoint``
+    coexist in one ``dirpath`` without deleting each other's files, and that the
+    bare ``.pt`` payload is exactly what the spec requires: no optimizer state,
+    no ``model.``-prefixed keys, and the state_dict loads strict into a fresh
+    bare model.
+
+    This is the loud-failure guard for the private ``_save_checkpoint`` hook: if
+    a future Lightning release stops routing saves through it, the ``.pt`` file
+    would instead contain a full Lightning checkpoint dict (``optimizer_states``,
+    ``callbacks``, ``model.``-prefixed ``state_dict``, ...) and every assertion
+    below would fail.
+    """
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
+    )
+    datamodule = _make_srcnn_datamodule(tiny_rgb_image_dir)
+    # A dedicated subdir, not tmp_path itself: tiny_rgb_image_dir *is* tmp_path (the
+    # fixture writes fixture PNGs directly into it), and ModelCheckpoint.setup warns
+    # (-> error, under this suite's strict filter) if dirpath is non-empty at startup.
+    ckpt_dir = tmp_path / "checkpoints"
+
+    sr_ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(ckpt_dir))
+    sr_weights_ckpt = SRWeightsCheckpoint(
+        monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(ckpt_dir)
+    )
+    trainer = lightning.Trainer(
+        max_epochs=-1,
+        max_steps=3,
+        val_check_interval=1,
+        check_val_every_n_epoch=None,
+        num_sanity_val_steps=0,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=[sr_ckpt, sr_weights_ckpt],
+    )
+
+    trainer.fit(module, datamodule=datamodule)
+
+    ckpt_files = list(ckpt_dir.glob("sr-*.ckpt"))
+    pt_files = list(ckpt_dir.glob("sr-weights-*.pt"))
+    all_files = list(ckpt_dir.iterdir())
+    # save_top_k=1 on each: exactly one file per callback survives repeated
+    # val-triggered saves, and coexisting in one dirpath produced no cross-deletion.
+    assert len(ckpt_files) == 1
+    assert len(pt_files) == 1
+    assert len(all_files) == 2
+
+    full_checkpoint = torch.load(ckpt_files[0], weights_only=True)
+    assert "optimizer_states" in full_checkpoint
+    assert "sisr_meta" in full_checkpoint  # on_save_checkpoint fired here too
+    assert all(k.startswith("model.") for k in full_checkpoint["state_dict"])
+
+    bare = torch.load(pt_files[0], weights_only=True)
+    assert set(bare.keys()) == {"state_dict", "meta"}
+    assert "optimizer_states" not in bare
+    assert not any(k.startswith("model.") for k in bare["state_dict"])
+    assert bare["meta"]["format"] == "sisr-meta-v1"
+    assert bare["meta"]["training"]["monitor"] == "psnr/val/RGB"
+
+    fresh_model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    fresh_model.load_state_dict(bare["state_dict"], strict=True)  # the real proof
 
 
 # ---------------------------------------------------------------------------

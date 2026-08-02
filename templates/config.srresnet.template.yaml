@@ -108,6 +108,17 @@ trainer:
       init_args:
         monitor_metric: ssim/val/RGB
         save_top_k: 3
+    # Distributable, optimizer-free weights (.pt) alongside the resumable .ckpt files
+    # above — same monitors/top-k, so every checkpointed best also ships a bare-weights
+    # counterpart safe to hand out without leaking optimizer state.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/RGB
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
