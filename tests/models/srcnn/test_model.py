@@ -15,6 +15,11 @@ def srcnn_valid() -> SRCNN:
     )
 
 
+def test_input_contract_is_pre_upsampled():
+    """SRCNN is resolution-preserving: LR arrives already bicubic-upsampled to HR size."""
+    assert SRCNN.input_contract == "pre_upsampled"
+
+
 def test_forward_valid_padding_shrinks_spatial(srcnn_valid: SRCNN):
     x = torch.zeros(2, 3, 33, 33)
     out = srcnn_valid(x)

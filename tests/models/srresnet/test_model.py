@@ -15,6 +15,11 @@ def test_package_reexports_public_symbols():
     assert PkgUpsample is SRUpsampleBlock
 
 
+def test_input_contract_is_native_lr():
+    """SRResNet consumes true low-resolution input and upsamples internally."""
+    assert SRResNet.input_contract == "native_lr"
+
+
 def test_hparams_exposes_architecture():
     model = SRResNet(scale=4, hidden_channel=32, num_residual_blocks=2)
     h = model.hparams
