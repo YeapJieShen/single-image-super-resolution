@@ -6,7 +6,7 @@ Two layers of evidence:
    this a MATLAB-parity port rather than "generic bicubic": the a=-0.5
    kernel coefficient, antialiasing kernel widening on downscale, symmetric
    (mirror) border padding, and round-half-away-from-zero on the uint8 cast.
-2. A byte-equality test against real MATLAB-generated reference data —
+2. Byte-equality tests against real MATLAB-generated reference data —
    the strongest available claim, since without MATLAB itself this project
    cannot prove byte-identity from first principles.
 
@@ -21,8 +21,9 @@ Reference data (not committed — ``data/`` is gitignored):
     SHA-256 of the full 250112000-byte tar: 80c21c333bbf6ceb5308b7243761f82
     84478274413a97b96f1d63e9045fd93e8
 
-To enable the byte-equality test, download that URL, verify the checksum,
-then extract only the ``Set5``, ``Set14`` and ``B100`` subtrees into::
+To enable the downscale byte-equality test, download that URL, verify the
+checksum, then extract only the ``Set5``, ``Set14`` and ``B100`` subtrees
+into::
 
     data/reference/Set5/{HR,LR_bicubic/{X2,X3,X4}}
     data/reference/Set14/{HR,LR_bicubic/{X2,X3,X4}}
@@ -34,9 +35,31 @@ a remote host, and ``--wildcards`` for the subtree globs to expand)::
     tar --force-local -xf benchmark.tar --wildcards \
         'benchmark/Set5/*' 'benchmark/Set14/*' 'benchmark/B100/*'
 
-then move all three dirs under ``data/reference/``. The test skips cleanly
-(not an error, not a silent no-op) when that directory is absent, so CI
-stays hermetic and contributors without the archive get a green suite.
+then move all three dirs under ``data/reference/``.
+
+SRCNN's degradation is bicubic-down *then* bicubic-up (see
+:func:`sisr.datasets.srcnn._degrade`) -- the benchmark distribution above
+only covers the downscale leg. To also cover the upscale leg, generate, in
+MATLAB, for every ``LR_bicubic/X{s}/<stem>x{s}.png`` produced above::
+
+    Bicubic_up/X{s}/<stem>x{s}.png = imresize(lr, [h_crop w_crop], 'bicubic')
+
+where ``lr`` is that ``LR_bicubic`` image and ``h_crop, w_crop`` are the
+source HR image's dimensions mod-cropped to a multiple of ``s``
+(equivalently ``s ×`` ``lr``'s own dimensions), and drop the results
+under::
+
+    data/reference/Set5/Bicubic_up/{X2,X3,X4}
+    data/reference/Set14/Bicubic_up/{X2,X3,X4}
+    data/reference/B100/Bicubic_up/{X2,X3,X4}
+
+**Current limitation:** only the downscale leg has byte-equality evidence
+as of this writing -- the upscale test below stays dormant (skipped) until
+the ``Bicubic_up`` data above is generated and dropped in place.
+
+Both byte-equality tests skip cleanly (not an error, not a silent no-op)
+when their respective reference data is absent, so CI stays hermetic and
+contributors without the archive get a green suite.
 """
 
 from pathlib import Path
@@ -186,6 +209,66 @@ def test_matlab_imresize_matches_real_matlab_reference_data():
         lr_mine = matlab_imresize(cropped, (h_crop // scale, w_crop // scale))
         if lr_mine.shape != lr_real.shape or not np.array_equal(lr_mine, lr_real):
             mismatches.append(f"{dataset}/{hr_path.stem} x{scale}")
+
+    assert not mismatches, (
+        f"{len(mismatches)}/{len(cases)} reference images did not reproduce byte-exactly: "
+        f"{mismatches[:10]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Byte-equality for the upscale leg (bicubic-up) against MATLAB reference data
+# ---------------------------------------------------------------------------
+
+
+def _upscale_cases(base_dir: Path = REFERENCE_DIR) -> list[tuple[str, Path, Path, int]]:
+    """Pairs each ``LR_bicubic`` reference image with its ``Bicubic_up`` counterpart.
+
+    Takes *base_dir* as a parameter (rather than hardcoding
+    :data:`REFERENCE_DIR`) so the mismatch-detection sanity check can point
+    it at a synthetic tmp-dir fixture instead of real reference data.
+    """
+    cases = []
+    for dataset in ("Set5", "Set14", "B100"):
+        for scale in (2, 3, 4):
+            lr_dir = base_dir / dataset / "LR_bicubic" / f"X{scale}"
+            up_dir = base_dir / dataset / "Bicubic_up" / f"X{scale}"
+            if not lr_dir.is_dir():
+                continue
+            for lr_path in sorted(lr_dir.glob("*.png")):
+                up_path = up_dir / lr_path.name
+                if up_path.exists():
+                    cases.append((dataset, lr_path, up_path, scale))
+    return cases
+
+
+def test_matlab_imresize_upscale_matches_real_matlab_reference_data():
+    """Byte-equality against MATLAB-generated ``Bicubic_up`` pairs.
+
+    Covers SRCNN's second (upscale) degradation step -- see
+    :func:`sisr.datasets.srcnn._degrade` -- which the downscale test above
+    does not exercise at all: that test only proves HR-to-LR byte-equality,
+    but ``_degrade`` also resizes the LR back up to the HR's own size, and
+    until now nothing checked that leg against real MATLAB output. No
+    recomputation from HR is needed here: since the referenced LR image is
+    itself already mod-cropped (see the downscale test's docstring), the
+    upscale target is simply ``scale x lr.shape``.
+    """
+    cases = _upscale_cases()
+    if not cases:
+        pytest.skip(
+            f"No Bicubic_up/ reference data under {REFERENCE_DIR} -- generate it per this "
+            "file's module docstring to enable the upscale byte-equality check."
+        )
+
+    mismatches = []
+    for dataset, lr_path, up_path, scale in cases:
+        lr = np.array(Image.open(lr_path).convert("RGB"))
+        up_real = np.array(Image.open(up_path).convert("RGB"))
+        h_lr, w_lr = lr.shape[:2]
+        up_mine = matlab_imresize(lr, (h_lr * scale, w_lr * scale))
+        if up_mine.shape != up_real.shape or not np.array_equal(up_mine, up_real):
+            mismatches.append(f"{dataset}/{lr_path.stem} x{scale}")
 
     assert not mismatches, (
         f"{len(mismatches)}/{len(cases)} reference images did not reproduce byte-exactly: "
