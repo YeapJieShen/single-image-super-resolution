@@ -45,10 +45,6 @@ dependencies = [
     "numpy>=1.26",
     "tqdm>=4.66",
     "tensorboard>=2.16",
-    # cv2 is imported directly by sisr/imresize.py (cv2.resize / cv2.GaussianBlur, the 'cv2' resize
-    # backend) and sisr/datasets/srcnn.py (cv2.GaussianBlur). Headless variant avoids X11/Qt baggage
-    # and matches CI/non-GUI use.
-    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]
