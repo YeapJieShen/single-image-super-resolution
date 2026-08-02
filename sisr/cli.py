@@ -31,7 +31,8 @@ already assigns ``torch.backends.cudnn.benchmark``, and it coordinates with
 """
 
 import sys
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import torch
 from lightning.pytorch import Trainer
@@ -39,6 +40,59 @@ from lightning.pytorch.cli import LightningCLI
 
 from .export import to_onnx
 from .training import SRDataModule, SRLightning
+
+# Checkpoints saved before SRLightning.__init__ stopped flattening self.hparams for
+# TensorBoard display (see its docstring) stored ONLY these two dataclasses' fields —
+# under '/'-joined keys, e.g. 'training_config/example_input_shape/0' — plus incidental
+# 'model/*'/'processor'/'criterion' entries that were never part of the loadable
+# contract. _reconstruct_ckpt_hparams rebuilds exactly what current SRLightning saves.
+_CKPT_HPARAM_KEYS = ("training_config", "eval_config")
+
+
+def _reconstruct_ckpt_hparams(hparams: dict[str, Any], sep: str = "/") -> dict[str, Any]:
+    """Rebuild a checkpoint's training_config/eval_config overrides for ``--ckpt_path``.
+
+    Tolerates both the current nested ``hyper_parameters`` format (each key already
+    a plain dict, e.g. ``{"training_config": {...}}``) and the legacy '/'-flattened
+    one older checkpoints carry (e.g. ``training_config/example_input_shape/0``).
+    ``LightningCLI._parse_ckpt_path`` re-parses ``hyper_parameters`` verbatim as CLI
+    options (``model.<key>``); a literal ``/`` in a key isn't a valid option-name
+    character, so every legacy checkpoint failed to reload via ``--ckpt_path``
+    (``fit`` resume, ``validate``, ``test``, ``export``) with a jsonargparse
+    ``SystemExit``. Non-config entries (``model/*``, ``processor``, ``criterion``,
+    ``_instantiator``) are dropped — they were TensorBoard-only in old checkpoints,
+    and the ``--config`` file required alongside ``--ckpt_path`` already supplies
+    those classes.
+
+    Args:
+        hparams: The checkpoint's raw ``hyper_parameters`` dict, in either format.
+        sep: Separator ``SRLightning._flatten_hparams`` joins path segments with.
+
+    Returns:
+        A nested dict with at most ``training_config`` / ``eval_config`` keys,
+        each a plain dict of field overrides, lists restored from their
+        ``'0'``/``'1'``/... index encoding.
+    """
+    nested: dict[str, Any] = {}
+    for compound_key, value in hparams.items():
+        parts = compound_key.split(sep)
+        if parts[0] not in _CKPT_HPARAM_KEYS:
+            continue
+        node = nested
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+
+    def _delistify(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+        node = {k: _delistify(v) for k, v in node.items()}
+        keys = list(node)
+        if keys and keys == [str(i) for i in range(len(keys))]:
+            return [node[str(i)] for i in range(len(keys))]
+        return node
+
+    return _delistify(nested)
 
 
 class _ExportTrainer(Trainer):
@@ -143,6 +197,33 @@ class SRLightningCLI(LightningCLI):
         precision = self.config[self.subcommand].matmul_precision
         if precision is not None:
             torch.set_float32_matmul_precision(precision)
+
+    def _parse_ckpt_path(self) -> None:
+        """Reload ``--ckpt_path`` hyperparameters via ``_reconstruct_ckpt_hparams`` first.
+
+        Duplicates ``LightningCLI._parse_ckpt_path`` (``lightning/pytorch/cli.py``)
+        with one substitution: the raw ``hyper_parameters`` dict is rebuilt through
+        :func:`_reconstruct_ckpt_hparams` before being handed to
+        ``parser.parse_object``, so both the current nested format and checkpoints
+        saved before that fix (which reload with a jsonargparse ``SystemExit``
+        otherwise — see that function's docstring) work through every subcommand
+        that accepts ``--ckpt_path`` (``fit`` resume, ``validate``, ``test``, ``export``).
+        """
+        if not self.config.get("subcommand"):
+            return
+        ckpt_path = self.config[self.config.subcommand].get("ckpt_path")
+        if not (ckpt_path and Path(ckpt_path).is_file()):
+            return
+        ckpt = torch.load(ckpt_path, weights_only=True, map_location="cpu")
+        hparams = _reconstruct_ckpt_hparams(ckpt.get("hyper_parameters", {}))
+        if not hparams:
+            return
+        hparams = {self.config.subcommand: {"model": hparams}}
+        try:
+            self.config = self.parser.parse_object(hparams, self.config)
+        except SystemExit:
+            sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
+            raise
 
     @staticmethod
     def subcommands() -> dict[str, set[str]]:
