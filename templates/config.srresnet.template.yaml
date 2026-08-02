@@ -76,10 +76,10 @@ data:
 trainer:
   max_epochs: -1
   max_steps: 1000000
-  val_check_interval: 20000
+  val_check_interval: 50000
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
-  log_every_n_steps: 500
+  log_every_n_steps: 1000
   deterministic: false
   # cuDNN autotunes a conv algorithm per input shape and caches it — free here since
   # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
@@ -110,7 +110,7 @@ trainer:
         logging_interval: step
     - class_path: sisr.training.GradNormLogger
       init_args:
-        log_every_n_steps: 2000
+        log_every_n_steps: 5000
     # Throughput/hardware diagnostics — extra per-step logging overhead, so commented
     # out by default. DeviceStatsMonitor works as-is; ThroughputMonitor additionally
     # needs a batch_size_fn (batches are (lr, hr) tuples, not plain tensors — no
