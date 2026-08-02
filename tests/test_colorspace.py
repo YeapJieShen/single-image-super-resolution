@@ -103,7 +103,7 @@ def test_y_channel_studio_psnr_offset_matches_algebraic_identity():
     content, so PSNR_studio - PSNR_full is the *exact* constant
     20*log10(255/219) for any pair of images with nonzero error. This is the
     algebraic fact the empirical Set5/Set14 corroboration in triage P2.8
-    (30.56 raw + 1.3225 ~= 31.89 vs. the paper's 32.05) depends on.
+    (30.56 raw + 1.3219 ~= 31.88 vs. the paper's 32.05) depends on.
     """
     expected_delta = 20 * math.log10(255 / 219)
     g = torch.Generator().manual_seed(0)
