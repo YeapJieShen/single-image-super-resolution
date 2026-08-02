@@ -35,7 +35,7 @@ def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     Recovers the returned HR crop as uint8 and re-runs the dataset's own
     resize primitive as the reference; the crop is random, but LR and HR come
     from one call, so the reference is exact. A regression to a different
-    interpolation/backend fails here."""
+    interpolation fails here."""
     import numpy as np
 
     from sisr.imresize import resize
@@ -51,10 +51,10 @@ def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
     # Reference: recover the HR crop as uint8 HWC and re-run the dataset's own
-    # resize primitive (backend='matlab', the dataset's default).
+    # resize primitive (MATLAB-compatible bicubic).
     hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
     lr_size = 16 // 4
-    lr_expected_arr = resize(hr_uint8, (lr_size, lr_size), backend="matlab")
+    lr_expected_arr = resize(hr_uint8, (lr_size, lr_size))
     lr_expected = torch.from_numpy(lr_expected_arr).permute(2, 0, 1).float().div(255.0)
     torch.testing.assert_close(lr, lr_expected, atol=1e-6, rtol=0)
 
@@ -168,8 +168,7 @@ def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
 
 def test_train_dataset_cache_independent_of_crop_params(tiny_rgb_image_dir: Path):
     """The cache stores whole images, so changing hr_crop_size/crops_per_image/
-    scale over the same file set must NOT trigger a rebuild (contrast SRCNN,
-    whose checksum bakes in sub_img_size/stride/scale/blur_sigma)."""
+    scale over the same file set must NOT trigger a rebuild."""
     cache_dir = tiny_rgb_image_dir / ".lmdb_cache"
     TrainDataset(
         img_dir=tiny_rgb_image_dir,
@@ -256,7 +255,10 @@ def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Pat
 
 def test_train_dataset_checksum_ignores_crop_params(tiny_rgb_image_dir: Path):
     """_compute_checksum must depend only on the file manifest, not on
-    hr_crop_size/crops_per_image/scale."""
+    hr_crop_size/crops_per_image/scale -- the HR cache stores raw pixels only,
+    with every degradation/grid parameter applied at read time, so two
+    datasets differing in any of them must produce the same checksum and
+    never trigger an unnecessary rebuild."""
     ds_a = TrainDataset(
         img_dir=tiny_rgb_image_dir,
         scale=2,
@@ -273,69 +275,6 @@ def test_train_dataset_checksum_ignores_crop_params(tiny_rgb_image_dir: Path):
         build_num_workers=1,
     )
     assert ds_a._compute_checksum() == ds_b._compute_checksum()
-
-
-# ---------------------------------------------------------------------------
-# resize_backend (INIT.11) — no blur_sigma param here; SRResNet never had one.
-# ---------------------------------------------------------------------------
-
-
-def test_train_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
-    ds = TrainDataset(
-        img_dir=tiny_rgb_image_dir,
-        scale=2,
-        hr_crop_size=16,
-        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
-        build_num_workers=1,
-    )
-    assert ds.resize_backend == "matlab"
-
-
-def test_train_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
-    # Separate cache_dir per dataset: both backends key to the same checksum
-    # (see test below), and LMDB disallows two live environments on one path
-    # within a single process, which reading from both here would trip.
-    ds_matlab = TrainDataset(
-        img_dir=tiny_rgb_image_dir,
-        scale=4,
-        hr_crop_size=16,
-        resize_backend="matlab",
-        cache_dir=tiny_rgb_image_dir / ".lmdb_cache_matlab",
-        build_num_workers=1,
-    )
-    ds_cv2 = TrainDataset(
-        img_dir=tiny_rgb_image_dir,
-        scale=4,
-        hr_crop_size=16,
-        resize_backend="cv2",
-        cache_dir=tiny_rgb_image_dir / ".lmdb_cache_cv2",
-        build_num_workers=1,
-    )
-    lr_matlab, _ = ds_matlab[0]
-    lr_cv2, _ = ds_cv2[0]
-    assert not torch.allclose(lr_matlab, lr_cv2)
-
-
-def test_train_dataset_backend_does_not_affect_checksum(tiny_rgb_image_dir: Path):
-    """The HR cache stores raw pixels only; the resize backend is applied at
-    read time, so switching it must not trigger an unnecessary cache rebuild."""
-    ds_matlab = TrainDataset(
-        img_dir=tiny_rgb_image_dir,
-        scale=2,
-        hr_crop_size=16,
-        resize_backend="matlab",
-        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
-        build_num_workers=1,
-    )
-    ds_cv2 = TrainDataset(
-        img_dir=tiny_rgb_image_dir,
-        scale=2,
-        hr_crop_size=16,
-        resize_backend="cv2",
-        cache_dir=tiny_rgb_image_dir / ".lmdb_cache",
-        build_num_workers=1,
-    )
-    assert ds_matlab._compute_checksum() == ds_cv2._compute_checksum()
 
 
 # ---------------------------------------------------------------------------
@@ -367,18 +306,6 @@ def test_validation_dataset_is_deterministic(tiny_rgb_image_dir: Path):
     lr_b, hr_b = ds[0]
     assert torch.equal(lr_a, lr_b), "validation LR must be deterministic"
     assert torch.equal(hr_a, hr_b), "validation HR must be deterministic"
-
-
-def test_validation_dataset_matlab_is_the_default_backend(tiny_rgb_image_dir: Path):
-    assert ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2).resize_backend == "matlab"
-
-
-def test_validation_dataset_matlab_and_cv2_backends_produce_different_lr(tiny_rgb_image_dir: Path):
-    ds_matlab = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=4, resize_backend="matlab")
-    ds_cv2 = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=4, resize_backend="cv2")
-    lr_matlab, _ = ds_matlab[0]
-    lr_cv2, _ = ds_cv2[0]
-    assert not torch.allclose(lr_matlab, lr_cv2)
 
 
 # ---------------------------------------------------------------------------
