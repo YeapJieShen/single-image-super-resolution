@@ -99,7 +99,7 @@ class SRCNN(SRModel):
                 f"Got num_filters={num_filters} and kernel_sizes={kernel_sizes}."
             )
 
-    def reset_parameters(self, mean: float = 0.0, std: float = 0.01):
+    def reset_parameters(self, mean: float = 0.0, std: float = 0.001):
         """Gaussian weight init + zero biases, per the SRCNN paper (https://arxiv.org/pdf/1501.00092).
 
         Args:

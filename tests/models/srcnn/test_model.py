@@ -110,6 +110,26 @@ def test_reset_parameters_zeroes_bias_and_sets_weight_std():
             assert 0.005 < m.weight.std().item() < 0.02
 
 
+def test_reset_parameters_default_std_matches_paper_not_tenfold_larger():
+    """Dong et al. Sec. Training specifies std=0.001 for the weight-init
+    Gaussian; a 10x-too-large default (0.01, previously the bug here) inflates
+    variance 100x and would land the realized std far outside this band.
+    Weights are pooled across every Conv2d (~20k elements) so the sample std
+    is tight enough that only a real std defect, not sampling noise, can fail
+    this."""
+    torch.manual_seed(0)
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    model.reset_parameters()  # exercise reset_parameters' own default, not an explicit std
+    weights = torch.cat(
+        [m.weight.flatten() for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+    )
+    realized_std = weights.std().item()
+    assert 0.0008 < realized_std < 0.0012, (
+        f"expected ~0.001 (paper std); got {realized_std} -- the old 0.01 default "
+        f"would land ~10x above this band"
+    )
+
+
 def test_init_only_args_rejected():
     """custom_init / init_mean / init_std were moved to SRCNNTrainingConfig."""
     with pytest.raises(TypeError):

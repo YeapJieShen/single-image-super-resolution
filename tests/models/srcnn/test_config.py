@@ -44,11 +44,14 @@ def test_srcnn_eval_config_psnr_channels_independent_per_instance():
 
 
 def test_srcnn_training_config_init_defaults():
-    """Paper-faithful init lives on SRCNNTrainingConfig after migration."""
+    """Paper-faithful init lives on SRCNNTrainingConfig after migration.
+
+    init_std=0.001 per Dong et al. §Training; SRCNNTrainingConfig overrides
+    the shared base's 0.01 (which is not itself a paper value)."""
     cfg = SRCNNTrainingConfig()
     assert cfg.init_strategy == "paper"
     assert cfg.init_mean == 0.0
-    assert cfg.init_std == 0.01
+    assert cfg.init_std == 0.001
 
 
 # ---------------------------------------------------------------------------
