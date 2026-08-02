@@ -21,6 +21,11 @@ class RGBProcessor(SRProcessor):
         """Number of model IO channels — 3 (RGB)."""
         return 3
 
+    @property
+    def output_range(self) -> tuple[float, float]:
+        """Model output range — ``(0.0, 1.0)``, unscaled RGB."""
+        return (0.0, 1.0)
+
 
 class RGBSignedOutputProcessor(SRProcessor):
     """RGB in and out, with the model's *output* space in ``[-1, 1]``.
@@ -58,3 +63,8 @@ class RGBSignedOutputProcessor(SRProcessor):
     def model_channels(self) -> int:
         """Number of model IO channels — 3 (RGB)."""
         return 3
+
+    @property
+    def output_range(self) -> tuple[float, float]:
+        """Model output range — ``(-1.0, 1.0)``, the paper's HR range. See class docstring."""
+        return (-1.0, 1.0)

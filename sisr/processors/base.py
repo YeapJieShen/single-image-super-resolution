@@ -54,3 +54,20 @@ class SRProcessor(abc.ABC):
         config), used to validate a model/processor pairing at construction
         time (see ``SRTrainingConfig.validate_against``).
         """
+
+    @property
+    @abc.abstractmethod
+    def output_range(self) -> tuple[float, float]:
+        """The model's *output* intensity range, e.g. ``(0.0, 1.0)`` or ``(-1.0, 1.0)``.
+
+        A fact only the processor knows (mirrors ``model_channels``) —
+        abstract rather than defaulted, because a wrong inherited default is
+        exactly the failure this exists to prevent. Applying
+        :class:`~sisr.processors.rgb.RGBProcessor`'s ``[0, 1]`` reconstruction
+        logic to weights actually trained under
+        :class:`~sisr.processors.rgb.RGBSignedOutputProcessor` (``[-1, 1]``)
+        produces silently wrong images with no error — the same hazard the
+        README documents for ONNX consumers of that processor. Recorded in
+        checkpoint/export provenance metadata precisely so a downstream
+        consumer never has to guess it.
+        """
