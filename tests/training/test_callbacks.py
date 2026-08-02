@@ -469,13 +469,15 @@ def test_benchmark_validation_epoch_end_logs_means():
 
 
 def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path: Path, monkeypatch):
-    """When on the log interval, _flush_buffer must actually call
-    experiment.add_image once (the bicubic|SR|HR strip) and experiment.add_scalar
-    for the per-image psnr + ssim. The old test only checked it didn't raise, so
-    a silently-skipped emit would have passed."""
+    """With log_per_image_metrics=True and on the log interval, _flush_buffer
+    must actually call experiment.add_image once (the bicubic|SR|HR strip) and
+    experiment.add_scalar for the per-image psnr + ssim. The old test only
+    checked it didn't raise, so a silently-skipped emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(
+        dataset_names=["Set5"], log_every_n_val_runs=1, log_per_image_metrics=True
+    )
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
@@ -506,6 +508,77 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     assert tag == "Set5/img_0"
     assert strip.ndim == 3 and strip.shape[0] == 3  # (C, H, W) triptych
     # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
+    scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
+    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/RGB/img_0"]
+
+
+def test_benchmark_default_omits_per_image_scalars_but_keeps_set_means(tmp_path: Path, monkeypatch):
+    """log_per_image_metrics defaults to False: image strips still log (gated
+    only by should_log_images), but no per_image/... scalar is emitted. Per-set
+    mean psnr/ssim (via pl_module.log) are unaffected by this flag entirely."""
+    import lightning.pytorch.loggers as pl_loggers
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    assert cb.log_per_image_metrics is False
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    cb._buffer["Set5"] = [
+        (
+            "img_0",
+            torch.rand(3, 4, 4),
+            torch.rand(3, 4, 4),
+            torch.rand(3, 4, 4),
+            {"RGB": 30.0},
+            {"RGB": 0.9},
+        ),
+    ]
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    experiment = tb_logger.experiment
+    add_image = MagicMock(wraps=experiment.add_image)
+    add_scalar = MagicMock(wraps=experiment.add_scalar)
+    monkeypatch.setattr(experiment, "add_image", add_image)
+    monkeypatch.setattr(experiment, "add_scalar", add_scalar)
+
+    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
+    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    tb_logger.finalize("success")
+
+    add_image.assert_called_once()  # image strip unaffected by the flag
+    add_scalar.assert_not_called()  # no per_image/... scalar emitted
+    log_keys = [call.args[0] for call in pl_module.log.call_args_list]
+    assert "psnr/Set5/RGB" in log_keys
+    assert "ssim/Set5/RGB" in log_keys
+
+
+def test_benchmark_log_per_image_metrics_decoupled_from_image_strips(tmp_path: Path, monkeypatch):
+    """log_per_image_metrics=True must emit per-image scalars even on a val run
+    where should_log_images is False (log_every_n_val_runs throttles images,
+    not per-image metrics) — proving the two concerns are independently gated."""
+    import lightning.pytorch.loggers as pl_loggers
+
+    cb = BenchmarkImageLogger(
+        dataset_names=["Set5"], log_every_n_val_runs=99, log_per_image_metrics=True
+    )
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    assert cb._on_image_log_interval() is False  # confirms should_log_images will be False
+    cb._buffer["Set5"] = [
+        ("img_0", None, None, None, {"RGB": 30.0}, {"RGB": 0.9}),
+    ]
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    experiment = tb_logger.experiment
+    add_image = MagicMock(wraps=experiment.add_image)
+    add_scalar = MagicMock(wraps=experiment.add_scalar)
+    monkeypatch.setattr(experiment, "add_image", add_image)
+    monkeypatch.setattr(experiment, "add_scalar", add_scalar)
+
+    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
+    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    tb_logger.finalize("success")
+
+    add_image.assert_not_called()  # images still throttled
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
     assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/RGB/img_0"]
 
