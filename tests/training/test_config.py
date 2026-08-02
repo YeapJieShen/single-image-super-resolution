@@ -51,6 +51,15 @@ def test_eval_config_rejects_unknown_psnr_channel():
         SREvalConfig(psnr_channels=["RGB", "HSV"])
 
 
+def test_eval_config_rejects_unknown_psnr_channel_still_raises_alongside_bare_y():
+    """Regression (P2.9): adding bare single-channel entries to the allowlist
+    must not widen it into accepting arbitrary strings — 'HSV' stays invalid
+    even though 'Y' is now first-class."""
+    SREvalConfig(psnr_channels=["RGB", "Y"])  # valid — must not raise
+    with pytest.raises(ValueError, match="psnr_channels"):
+        SREvalConfig(psnr_channels=["RGB", "HSV"])
+
+
 # ---------------------------------------------------------------------------
 # psnr_keys (INIT.16) — the public seam B1/C1 depend on
 # ---------------------------------------------------------------------------
@@ -65,14 +74,28 @@ def test_eval_config_rejects_unknown_psnr_channel():
         (["YCbCr"], True),
         (["RGB", "YCbCr"], False),
         (["RGB", "YCbCr"], True),
+        (["Y"], False),
+        (["Y"], True),
+        (["RGB", "Y"], False),
+        (["RGB", "Y"], True),
     ],
 )
 def test_psnr_keys_matches_legacy_loop_derivation(psnr_channels, separate_psnr):
     """psnr_keys must reproduce exactly the loop SRLightning.__init__ used to
     inline (self._psnr_keys) before this property existed. Downstream PRs
     (benchmark PSNR-key selection, TensorBoard tag rename) depend on this
-    exact ordering."""
-    channel_names = {"RGB": ("R", "G", "B"), "YCbCr": ("Y", "Cb", "Cr")}
+    exact ordering. Bare single-channel entries (P2.9) map to () — nothing to
+    expand — so they always contribute exactly one key."""
+    channel_names = {
+        "RGB": ("R", "G", "B"),
+        "YCbCr": ("Y", "Cb", "Cr"),
+        "R": (),
+        "G": (),
+        "B": (),
+        "Y": (),
+        "Cb": (),
+        "Cr": (),
+    }
     legacy_keys: list[str] = []
     for cs in psnr_channels:
         if separate_psnr:
@@ -81,6 +104,13 @@ def test_psnr_keys_matches_legacy_loop_derivation(psnr_channels, separate_psnr):
 
     cfg = SREvalConfig(psnr_channels=psnr_channels, separate_psnr=separate_psnr)
     assert cfg.psnr_keys == legacy_keys
+
+
+def test_psnr_keys_bare_y_entry_yields_exactly_one_key():
+    """Regression (P2.9): a bare 'Y' entry must not decompose into anything
+    else — it is already a single channel, unlike 'YCbCr'."""
+    cfg = SREvalConfig(psnr_channels=["RGB", "Y"])
+    assert cfg.psnr_keys == ["RGB", "Y"]
 
 
 def test_psnr_keys_is_not_a_dataclass_field():

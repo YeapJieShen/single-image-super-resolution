@@ -19,10 +19,14 @@ def test_srresnet_training_config_paper_defaults():
 
 
 def test_srresnet_eval_config_paper_defaults():
-    """SRResNet paper defaults: x4 border crop; RGB+YCbCr PSNR breakdown."""
+    """SRResNet paper defaults: x4 border crop; RGB+Y PSNR.
+
+    Regression (P2.9): defaults must report the paper's own Y-channel
+    metric, not the YCbCr 3-channel aggregate (which reads optimistically
+    high since chroma planes are far smoother than luma)."""
     cfg = SRResNetEvalConfig()
     assert cfg.crop_border == 4
-    assert cfg.psnr_channels == ["RGB", "YCbCr"]
+    assert cfg.psnr_channels == ["RGB", "Y"]
     assert cfg.separate_psnr is False
 
 
@@ -39,7 +43,7 @@ def test_srresnet_eval_config_psnr_channels_independent_per_instance():
     a = SRResNetEvalConfig()
     b = SRResNetEvalConfig()
     a.psnr_channels.append("X")
-    assert b.psnr_channels == ["RGB", "YCbCr"]
+    assert b.psnr_channels == ["RGB", "Y"]
 
 
 # ---------------------------------------------------------------------------

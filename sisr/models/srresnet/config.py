@@ -70,16 +70,18 @@ class SRResNetTrainingConfig(SRTrainingConfig):
 class SRResNetEvalConfig(SREvalConfig):
     """SRResNet-paper-faithful eval defaults.
 
-    Reports PSNR on RGB and YCbCr (literature typically quotes Y-channel
-    for SRResNet too); excludes the outer ``scale=4`` pixels before
+    Reports PSNR on RGB and Y — Ledig et al. quote Y-channel only (the full
+    YCbCr aggregate reads optimistically high since chroma planes are far
+    smoother than luma); excludes the outer ``scale=4`` pixels before
     computing PSNR / SSIM, matching the standard SR-evaluation convention.
 
     Args:
         crop_border: Overrides the base default to ``4`` (outer pixels
             excluded before PSNR / SSIM at the standard ``x4`` scale).
-        psnr_channels: Overrides the base default to
-            ``['RGB', 'YCbCr']`` (the literature reports both).
+        psnr_channels: Overrides the base default to ``['RGB', 'Y']`` —
+            ``'Y'`` is the paper's own metric; ``'RGB'`` is a supplementary
+            aggregate.
     """
 
     crop_border: int = 4
-    psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "YCbCr"])
+    psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])

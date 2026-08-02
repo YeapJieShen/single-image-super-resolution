@@ -33,11 +33,22 @@ import torch
 from ..models.base import SRModel
 from ..processors.base import SRProcessor
 
-# Per-colorspace channel names, in report order. Doubles as the set of
-# supported ``psnr_channels`` entries (validated in `SREvalConfig.__post_init__`).
+# Colorspace entries map to their sub-channel names, expanded only when
+# separate_psnr=True; single-channel entries (e.g. 'Y') map to () since
+# there's nothing further to decompose — this lets a bare channel name be
+# requested as a first-class psnr_channels entry (e.g. ['RGB', 'Y'] for the
+# paper's Y-only metric without YCbCr's smoother-chroma-diluted aggregate).
+# Doubles as the set of supported ``psnr_channels`` entries (validated in
+# `SREvalConfig.__post_init__`).
 _PSNR_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
     "RGB": ("R", "G", "B"),
     "YCbCr": ("Y", "Cb", "Cr"),
+    "R": (),
+    "G": (),
+    "B": (),
+    "Y": (),
+    "Cb": (),
+    "Cr": (),
 }
 
 
@@ -139,10 +150,13 @@ class SREvalConfig:
             computing PSNR / SSIM.  Standard SR-evaluation convention is to
             crop the outer ``scale`` pixels (e.g. ``crop_border=3`` for x3).
 
-        psnr_channels: Colorspaces in which PSNR is reported.  Supported
-            values are ``'RGB'`` and ``'YCbCr'``.  Multiple entries are
-            allowed (e.g. ``['RGB', 'YCbCr']`` produces both
-            ``psnr/val/RGB`` and ``psnr/val/YCbCr``).
+        psnr_channels: Colorspaces or bare single channels PSNR is reported
+            for.  Supported values are ``'RGB'``, ``'YCbCr'``, and any
+            individual channel name (``'R'``, ``'G'``, ``'B'``, ``'Y'``,
+            ``'Cb'``, ``'Cr'``).  Multiple entries are allowed (e.g.
+            ``['RGB', 'Y']`` produces ``psnr/val/RGB`` and ``psnr/val/Y`` —
+            the paper-comparable Y-only metric, without YCbCr's
+            three-channel aggregate diluting it with smoother chroma planes).
 
         separate_psnr: When ``True``, also reports PSNR for each individual
             channel within each requested colorspace (e.g. ``'RGB'`` adds
@@ -158,8 +172,8 @@ class SREvalConfig:
         """Validate ``psnr_channels`` at construction.
 
         Raises:
-            ValueError: If any entry is not a supported colorspace
-                (``'RGB'`` or ``'YCbCr'``).
+            ValueError: If any entry is not a supported colorspace or
+                single-channel name (see ``_PSNR_CHANNEL_NAMES``).
         """
         valid = tuple(_PSNR_CHANNEL_NAMES)
         invalid = [c for c in self.psnr_channels if c not in valid]
@@ -174,10 +188,13 @@ class SREvalConfig:
     def psnr_keys(self) -> list[str]:
         """Ordered PSNR metric keys this config requests.
 
-        For each colorspace in ``psnr_channels`` (in order), per-channel keys
-        are emitted first when ``separate_psnr`` is ``True``, followed by the
-        aggregate colorspace key itself — e.g. ``psnr_channels=['RGB']`` with
-        ``separate_psnr=True`` yields ``['R', 'G', 'B', 'RGB']``.
+        For each entry in ``psnr_channels`` (in order), per-channel keys are
+        emitted first when ``separate_psnr`` is ``True``, followed by the
+        entry itself — e.g. ``psnr_channels=['RGB']`` with
+        ``separate_psnr=True`` yields ``['R', 'G', 'B', 'RGB']``. Bare
+        single-channel entries (e.g. ``'Y'``) have no sub-channels to expand
+        (``_PSNR_CHANNEL_NAMES['Y'] == ()``), so they always contribute
+        exactly one key regardless of ``separate_psnr``.
 
         This is the seam consumed by ``SRLightning`` (val metric logging /
         HParams registration) and ``BenchmarkImageLogger`` (benchmark PSNR
@@ -185,7 +202,7 @@ class SREvalConfig:
         derived, so the two consumers cannot disagree.
 
         Returns:
-            Ordered list of PSNR keys, e.g. ``['RGB', 'YCbCr']`` or
+            Ordered list of PSNR keys, e.g. ``['RGB', 'Y']`` or
             ``['R', 'G', 'B', 'RGB', 'Y', 'Cb', 'Cr', 'YCbCr']``.
         """
         keys: list[str] = []
