@@ -28,28 +28,18 @@ watch reconstruction quality improve run-over-run.
 
 ### Degradation protocol (how LR is generated)
 
-Both datasets derive their LR input from HR via bicubic resizing, selectable per-dataset
-via `resize_backend`:
-
-- **`'matlab'` (default, tracked templates use it).** A vendored (not a dependency),
-  MATLAB-`imresize`-compatible bicubic resize — antialiased (MATLAB widens the
-  interpolation kernel by the scale factor on downscale; this widening *is* the
-  low-pass, so no separate blur step is used or accepted with this backend) and using
-  MATLAB's own bicubic coefficient (a=-0.5, vs. OpenCV's a=-0.75). This makes the LR
-  **inputs** directly comparable to published papers, most of which generate their
-  benchmark LR images with real MATLAB. See `sisr/imresize.py` for the implementation
-  and its license/attribution header, and `tests/test_imresize.py` for verification.
-  Byte-exact inputs alone don't make **reported** PSNR/SSIM comparable, though:
-  Y-channel figures here use BT.601 full-range Y (`sisr/colorspace.py`), while the
-  literature's published Y-channel numbers use MATLAB `rgb2ycbcr`'s studio-range
-  convention — a known, exact `20·log10(255/219) ≈ 1.3219 dB` offset, not an unknown one.
-- **`'cv2'` (opt-in).** Plain `cv2.INTER_CUBIC`, no antialiasing of its own. SRCNN's
-  `blur_sigma` (a pre-resize Gaussian blur) only has an effect on this path — passing
-  `blur_sigma` together with `resize_backend='matlab'` raises `ValueError` at
-  construction, since MATLAB's kernel widening already *is* the low-pass and stacking
-  an explicit blur on top would push PSNR away from published values, not toward them.
-  This backend exists solely to keep LMDB caches built before the `'matlab'` backend
-  existed reproducible; new work should use the default.
+Both datasets derive their LR input from HR via a vendored (not a dependency),
+MATLAB-`imresize`-compatible bicubic resize — antialiased (MATLAB widens the
+interpolation kernel by the scale factor on downscale; this widening *is* the
+low-pass, so no separate blur step is used) and using MATLAB's own bicubic
+coefficient (a=-0.5, vs. OpenCV's a=-0.75). This makes the LR **inputs** directly
+comparable to published papers, most of which generate their benchmark LR images
+with real MATLAB. See `sisr/imresize.py` for the implementation and its
+license/attribution header, and `tests/test_imresize.py` for verification.
+Byte-exact inputs alone don't make **reported** PSNR/SSIM comparable, though:
+Y-channel figures here use BT.601 full-range Y (`sisr/colorspace.py`), while the
+literature's published Y-channel numbers use MATLAB `rgb2ycbcr`'s studio-range
+convention — a known, exact `20·log10(255/219) ≈ 1.3219 dB` offset, not an unknown one.
 
 **Honest limit:** without access to real MATLAB, this project cannot prove
 byte-identity with MATLAB's `imresize` from first principles. `tests/test_imresize.py`
@@ -59,10 +49,9 @@ strongest available claim short of running MATLAB itself. That test is skipped
 (not a failure) when the reference archive hasn't been fetched locally; see the
 test file's module docstring for the source URL and checksum.
 
-Switching `resize_backend` (or the one-time move from AlbumentationsX to
-`sisr.imresize`) invalidates previously-built LMDB caches and renumbers any
-previously recorded benchmark figure — expected, one-time costs of the change,
-not a bug.
+The one-time move from AlbumentationsX to `sisr.imresize` invalidated previously-built
+LMDB caches and renumbered any previously recorded benchmark figure — expected,
+a one-time cost of the change, not a bug.
 
 ### Reproducibility note
 

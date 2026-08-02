@@ -28,9 +28,8 @@ model:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 
 data:
-  # resize_backend defaults to 'matlab' (antialiased bicubic, comparable to published
-  # paper numbers) below. blur_sigma is omitted to match: it's only meaningful on
-  # resize_backend: cv2, kept solely to reproduce pre-matlab-backend LMDB caches.
+  # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
+  # sisr/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srcnn.TrainDataset
     init_args:
