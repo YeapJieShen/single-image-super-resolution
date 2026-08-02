@@ -58,7 +58,7 @@ dev = [
     "pyyaml>=6",
     "ruff>=0.9",
 ]
-# Opt-in (INIT.7): sisr/export.py gates the actual `import onnx` inside to_onnx(),
+# Opt-in: sisr/export.py gates the actual `import onnx` inside to_onnx(),
 # so plain `pip install .` stays onnx-free. onnxruntime is the CI numeric-parity
 # check's target (CPU build — GitHub runners have no GPU); it also lets users
 # verify an export locally without a separate inference framework. Deliberately
@@ -106,7 +106,7 @@ filterwarnings = [
 ]
 
 [tool.ruff]
-# Ruff owns lint + format for this project (INIT.1). line-length 100 matches the
+# Ruff owns lint + format for this project. line-length 100 matches the
 # code as written: 88 would reflow ~157 lines across every file, 100 only ~53
 # (mostly docstrings the formatter can't wrap). It governs both E501 and the
 # formatter's wrap width. target-version pins syntax so UP never rewrites below
@@ -124,7 +124,7 @@ line-length = 100
 # is nothing to suppress. Do not add it to `ignore`: ruff warns "rules have been
 # removed and ignoring them has no effect" on every run, which is noise in a required
 # check. The isinstance(x, A | B) style it enforced is now convention, not lint.
-# D: pydocstyle (P4.15) — makes "Google-style docstrings on public API" (a stated
+# D: pydocstyle — makes "Google-style docstrings on public API" (a stated
 # project non-negotiable) enforceable instead of review-only. D105 (undocumented
 # magic method) is ignored because dunder semantics are defined by the language,
 # not by us. D107 (undocumented __init__) is ignored because Google style documents

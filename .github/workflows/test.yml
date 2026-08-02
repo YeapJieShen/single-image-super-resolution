@@ -86,7 +86,7 @@ jobs:
           path: coverage.xml
           retention-days: 14
 
-  # Numeric-parity check for the opt-in ONNX export (INIT.7): torch eager vs.
+  # Numeric-parity check for the opt-in ONNX export: torch eager vs.
   # onnxruntime CPU (GitHub runners have no GPU), both architectures. Single
   # OS/Python leg — a correctness check on one code path, not a compatibility
   # matrix. Installs the `export` extra explicitly since test-matrix's `.[dev]`
