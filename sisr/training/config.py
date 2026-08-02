@@ -6,8 +6,8 @@ Split into two classes by lifecycle:
   learning rates, paper-init knobs, and the example input shape used to log
   the model graph to TensorBoard.
 * ``SREvalConfig`` controls validation/test metric computation —
-  boundary-pixel exclusion (``crop_border``) and which colorspaces PSNR is
-  reported in.
+  boundary-pixel exclusion (``crop_border``) and which colorspaces PSNR/SSIM
+  are reported in.
 
 Per-architecture defaults live in subclasses next to the model code (e.g.
 ``sisr.models.srcnn.SRCNNTrainingConfig``); a YAML user picks them via
@@ -17,8 +17,9 @@ overrides individual fields with ``init_args``.
 The colorspace the model trains in is no longer a string field here; it is
 expressed by the choice of processor (see ``sisr.processors``).
 
-``SRTrainingConfig.validate_against`` / ``SREvalConfig.psnr_keys`` are the
-config-side half of the correlated-field validation seam: fields like
+``SRTrainingConfig.validate_against`` / ``SREvalConfig.psnr_keys`` /
+``SREvalConfig.ssim_keys`` are the config-side half of the correlated-field
+validation seam: fields like
 ``num_channels`` (model) and ``class_path`` (processor) live in sibling
 objects a single dataclass ``__post_init__`` cannot see across, so the
 cross-object check happens once both are constructed, orchestrated by
@@ -36,11 +37,14 @@ from ..processors.base import SRProcessor
 # Colorspace entries map to their sub-channel names, expanded only when
 # separate_psnr=True; single-channel entries (e.g. 'Y') map to () since
 # there's nothing further to decompose — this lets a bare channel name be
-# requested as a first-class psnr_channels entry (e.g. ['RGB', 'Y'] for the
-# paper's Y-only metric without YCbCr's smoother-chroma-diluted aggregate).
-# Doubles as the set of supported ``psnr_channels`` entries (validated in
-# `SREvalConfig.__post_init__`).
-_PSNR_CHANNEL_NAMES: dict[str, tuple[str, ...]] = {
+# requested as a first-class psnr_channels/ssim_channels entry (e.g.
+# ['RGB', 'Y'] for the paper's Y-only metric without YCbCr's
+# smoother-chroma-diluted aggregate).
+# Doubles as the set of supported ``psnr_channels``/``ssim_channels`` entries
+# (validated in `SREvalConfig.__post_init__`) — shared by both metric
+# families so PSNR and SSIM cannot silently diverge on which colorspace
+# names are legal.
+_CHANNEL_SUBNAMES: dict[str, tuple[str, ...]] = {
     "RGB": ("R", "G", "B"),
     "YCbCr": ("Y", "Cb", "Cr"),
     "R": (),
@@ -157,32 +161,48 @@ class SREvalConfig:
             ``['RGB', 'Y']`` produces ``psnr/val/RGB`` and ``psnr/val/Y`` —
             the paper-comparable Y-only metric, without YCbCr's
             three-channel aggregate diluting it with smoother chroma planes).
+            ``Y``/``Cb``/``Cr``/``YCbCr`` are scored in BT.601 studio range
+            (the literature's convention); ``RGB``/``R``/``G``/``B`` are
+            unaffected.
 
         separate_psnr: When ``True``, also reports PSNR for each individual
             channel within each requested colorspace (e.g. ``'RGB'`` adds
             ``psnr/val/R`` / ``psnr/val/G`` / ``psnr/val/B`` alongside
             the aggregate ``psnr/val/RGB``).
+
+        ssim_channels: Colorspaces or bare single channels SSIM is reported
+            for. Same allowlist and studio-range treatment as
+            ``psnr_channels``; no ``separate_ssim`` counterpart to
+            ``separate_psnr`` exists because per-channel R/G/B or Cb/Cr SSIM
+            has no established convention to reproduce. Defaults to
+            ``['RGB', 'Y']`` (not just ``['RGB']`` like ``psnr_channels``) so
+            the paper-comparable Y-SSIM ships out of the box — unlike PSNR,
+            RGB-SSIM cannot be corrected to Y-SSIM after the fact by a
+            constant offset, so there is no reason to gate it behind an
+            architecture-specific subclass.
     """
 
     crop_border: int = 0
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB"])
     separate_psnr: bool = False
+    ssim_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
 
     def __post_init__(self) -> None:
-        """Validate ``psnr_channels`` at construction.
+        """Validate ``psnr_channels`` and ``ssim_channels`` at construction.
 
         Raises:
-            ValueError: If any entry is not a supported colorspace or
-                single-channel name (see ``_PSNR_CHANNEL_NAMES``).
+            ValueError: If any entry of either field is not a supported
+                colorspace or single-channel name (see ``_CHANNEL_SUBNAMES``).
         """
-        valid = tuple(_PSNR_CHANNEL_NAMES)
-        invalid = [c for c in self.psnr_channels if c not in valid]
-        if invalid:
-            raise ValueError(
-                f"SREvalConfig.psnr_channels entries must be one of "
-                f"{list(valid)}; got unsupported {invalid}. Fix "
-                f"model.eval_config.init_args.psnr_channels in your YAML."
-            )
+        valid = tuple(_CHANNEL_SUBNAMES)
+        for field_name in ("psnr_channels", "ssim_channels"):
+            invalid = [c for c in getattr(self, field_name) if c not in valid]
+            if invalid:
+                raise ValueError(
+                    f"SREvalConfig.{field_name} entries must be one of "
+                    f"{list(valid)}; got unsupported {invalid}. Fix "
+                    f"model.eval_config.init_args.{field_name} in your YAML."
+                )
 
     @property
     def psnr_keys(self) -> list[str]:
@@ -193,7 +213,7 @@ class SREvalConfig:
         entry itself — e.g. ``psnr_channels=['RGB']`` with
         ``separate_psnr=True`` yields ``['R', 'G', 'B', 'RGB']``. Bare
         single-channel entries (e.g. ``'Y'``) have no sub-channels to expand
-        (``_PSNR_CHANNEL_NAMES['Y'] == ()``), so they always contribute
+        (``_CHANNEL_SUBNAMES['Y'] == ()``), so they always contribute
         exactly one key regardless of ``separate_psnr``.
 
         This is the seam consumed by ``SRLightning`` (val metric logging /
@@ -208,6 +228,24 @@ class SREvalConfig:
         keys: list[str] = []
         for cs in self.psnr_channels:
             if self.separate_psnr:
-                keys.extend(_PSNR_CHANNEL_NAMES[cs])
+                keys.extend(_CHANNEL_SUBNAMES[cs])
             keys.append(cs)
         return keys
+
+    @property
+    def ssim_keys(self) -> list[str]:
+        """Ordered SSIM metric keys this config requests.
+
+        Mirrors ``psnr_keys`` over ``ssim_channels`` instead, minus the
+        ``separate_psnr`` expansion step — there is no ``separate_ssim``,
+        so each entry contributes exactly itself, in order.
+
+        This is the seam consumed by ``SRLightning`` (val metric logging /
+        HParams registration / checkpoint-monitor validation) and
+        ``BenchmarkImageLogger`` (benchmark SSIM key selection), same as
+        ``psnr_keys``.
+
+        Returns:
+            Ordered list of SSIM keys, e.g. ``['RGB', 'Y']``.
+        """
+        return list(self.ssim_channels)

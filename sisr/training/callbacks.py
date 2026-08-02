@@ -45,8 +45,8 @@ class BenchmarkImageLogger(Callback):
     all three panels share the same spatial size.
 
     Per-image PSNR/SSIM scalars go under ``"per_image/{name}/psnr/{key}/{filename}"``
-    and ``"per_image/{name}/ssim/{filename}"``; per-set means under
-    ``"psnr/{name}/{key}"`` and ``"ssim/{name}"``.
+    and ``"per_image/{name}/ssim/{key}/{filename}"``; per-set means under
+    ``"psnr/{name}/{key}"`` and ``"ssim/{name}/{key}"``.
 
     Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
     the use site; this avoids dual-knob configuration drift.
@@ -275,16 +275,19 @@ class BenchmarkImageLogger(Callback):
             # seam, and duplicating it here would recreate the divergence P2.1
             # removed. Keys now come from eval_config, so this is a value
             # lookup only — the callback no longer decides *which* keys exist.
-            psnr_tensors = pl_module._build_psnr_tensors(sr_4d, hr_4d)
+            metric_tensors = pl_module._build_metric_tensors(sr_4d, hr_4d)
             psnr_dict = {
                 key: torchmetrics.functional.image.peak_signal_noise_ratio(
-                    *psnr_tensors[key], data_range=1.0
+                    *metric_tensors[key], data_range=1.0
                 ).item()
                 for key in pl_module.eval_config.psnr_keys
             }
-            ssim = torchmetrics.functional.image.structural_similarity_index_measure(
-                sr_4d, hr_4d, data_range=1.0
-            )
+            ssim_dict = {
+                key: torchmetrics.functional.image.structural_similarity_index_measure(
+                    *metric_tensors[key], data_range=1.0
+                ).item()
+                for key in pl_module.eval_config.ssim_keys
+            }
             self._buffer[dataset_name].append(
                 (
                     filename,
@@ -292,7 +295,7 @@ class BenchmarkImageLogger(Callback):
                     sr[i].cpu() if should_log_images else None,
                     hr_img[i].cpu() if should_log_images else None,
                     psnr_dict,
-                    ssim.item(),
+                    ssim_dict,
                 )
             )
 
@@ -316,12 +319,14 @@ class BenchmarkImageLogger(Callback):
                 continue
 
             psnr_keys = samples[0][4].keys()
-            mean_ssim = sum(s for *_, s in samples) / len(samples)
+            ssim_keys = samples[0][5].keys()
 
             for key in psnr_keys:
                 mean_psnr = sum(s[4][key] for s in samples) / len(samples)
                 pl_module.log(f"psnr/{dataset_name}/{key}", mean_psnr, add_dataloader_idx=False)
-            pl_module.log(f"ssim/{dataset_name}", mean_ssim, add_dataloader_idx=False)
+            for key in ssim_keys:
+                mean_ssim = sum(s[5][key] for s in samples) / len(samples)
+                pl_module.log(f"ssim/{dataset_name}/{key}", mean_ssim, add_dataloader_idx=False)
 
             if should_log_images:
                 tb_logger = next(
@@ -336,16 +341,19 @@ class BenchmarkImageLogger(Callback):
                     continue
 
                 experiment = tb_logger.experiment
-                for filename, lr, sr, hr, psnr_dict, ssim in samples:
+                for filename, lr, sr, hr, psnr_dict, ssim_dict in samples:
                     for key, psnr_val in psnr_dict.items():
                         experiment.add_scalar(
                             f"per_image/{dataset_name}/psnr/{key}/{filename}",
                             psnr_val,
                             global_step=step,
                         )
-                    experiment.add_scalar(
-                        f"per_image/{dataset_name}/ssim/{filename}", ssim, global_step=step
-                    )
+                    for key, ssim_val in ssim_dict.items():
+                        experiment.add_scalar(
+                            f"per_image/{dataset_name}/ssim/{key}/{filename}",
+                            ssim_val,
+                            global_step=step,
+                        )
 
                     # Triptych: bicubic | SR | HR, all at HR size.
                     # The bicubic panel is the LR upsampled to HR via bicubic
@@ -519,8 +527,8 @@ class SRCheckpoint(ModelCheckpoint):
 
     Args:
         monitor_metric: The validation metric to monitor. Any ``psnr/val/{key}``
-            logged by the lightning module (e.g. ``"psnr/val/Y"``,
-            ``"psnr/val/YCbCr"``) or ``"ssim/val"``.
+            or ``ssim/val/{key}`` logged by the lightning module (e.g.
+            ``"psnr/val/Y"``, ``"psnr/val/YCbCr"``, ``"ssim/val/RGB"``).
         save_top_k: Number of best checkpoints to keep.
         dirpath: Directory to save checkpoints.
         filename_prefix: Prefix for checkpoint filenames.
@@ -563,8 +571,8 @@ class SRCheckpoint(ModelCheckpoint):
         ``val_loop._has_run``) — with a long ``val_check_interval`` that is a
         late, expensive-to-reach crash. This moves the same failure to
         startup by checking ``monitor`` against ``pl_module.eval_config.psnr_keys``
-        (the same seam ``SRLightning`` logs val PSNR from) up front, before
-        any training happens.
+        / ``ssim_keys`` (the same seams ``SRLightning`` logs val PSNR/SSIM
+        from) up front, before any training happens.
 
         Args:
             trainer: The active trainer.
@@ -584,13 +592,13 @@ class SRCheckpoint(ModelCheckpoint):
         if stage != "fit":
             return
         valid_metrics = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
-        valid_metrics.add("ssim/val")
+        valid_metrics |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
         if self.monitor is not None and self.monitor not in valid_metrics:
             raise MisconfigurationException(
                 f"`SRCheckpoint(monitor_metric={self.monitor!r})` does not match any "
                 f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
-                f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or monitor "
-                f"`ssim/val`."
+                f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or "
+                f"`eval_config.ssim_channels`."
             )
 
 

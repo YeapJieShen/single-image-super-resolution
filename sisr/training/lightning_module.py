@@ -44,7 +44,8 @@ class SRLightning(lightning.LightningModule):
             example_input_shape, init_*). Defaults to base
             :class:`SRTrainingConfig` (uniform LR, no paper init).
         eval_config: Per-architecture evaluation settings (crop_border,
-            psnr_channels, separate_psnr). Defaults to base :class:`SREvalConfig`.
+            psnr_channels, separate_psnr, ssim_channels). Defaults to base
+            :class:`SREvalConfig`.
         criterion: Loss instance. Defaults to :class:`torch.nn.MSELoss`.
         optimizer: ``OptimizerCallable`` populated from top-level YAML
             ``optimizer:``. Defaults to :class:`torch.optim.Adam`.
@@ -146,19 +147,21 @@ class SRLightning(lightning.LightningModule):
 
         return result
 
-    def _build_psnr_tensors(
+    def _build_metric_tensors(
         self, sr: torch.Tensor, hr: torch.Tensor
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Pre-computes (sr, hr) RGB tensor pairs for every tracked PSNR key.
+        """Pre-computes (sr, hr) tensor pairs for every tracked PSNR/SSIM key.
 
-        Colorspace conversions are performed at most once per call. ``Y`` /
+        Shared by both metric families (over the union of ``psnr_keys`` and
+        ``ssim_keys``) so a requested colorspace conversion happens at most
+        once per call regardless of how many metrics consume it. ``Y`` /
         ``Cb`` / ``Cr`` / ``YCbCr`` are converted via ``rgb_to_ycbcr_studio`` —
-        BT.601 studio range, the literature's PSNR convention (MATLAB's
-        ``rgb2ycbcr``, BasicSR's ``bgr2ycbcr``) — not the full-range
-        ``rgb_to_ycbcr`` the processors train in (see ``sisr.colorspace``
-        module docstring). ``RGB``/``R``/``G``/``B`` are untouched either way.
+        BT.601 studio range, the literature's PSNR/SSIM convention — not the
+        full-range ``rgb_to_ycbcr`` the processors train in (see
+        ``sisr.colorspace`` module docstring). ``RGB``/``R``/``G``/``B`` are
+        untouched either way.
         """
-        keys = set(self.eval_config.psnr_keys)
+        keys = set(self.eval_config.psnr_keys) | set(self.eval_config.ssim_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         if keys & {"RGB", "R", "G", "B"}:
@@ -354,30 +357,33 @@ class SRLightning(lightning.LightningModule):
             sr = sr[..., n:-n, n:-n]
             hr_cropped = hr_cropped[..., n:-n, n:-n]
 
-        psnr_tensors = self._build_psnr_tensors(sr, hr_cropped)
+        metric_tensors = self._build_metric_tensors(sr, hr_cropped)
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
         self.log("loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
-        primary = self.eval_config.psnr_channels[0]
+        primary_psnr = self.eval_config.psnr_channels[0]
         for key in self.eval_config.psnr_keys:
-            sr_t, hr_t = psnr_tensors[key]
+            sr_t, hr_t = metric_tensors[key]
             self.log(
                 f"psnr/val/{key}",
                 self._mean_psnr(sr_t, hr_t),
-                prog_bar=(key == primary),
+                prog_bar=(key == primary_psnr),
                 on_step=False,
                 add_dataloader_idx=False,
             )
-        self.log(
-            "ssim/val",
-            torchmetrics.functional.image.structural_similarity_index_measure(
-                sr, hr_cropped, data_range=1.0
-            ),
-            prog_bar=True,
-            on_step=False,
-            add_dataloader_idx=False,
-        )
+        primary_ssim = self.eval_config.ssim_channels[0]
+        for key in self.eval_config.ssim_keys:
+            sr_t, hr_t = metric_tensors[key]
+            self.log(
+                f"ssim/val/{key}",
+                torchmetrics.functional.image.structural_similarity_index_measure(
+                    sr_t, hr_t, data_range=1.0
+                ),
+                prog_bar=(key == primary_ssim),
+                on_step=False,
+                add_dataloader_idx=False,
+            )
 
     def on_train_start(self) -> None:
         """Register val metric tags with TensorBoard's HParams tab.
@@ -397,7 +403,7 @@ class SRLightning(lightning.LightningModule):
             return
         metrics = {
             **{f"psnr/val/{k}": 0.0 for k in self.eval_config.psnr_keys},
-            "ssim/val": 0.0,
+            **{f"ssim/val/{k}": 0.0 for k in self.eval_config.ssim_keys},
         }
         for tb in tb_loggers:
             tb.log_hyperparams(self.hparams, metrics)

@@ -210,7 +210,7 @@ def test_configure_optimizers_no_scheduler_returns_bare(srcnn_rgb_lit: SRLightni
 
 
 # ---------------------------------------------------------------------------
-# test_step / build_psnr_tensors / flatten_hparams
+# test_step / build_metric_tensors / flatten_hparams
 # ---------------------------------------------------------------------------
 
 
@@ -222,15 +222,44 @@ def test_test_step_is_no_op(srcnn_rgb_lit: SRLightning):
     assert out is None
 
 
-def test_build_psnr_tensors_rgb_only(srcnn_rgb_lit: SRLightning):
+def test_build_metric_tensors_rgb_only_when_neither_metric_requests_y():
+    """Only the RGB family is built when both psnr_channels and ssim_channels
+    are pinned to ['RGB'] — unlike the base SREvalConfig default, which also
+    pulls in 'Y' via ssim_channels (see the union test below)."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(psnr_channels=["RGB"], ssim_channels=["RGB"]),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = srcnn_rgb_lit._build_psnr_tensors(sr, hr)
-    # eval_config.psnr_channels=['RGB'], separate_psnr=False -> only 'RGB' tracked.
-    assert "RGB" in tensors
+    tensors = lit._build_metric_tensors(sr, hr)
+    assert set(tensors) == {"RGB", "R", "G", "B"}
 
 
-def test_build_psnr_tensors_with_separate_psnr_includes_per_channel():
+def test_build_metric_tensors_union_of_psnr_and_ssim_keys():
+    """Regression (P3.8): a colorspace requested only by ssim_channels (not
+    psnr_channels) must still get a tensor entry — the tensor map is built
+    from the *union* of psnr_keys and ssim_keys, not psnr_keys alone, so
+    SSIM-only keys aren't silently missing."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(psnr_channels=["RGB"], ssim_channels=["RGB", "Y"]),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    sr = torch.rand(1, 3, 4, 4)
+    hr = torch.rand(1, 3, 4, 4)
+    tensors = lit._build_metric_tensors(sr, hr)
+    assert "Y" in tensors
+
+
+def test_build_metric_tensors_with_separate_psnr_includes_per_channel():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -241,11 +270,11 @@ def test_build_psnr_tensors_with_separate_psnr_includes_per_channel():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_psnr_tensors(sr, hr)
+    tensors = lit._build_metric_tensors(sr, hr)
     assert {"R", "G", "B", "RGB"} <= set(tensors)
 
 
-def test_build_psnr_tensors_ycbcr_does_conversion():
+def test_build_metric_tensors_ycbcr_does_conversion():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -256,7 +285,7 @@ def test_build_psnr_tensors_ycbcr_does_conversion():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_psnr_tensors(sr, hr)
+    tensors = lit._build_metric_tensors(sr, hr)
     assert "YCbCr" in tensors
     sr_ycc, hr_ycc = tensors["YCbCr"]
     # YCbCr first channel (Y) must differ from input R-channel — verifies
@@ -264,7 +293,7 @@ def test_build_psnr_tensors_ycbcr_does_conversion():
     assert not torch.equal(sr_ycc, sr)
 
 
-def test_build_psnr_tensors_ycbcr_uses_studio_range_not_full_range():
+def test_build_metric_tensors_ycbcr_uses_studio_range_not_full_range():
     """Regression (P2.8): the metric-side YCbCr conversion must be BT.601
     studio range, not the full-range conversion SRProcessor subclasses train
     in — locked by comparing against sisr.colorspace directly."""
@@ -280,7 +309,7 @@ def test_build_psnr_tensors_ycbcr_uses_studio_range_not_full_range():
     )
     sr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(3))
     hr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(4))
-    tensors = lit._build_psnr_tensors(sr, hr)
+    tensors = lit._build_metric_tensors(sr, hr)
     sr_ycc, hr_ycc = tensors["YCbCr"]
     torch.testing.assert_close(sr_ycc, rgb_to_ycbcr_studio(sr))
     torch.testing.assert_close(hr_ycc, rgb_to_ycbcr_studio(hr))
@@ -370,7 +399,7 @@ def test_on_train_start_logs_hparams_with_val_metrics(srcnn_rgb_lit: SRLightning
     metrics_arg = args[1] if len(args) > 1 else kwargs.get("metrics")
 
     expected_metrics = {f"psnr/val/{k}": 0.0 for k in srcnn_rgb_lit.eval_config.psnr_keys}
-    expected_metrics["ssim/val"] = 0.0
+    expected_metrics.update({f"ssim/val/{k}": 0.0 for k in srcnn_rgb_lit.eval_config.ssim_keys})
 
     assert params_arg == srcnn_rgb_lit.hparams
     assert metrics_arg == expected_metrics

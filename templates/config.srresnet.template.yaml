@@ -98,7 +98,7 @@ trainer:
         save_top_k: 3
     - class_path: sisr.training.SRCheckpoint
       init_args:
-        monitor_metric: ssim/val
+        monitor_metric: ssim/val/RGB
         save_top_k: 3
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:

@@ -20,6 +20,8 @@ def test_srcnn_eval_config_paper_defaults():
     assert cfg.crop_border == 3
     assert cfg.psnr_channels == ["RGB", "Y"]
     assert cfg.separate_psnr is False
+    # Not overridden — inherits the base SREvalConfig default.
+    assert cfg.ssim_channels == ["RGB", "Y"]
 
 
 def test_srcnn_training_config_subclass():
