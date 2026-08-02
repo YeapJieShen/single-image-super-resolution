@@ -20,5 +20,6 @@ def test_public_exports():
         SREvalConfig,
         SRLightning,
         SRTrainingConfig,
+        SRWeightsCheckpoint,
         WeightHistogramLogger,
     )

@@ -6,12 +6,15 @@ N val cycles) and ``cli test`` (one-shot final eval).
 :class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
 training signals; :class:`SRCheckpoint` is a thin
 :class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics;
-:class:`SRPredictionWriter` writes ``cli predict`` output to disk as PNGs.
+:class:`SRWeightsCheckpoint` is a sibling preset that saves bare, optimizer-free
+``.pt`` weights instead; :class:`SRPredictionWriter` writes ``cli predict``
+output to disk as PNGs.
 """
 
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from weakref import proxy
 
 import lightning
 import torch
@@ -20,6 +23,8 @@ import torchmetrics.functional
 import torchvision
 from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
+
+from .metadata import build_metadata
 
 
 class BenchmarkImageLogger(Callback):
@@ -525,6 +530,35 @@ class WeightHistogramLogger(Callback):
                 experiment.add_histogram(tb_name, param, global_step=trainer.global_step)
 
 
+def _validate_monitor_metric(
+    label: str, monitor: str | None, pl_module: lightning.LightningModule
+) -> None:
+    """Raise if ``monitor`` doesn't name a ``psnr/val/*`` or ``ssim/val/*`` metric.
+
+    Shared by :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint`'s ``setup`` —
+    they are siblings under :class:`~lightning.pytorch.callbacks.ModelCheckpoint`,
+    not parent/child, so this check cannot be reused via ``super()`` across them.
+
+    Args:
+        label: Name of the calling class, for the error message only.
+        monitor: The ``monitor`` value to validate (``self.monitor``).
+        pl_module: The model being trained; must expose ``eval_config``.
+
+    Raises:
+        MisconfigurationException: If ``monitor`` does not name a metric
+            ``SRLightning`` will log during ``fit``.
+    """
+    valid_metrics = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
+    valid_metrics |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
+    if monitor is not None and monitor not in valid_metrics:
+        raise MisconfigurationException(
+            f"`{label}(monitor_metric={monitor!r})` does not match any "
+            f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
+            f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or "
+            f"`eval_config.ssim_channels`."
+        )
+
+
 class SRCheckpoint(ModelCheckpoint):
     """Model checkpoint that monitors a super-resolution quality metric.
 
@@ -610,15 +644,131 @@ class SRCheckpoint(ModelCheckpoint):
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
-        valid_metrics = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
-        valid_metrics |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
-        if self.monitor is not None and self.monitor not in valid_metrics:
-            raise MisconfigurationException(
-                f"`SRCheckpoint(monitor_metric={self.monitor!r})` does not match any "
-                f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
-                f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or "
-                f"`eval_config.ssim_channels`."
-            )
+        _validate_monitor_metric("SRCheckpoint", self.monitor, pl_module)
+
+
+class SRWeightsCheckpoint(ModelCheckpoint):
+    """Model checkpoint that saves bare, optimizer-free SR model weights as ``.pt`` files.
+
+    A distributable sibling to :class:`SRCheckpoint`: that class produces resumable
+    ``.ckpt`` files (full training state — optimizer moments, LR scheduler, callback
+    state); this one produces ``.pt`` files containing only
+    ``pl_module.model.state_dict()`` (the bare :class:`~sisr.models.base.SRModel`, so
+    keys carry no ``model.`` wrapper prefix) plus the :func:`~sisr.training.metadata.build_metadata`
+    provenance dict. Both run side by side off the same validation metrics — top-k
+    selection, monitor validation (inherited from ``SRCheckpoint``'s ``setup``), and
+    filename formatting are inherited from :class:`~lightning.pytorch.callbacks.ModelCheckpoint`
+    unchanged; only :meth:`_save_checkpoint` — the single method that actually writes bytes
+    to disk — is overridden to swap the payload.
+
+    ``_save_checkpoint`` is a private Lightning method, unlike the rest of this class's
+    public-API surface. ``tests/training/test_callbacks.py``'s
+    ``test_sr_weights_checkpoint_writes_bare_payload_via_real_fit`` guards against a
+    future Lightning release routing saves through a different method: that test fails
+    loudly rather than silently letting saves fall back to full, optimizer-bearing
+    checkpoints under a misleadingly bare ``.pt`` extension.
+
+    ``FILE_EXTENSION`` (public) and a distinct default ``filename_prefix`` keep this
+    callback's top-k deletion pass from ever touching :class:`SRCheckpoint`'s files when
+    both share one ``dirpath`` — each callback only ever names/deletes files matching its
+    own ``filename``/``FILE_EXTENSION`` combination.
+
+    Args:
+        monitor_metric: The validation metric to monitor — same contract as
+            :class:`SRCheckpoint`.
+        save_top_k: Number of best weight files to keep.
+        dirpath: Directory to save weight files.
+        filename_prefix: Prefix for weight filenames. Defaults to ``'sr-weights'``,
+            distinct from ``SRCheckpoint``'s ``'sr'`` default.
+        mode: ``'max'`` or ``'min'`` — same contract as :class:`SRCheckpoint`.
+        **kwargs: Extra keyword arguments forwarded to
+            :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
+    """
+
+    FILE_EXTENSION = ".pt"
+
+    def __init__(
+        self,
+        monitor_metric: str = "psnr/val/RGB",
+        save_top_k: int = 3,
+        dirpath: str | None = None,
+        filename_prefix: str = "sr-weights",
+        mode: str = "max",
+        **kwargs: Any,
+    ):
+        label = monitor_metric.replace("/", "_")
+        filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
+        super().__init__(
+            monitor=monitor_metric,
+            mode=mode,
+            save_top_k=save_top_k,
+            dirpath=dirpath,
+            filename=filename,
+            auto_insert_metric_name=False,
+            **kwargs,
+        )
+
+    def setup(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        stage: str,
+    ) -> None:
+        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+
+        Same check as :meth:`SRCheckpoint.setup` (via the shared
+        ``_validate_monitor_metric`` helper — the two classes are siblings, not
+        parent/child, so the check can't be reused via ``super()`` across them).
+
+        Args:
+            trainer: The active trainer.
+            pl_module: The model being trained; must expose ``eval_config``.
+            stage: Lightning trainer stage. Only ``"fit"`` is checked — see
+                ``SRCheckpoint.setup``.
+
+        Raises:
+            MisconfigurationException: If ``monitor`` does not name a metric
+                ``SRLightning`` will log during ``fit``.
+        """
+        super().setup(trainer, pl_module, stage)
+        if stage != "fit":
+            return
+        _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module)
+
+    def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
+        """Write bare model weights + provenance metadata instead of a full checkpoint.
+
+        Overrides :meth:`ModelCheckpoint._save_checkpoint` — the private hook every
+        public save path (``_save_topk_checkpoint``, ``_save_none_monitor_checkpoint``,
+        ``_save_last_checkpoint``) funnels through — so ``save_top_k``/filename/removal
+        bookkeeping all keep working unmodified; only the on-disk payload changes.
+        Mirrors the base implementation's post-save bookkeeping (``_last_global_step_saved``,
+        ``_last_checkpoint_saved``, logger notification) so this callback stays a drop-in
+        peer of :class:`SRCheckpoint` from the trainer's point of view.
+
+        Args:
+            trainer: The active trainer — supplies ``lightning_module`` (for the bare
+                ``model.state_dict()`` and metadata) and ``global_step``/``current_epoch``.
+            filepath: Destination path, already formatted by ``ModelCheckpoint``
+                (``.pt`` via ``FILE_EXTENSION``).
+        """
+        pl_module = trainer.lightning_module
+        monitor_value = float(self.current_score) if self.current_score is not None else None
+        meta = build_metadata(
+            pl_module,
+            global_step=trainer.global_step,
+            epoch=trainer.current_epoch,
+            monitor=self.monitor,
+            monitor_value=monitor_value,
+        )
+        torch.save({"state_dict": pl_module.model.state_dict(), "meta": meta}, filepath)
+
+        self._last_global_step_saved = trainer.global_step
+        self._last_checkpoint_saved = filepath
+
+        if trainer.is_global_zero:
+            for logger in trainer.loggers:
+                logger.after_save_checkpoint(proxy(self))
 
 
 class SRPredictionWriter(BasePredictionWriter):
