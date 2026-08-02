@@ -97,6 +97,20 @@ class SRLightning(lightning.LightningModule):
                 std=self.training_config.init_std,
             )
 
+        backend = self.training_config.compile_backend
+        compiled = torch.compile(self.model, backend=backend) if backend is not None else None
+        # torch.compile() returns an OptimizedModule, itself an nn.Module — a
+        # plain `self._compiled = compiled` would register it as a submodule
+        # (nn.Module.__setattr__ registers any nn.Module value regardless of
+        # the leading underscore), duplicating every parameter under
+        # "_compiled._orig_mod.*" in state_dict() and breaking strict-mode
+        # checkpoint loading against a module built with compilation off.
+        # object.__setattr__ bypasses that registration; self.model and
+        # compiled._orig_mod stay the same object, so there is exactly one
+        # set of weights and it still moves with .to() through self.model's
+        # normal registration.
+        object.__setattr__(self, "_compiled", compiled)
+
         # Save exactly this plain dict — bypasses save_hyperparameters' frame/given_hparams
         # introspection, so the checkpoint's `hyper_parameters` is identical whether this
         # module is built directly or via SRLightningCLI. dataclasses.asdict (not the live
@@ -229,6 +243,12 @@ class SRLightning(lightning.LightningModule):
         needed for the center-crop :meth:`_forward_sr` adds on top, which has
         no meaning without an HR reference at inference time.
 
+        Dispatches to the ``torch.compile``d model iff ``self.training`` and
+        ``training_config.compile_backend`` is set; ``self.training`` is
+        exactly right here since Lightning maintains it and training uses
+        fixed patch shapes while validation/predict see widely varying
+        image sizes (see ``training_config.compile_backend``'s docstring).
+
         Args:
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
                 ``(B, 3, H, W)``.
@@ -238,7 +258,8 @@ class SRLightning(lightning.LightningModule):
             colorspace, and the reconstructed SR RGB clamped to ``[0, 1]``.
         """
         model_input = self.processor.extract(lr_img)
-        sr_model_out = self.model(model_input)
+        model_fn = self._compiled if self.training and self._compiled is not None else self.model
+        sr_model_out = model_fn(model_input)
         sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
         # Clamp display-space output only, here, once — every reconstruct()
         # consumer (_forward_sr's callers, predict_step) reads through this
@@ -405,6 +426,28 @@ class SRLightning(lightning.LightningModule):
                 on_step=False,
                 add_dataloader_idx=False,
             )
+
+    def on_fit_start(self) -> None:
+        """Warm up the compiled training path before the training loop starts.
+
+        A backend name ``torch._dynamo.list_backends()`` recognizes can
+        still lack its toolchain (e.g. ``'inductor'`` without Triton), which
+        only surfaces on the *first* call to the compiled model, not at
+        ``torch.compile()`` construction time. Running one forward here
+        turns that into an immediate failure at the start of ``fit``
+        instead of an arbitrary point mid-run — ``num_sanity_val_steps``
+        running first would not catch it, since validation always runs the
+        eager path (see :meth:`_forward_lr`).
+
+        No-op when compilation is off, or when
+        ``training_config.example_input_shape`` is unset — there is then no
+        input shape to probe with (both shipped templates set it).
+        """
+        if self._compiled is None or self.training_config.example_input_shape is None:
+            return
+        dummy = torch.zeros(1, *self.training_config.example_input_shape, device=self.device)
+        with torch.no_grad():
+            self._compiled(dummy)
 
     def on_train_start(self) -> None:
         """Register val metric tags with TensorBoard's HParams tab.
