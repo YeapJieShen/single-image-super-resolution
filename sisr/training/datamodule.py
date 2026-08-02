@@ -29,7 +29,7 @@ class SRDataModule(lightning.LightningDataModule):
       so they fire during every val cycle of ``cli fit`` for monitoring
       (driven by :class:`~sisr.training.callbacks.BenchmarkImageLogger`).
       ``dataloader_idx == 0`` is the primary held-out validation loader and
-      drives ``loss/val`` / ``psnr/val`` / ``ssim/val``.
+      drives ``loss/val`` / ``psnr/val/*`` / ``ssim/val/*``.
     * :meth:`test_dataloader` returns the test loaders only, for
       ``cli test --ckpt_path <path>`` final evaluation.
 

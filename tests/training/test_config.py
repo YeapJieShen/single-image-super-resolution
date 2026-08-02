@@ -21,6 +21,10 @@ def test_sr_eval_config_defaults():
     assert cfg.crop_border == 0
     assert cfg.psnr_channels == ["RGB"]
     assert cfg.separate_psnr is False
+    # Unlike psnr_channels, the base already defaults to ['RGB', 'Y'] — SSIM
+    # has no post-hoc PSNR-style dB correction, so the paper-comparable
+    # Y-SSIM ships without waiting for an architecture subclass to add it.
+    assert cfg.ssim_channels == ["RGB", "Y"]
 
 
 def test_sr_eval_config_psnr_channels_isolated_per_instance():
@@ -31,6 +35,13 @@ def test_sr_eval_config_psnr_channels_isolated_per_instance():
     assert b.psnr_channels == ["RGB"], "default_factory must produce a fresh list per instance"
 
 
+def test_sr_eval_config_ssim_channels_isolated_per_instance():
+    a = SREvalConfig()
+    b = SREvalConfig()
+    a.ssim_channels.append("YCbCr")
+    assert b.ssim_channels == ["RGB", "Y"], "default_factory must produce a fresh list per instance"
+
+
 def test_sr_training_config_field_names():
     """Reduced surface check — guards against accidental field renames."""
     names = {f.name for f in fields(SRTrainingConfig)}
@@ -39,7 +50,7 @@ def test_sr_training_config_field_names():
 
 def test_sr_eval_config_field_names():
     names = {f.name for f in fields(SREvalConfig)}
-    assert names == {"crop_border", "psnr_channels", "separate_psnr"}
+    assert names == {"crop_border", "psnr_channels", "separate_psnr", "ssim_channels"}
 
 
 def test_eval_config_rejects_unknown_psnr_channel():
@@ -58,6 +69,23 @@ def test_eval_config_rejects_unknown_psnr_channel_still_raises_alongside_bare_y(
     SREvalConfig(psnr_channels=["RGB", "Y"])  # valid — must not raise
     with pytest.raises(ValueError, match="psnr_channels"):
         SREvalConfig(psnr_channels=["RGB", "HSV"])
+
+
+def test_eval_config_rejects_unknown_ssim_channel():
+    """(P3.8): ssim_channels reuses the same allowlist as psnr_channels, and
+    the error names the offending field so it's actionable."""
+    SREvalConfig(ssim_channels=["RGB", "Y", "YCbCr"])  # valid — must not raise
+    with pytest.raises(ValueError, match="ssim_channels"):
+        SREvalConfig(ssim_channels=["RGB", "HSV"])
+
+
+def test_eval_config_rejects_unknown_channel_in_either_field_independently():
+    """psnr_channels and ssim_channels are validated independently — an
+    invalid entry in one must not be masked by the other being valid."""
+    with pytest.raises(ValueError, match="psnr_channels"):
+        SREvalConfig(psnr_channels=["HSV"], ssim_channels=["RGB"])
+    with pytest.raises(ValueError, match="ssim_channels"):
+        SREvalConfig(psnr_channels=["RGB"], ssim_channels=["HSV"])
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +146,33 @@ def test_psnr_keys_is_not_a_dataclass_field():
     it silently becoming a constructor argument / dataclasses.asdict() entry."""
     names = {f.name for f in fields(SREvalConfig)}
     assert "psnr_keys" not in names
+
+
+# ---------------------------------------------------------------------------
+# ssim_keys (P3.8) — mirrors psnr_keys, minus the separate_psnr expansion
+# ---------------------------------------------------------------------------
+
+
+def test_ssim_keys_default_matches_ssim_channels_default():
+    cfg = SREvalConfig()
+    assert cfg.ssim_keys == ["RGB", "Y"]
+
+
+@pytest.mark.parametrize(
+    "ssim_channels",
+    [["RGB"], ["Y"], ["RGB", "Y"], ["YCbCr"], ["RGB", "YCbCr", "Cb"]],
+)
+def test_ssim_keys_equals_ssim_channels_verbatim(ssim_channels):
+    """Unlike psnr_keys, ssim_keys never expands a colorspace into
+    sub-channels — there is no separate_ssim flag — so it always equals
+    ssim_channels itself, in order."""
+    cfg = SREvalConfig(ssim_channels=ssim_channels)
+    assert cfg.ssim_keys == ssim_channels
+
+
+def test_ssim_keys_is_not_a_dataclass_field():
+    names = {f.name for f in fields(SREvalConfig)}
+    assert "ssim_keys" not in names
 
 
 # ---------------------------------------------------------------------------

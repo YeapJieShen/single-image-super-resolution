@@ -330,9 +330,9 @@ def test_srcheckpoint_setup_accepts_monitor_matching_psnr_keys(tmp_path: Path):
 
 @_ignore_gpu_warning
 def test_srcheckpoint_setup_accepts_val_ssim_monitor(tmp_path: Path):
-    """ssim/val is always logged regardless of psnr_keys and must be accepted."""
-    pl_module = _make_real_pl_module()
-    ckpt = SRCheckpoint(monitor_metric="ssim/val", dirpath=str(tmp_path))
+    """ssim/val/{key} for any key in eval_config.ssim_keys must be accepted."""
+    pl_module = _make_real_pl_module()  # ssim_channels defaults to ['RGB', 'Y']
+    ckpt = SRCheckpoint(monitor_metric="ssim/val/RGB", dirpath=str(tmp_path))
     ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")  # must not raise
 
 
@@ -357,7 +357,8 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     with pytest.raises(MisconfigurationException) as exc_info:
         ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
     assert "psnr/val/RGB" in str(exc_info.value)
-    assert "ssim/val" in str(exc_info.value)
+    assert "ssim/val/RGB" in str(exc_info.value)
+    assert "ssim/val/Y" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -431,12 +432,13 @@ def test_benchmark_validation_batch_end_collects_for_test_loader():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 2
-    # Each entry: (filename, lr|None, sr|None, hr|None, psnr_dict, ssim).
+    # Each entry: (filename, lr|None, sr|None, hr|None, psnr_dict, ssim_dict).
     fname, lr, sr, hr, psnr, ssim = cb._buffer["Set5"][0]
     assert fname == "Set5_000"
     assert lr is not None and sr is not None and hr is not None
     assert "RGB" in psnr
-    assert isinstance(ssim, float)
+    assert "RGB" in ssim and "Y" in ssim  # eval_config.ssim_channels default
+    assert isinstance(ssim["RGB"], float)
 
 
 def test_benchmark_validation_epoch_end_logs_means():
@@ -449,18 +451,21 @@ def test_benchmark_validation_epoch_end_logs_means():
     # Hand-populate buffer with two entries; image tensors set None so the
     # image-strip branch is skipped (covered by the next test).
     cb._buffer["Set5"] = [
-        ("img_0", None, None, None, {"RGB": 30.0}, 0.9),
-        ("img_1", None, None, None, {"RGB": 32.0}, 0.85),
+        ("img_0", None, None, None, {"RGB": 30.0}, {"RGB": 0.9}),
+        ("img_1", None, None, None, {"RGB": 32.0}, {"RGB": 0.85}),
     ]
     trainer = SimpleNamespace(global_step=42, loggers=[])
     cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
     # Two log calls per dataset: psnr + ssim.
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
     assert "psnr/Set5/RGB" in log_keys
-    assert "ssim/Set5" in log_keys
+    assert "ssim/Set5/RGB" in log_keys
     # Mean PSNR = (30.0 + 32.0) / 2 = 31.0
     psnr_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "psnr/Set5/RGB")
     assert psnr_call.args[1] == pytest.approx(31.0)
+    # Mean SSIM = (0.9 + 0.85) / 2 = 0.875
+    ssim_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "ssim/Set5/RGB")
+    assert ssim_call.args[1] == pytest.approx(0.875)
 
 
 def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path: Path, monkeypatch):
@@ -482,7 +487,7 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
             torch.rand(3, 4, 4),
             torch.rand(3, 4, 4),
             {"RGB": 30.0},
-            0.9,
+            {"RGB": 0.9},
         ),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
@@ -502,7 +507,7 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     assert strip.ndim == 3 and strip.shape[0] == 3  # (C, H, W) triptych
     # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
-    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/img_0"]
+    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/RGB/img_0"]
 
 
 def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path, monkeypatch):
@@ -527,7 +532,7 @@ def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path,
     lr = torch.rand(3, 4, 4)
     sr = torch.rand(3, 16, 16)
     hr = torch.rand(3, 16, 16)
-    cb._buffer["Set5"] = [("img_0", lr, sr, hr, {"RGB": 30.0}, 0.9)]
+    cb._buffer["Set5"] = [("img_0", lr, sr, hr, {"RGB": 30.0}, {"RGB": 0.9})]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
     cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
@@ -562,7 +567,7 @@ def test_benchmark_image_strips_upsample_lr_to_hr_size(tmp_path: Path, monkeypat
             torch.rand(3, 16, 16),
             torch.rand(3, 16, 16),
             {"RGB": 30.0},
-            0.9,
+            {"RGB": 0.9},
         ),
     ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
@@ -611,12 +616,13 @@ def test_benchmark_test_epoch_end_logs_means():
     pl_module = MagicMock()
     cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     cb._buffer["Set5"] = [
-        ("img_0", None, None, None, {"RGB": 28.0}, 0.7),
+        ("img_0", None, None, None, {"RGB": 28.0}, {"RGB": 0.7}),
     ]
     trainer = SimpleNamespace(global_step=0, loggers=[])
     cb.on_test_epoch_end(trainer=trainer, pl_module=pl_module)
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
     assert "psnr/Set5/RGB" in log_keys
+    assert "ssim/Set5/RGB" in log_keys
 
 
 # ---------------------------------------------------------------------------
@@ -696,9 +702,10 @@ def test_benchmark_collect_batch_crops_per_eval_config():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
-    _, _, _, _, psnr_dict, ssim = cb._buffer["Set5"][0]
+    _, _, _, _, psnr_dict, ssim_dict = cb._buffer["Set5"][0]
     assert "RGB" in psnr_dict
-    assert isinstance(ssim, float)
+    assert "RGB" in ssim_dict
+    assert isinstance(ssim_dict["RGB"], float)
 
 
 def test_benchmark_collect_batch_routes_through_processor():
@@ -732,14 +739,15 @@ def test_benchmark_collect_batch_routes_through_processor():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
-    _, lr_cached, sr_cached, hr_cached, psnr_dict, ssim = cb._buffer["Set5"][0]
+    _, lr_cached, sr_cached, hr_cached, psnr_dict, ssim_dict = cb._buffer["Set5"][0]
     # All cached tensors are full RGB (reconstruct stitched SR-Y with bicubic Cb/Cr).
     assert lr_cached.shape == (3, 16, 16)
     assert sr_cached.shape == (3, 16, 16)
     assert hr_cached.shape == (3, 16, 16)
     assert "RGB" in psnr_dict
     assert "YCbCr" in psnr_dict
-    assert isinstance(ssim, float)
+    assert "RGB" in ssim_dict and "Y" in ssim_dict  # eval_config.ssim_channels default
+    assert isinstance(ssim_dict["RGB"], float)
 
 
 def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_false():
