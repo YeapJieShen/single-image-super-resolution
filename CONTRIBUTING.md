@@ -86,10 +86,11 @@ parallel data loading; use it only for debugging, not for real training runs.
 3. Run `pytest` locally and make sure it is green.
 4. Open a pull request against `main`.
 
-All PRs must pass two GitHub Actions checks before they can merge:
+All PRs must pass three GitHub Actions checks before they can merge:
 
 - **test** — installs `.[dev]` and runs `pytest` with coverage (uploaded to Codecov).
 - **build** — verifies `pip install .` and that `sisr` / `sisr.cli.main` import cleanly.
+- **lint** — `ruff check` and `ruff format --check`.
 
 `main` uses linear history (rebase/squash, no merge commits) and requires PRs.
 
@@ -123,8 +124,8 @@ instead:
    and an optional `reset_parameters(**kwargs)` init hook).
 2. Define `<Arch>TrainingConfig` / `<Arch>EvalConfig` dataclasses with the paper's
    defaults (mirroring `sisr/models/srcnn/config.py`).
-3. Pick an existing `SRProcessor` (`RGBProcessor`, `YChannelProcessor`, `YCbCrProcessor`)
-   or add a new one.
+3. Pick an existing `SRProcessor` (`RGBProcessor`, `RGBSignedOutputProcessor`,
+   `YChannelProcessor`, `YCbCrProcessor`) or add a new one.
 4. Copy a template in `templates/`, point `model.model` / `model.processor` /
    `model.training_config` / `model.eval_config` and each dataset `class_path` at your
    new classes, and run `sisr fit --config <your.yaml>`.

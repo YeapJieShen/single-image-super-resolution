@@ -26,11 +26,12 @@ class SRResNetTrainingConfig(SRTrainingConfig):
     with :class:`~sisr.processors.RGBProcessor`) using Adam (lr 1e-4) and
     no per-layer LRs.
 
-    Weight initialization in the paper is implicit (Kaiming-style for PReLU
-    activations). ``init_strategy='paper'`` is reserved for a future PR
-    that wires this up via :meth:`SRResNet.reset_parameters`. Today the
-    field defaults to ``'default'`` so SRResNet ships with PyTorch's
-    built-in init; flipping to ``'paper'`` is currently a no-op because
+    The paper does not specify a weight-initialization scheme.
+    ``init_strategy='paper'`` is reserved for a future PR that wires up a
+    project-chosen init (e.g. Kaiming-style for the PReLU activations) via
+    :meth:`SRResNet.reset_parameters`. Today the field defaults to
+    ``'default'`` so SRResNet ships with PyTorch's built-in init; flipping
+    to ``'paper'`` is currently a no-op because
     :meth:`SRModel.reset_parameters` (the inherited base) does nothing.
     The field exists now so a future PR can add the implementation without
     a YAML schema change.
