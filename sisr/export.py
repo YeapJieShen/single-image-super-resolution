@@ -10,7 +10,10 @@ themselves.
 
 For :class:`~sisr.processors.RGBProcessor` architectures (SRResNet), those
 methods are identity functions, so the bare graph is already an end-to-end
-LR-RGB -> SR-RGB pipeline. For :class:`~sisr.processors.YChannelProcessor`
+LR-RGB -> SR-RGB pipeline. Under
+:class:`~sisr.processors.RGBSignedOutputProcessor` the same graph emits
+``[-1, 1]`` and the consumer must apply ``(out + 1) / 2``; the input side is
+unchanged. For :class:`~sisr.processors.YChannelProcessor`
 architectures (SRCNN), the graph only covers Y -> Y: reconstructing an RGB
 image needs the LR image's Cb/Cr channels back (bicubic-upsampled to the SR
 size), which this export omits. A non-Python ONNX consumer of an SRCNN graph

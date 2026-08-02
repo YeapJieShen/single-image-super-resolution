@@ -12,6 +12,7 @@ from sisr.models.srresnet import SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import (
     RGBProcessor,
+    RGBSignedOutputProcessor,
     SRProcessor,
     YCbCrProcessor,
     YChannelProcessor,
@@ -475,11 +476,12 @@ def test_srlightning_construction_forward_probe_succeeds_with_matching_shape():
 
 
 def test_step_calls_processor_extract_and_reconstruct():
-    """_step routes through processor.extract (twice — input and HR) and processor.reconstruct."""
+    """_step routes LR through extract, HR through extract_target, output through reconstruct."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     processor = MagicMock(spec=SRProcessor)
     # extract returns 3-channel passthrough; reconstruct returns its first arg.
     processor.extract.side_effect = lambda x: x
+    processor.extract_target.side_effect = lambda x: x
     processor.reconstruct.side_effect = lambda sr, lr: sr
 
     lit = SRLightning(
@@ -493,10 +495,36 @@ def test_step_calls_processor_extract_and_reconstruct():
     hr = torch.rand(2, 3, 33, 33)
     lit._step((lr, hr))
 
-    # extract called twice: once for LR input, once for HR-for-loss.
-    assert processor.extract.call_count == 2
+    # extract handles only the LR input; the HR loss target goes through
+    # extract_target, so an asymmetric processor can transform them differently.
+    assert processor.extract.call_count == 1
+    assert processor.extract_target.call_count == 1
     # reconstruct called once with (sr_model_out, lr_img).
     assert processor.reconstruct.call_count == 1
+
+
+def test_step_loss_uses_extract_target_not_extract():
+    """The loss target is extract_target(hr) — proven by a processor where they differ."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(2, 3, 33, 33)
+    hr = torch.rand(2, 3, 33, 33)
+
+    loss, _, _, sr_rgb, hr_cropped = lit._step((lr, hr))
+
+    # Reproduce the loss by hand against the [-1, 1] target. Scoring `sr_rgb`
+    # against `hr_cropped` (the [0, 1] pair the metrics use) would give exactly
+    # a quarter of this — which is what a regression to extract() would log.
+    sr_model_out = 2.0 * sr_rgb - 1.0
+    expected = torch.nn.functional.mse_loss(sr_model_out, hr_cropped * 2.0 - 1.0)
+    assert torch.allclose(loss, expected, atol=1e-6)
+    assert not torch.allclose(loss, expected / 4.0, atol=1e-6)
 
 
 def test_paper_init_polymorphic_on_non_overriding_subclass():
