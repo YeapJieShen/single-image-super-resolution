@@ -44,9 +44,10 @@ class BenchmarkImageLogger(Callback):
     SR output is center-padded when smaller than HR (``padding='valid'``) so
     all three panels share the same spatial size.
 
-    Per-image PSNR/SSIM scalars go under ``"per_image/{name}/psnr/{key}/{filename}"``
-    and ``"per_image/{name}/ssim/{key}/{filename}"``; per-set means under
-    ``"psnr/{name}/{key}"`` and ``"ssim/{name}/{key}"``.
+    Per-set means go under ``"psnr/{name}/{key}"`` and ``"ssim/{name}/{key}"``
+    every cycle. Per-image scalars under ``"per_image/{name}/psnr/{key}/{filename}"``
+    and ``"per_image/{name}/ssim/{key}/{filename}"`` are gated by
+    ``log_per_image_metrics`` (default off — see that arg).
 
     Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
     the use site; this avoids dual-knob configuration drift.
@@ -62,16 +63,26 @@ class BenchmarkImageLogger(Callback):
             ``max_steps=100_000``) val fires ~100 times, so logging every 5
             runs gives ~20 image snapshots — enough to track visual
             progress without flooding TensorBoard storage.  Default ``5``.
+        log_per_image_metrics: Emit the ``per_image/...`` PSNR/SSIM scalars
+            (one series per image per key). Default ``False``: with N test
+            images and both PSNR/SSIM keyed by colorspace, this is
+            ``N * (psnr_keys + ssim_keys)`` TensorBoard tags — e.g. 76 series
+            for 19 images at template defaults, 1190 with BSD100 plus
+            ``separate_psnr``. The cost is tag-count (TensorBoard's scalar
+            pane stops being navigable), not bytes — these scalars are only
+            ~285 KB. Per-set means are unaffected and always logged.
     """
 
     def __init__(
         self,
         dataset_names: list[str] | None = None,
         log_every_n_val_runs: int = 5,
+        log_per_image_metrics: bool = False,
     ):
         super().__init__()
         self.dataset_names = list(dataset_names) if dataset_names else None
         self.log_every_n_val_runs = log_every_n_val_runs
+        self.log_per_image_metrics = log_per_image_metrics
 
         # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
         # Test: only test sets present, at idx 0..N-1     → {0: 'Set5', ...}
@@ -305,12 +316,15 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         should_log_images: bool,
     ):
-        """Log per-set means and (optionally) image strips for buffered batches.
+        """Log per-set means and (optionally) per-image scalars/image strips.
 
         Shared between :meth:`on_validation_epoch_end` and
         :meth:`on_test_epoch_end`. Looks up the TensorBoard logger from
-        ``trainer.loggers``; silently skips image emission for sets whose
-        logger is missing.
+        ``trainer.loggers``; silently skips per-image/image emission for
+        sets whose logger is missing. Per-image scalar emission is gated by
+        ``self.log_per_image_metrics``, independent of *should_log_images*
+        (which gates only the image strips) — the two concerns cost
+        differently (tag count vs. bytes) and are configured separately.
         """
         step = trainer.global_step
 
@@ -328,7 +342,7 @@ class BenchmarkImageLogger(Callback):
                 mean_ssim = sum(s[5][key] for s in samples) / len(samples)
                 pl_module.log(f"ssim/{dataset_name}/{key}", mean_ssim, add_dataloader_idx=False)
 
-            if should_log_images:
+            if should_log_images or self.log_per_image_metrics:
                 tb_logger = next(
                     (
                         logger
@@ -342,18 +356,22 @@ class BenchmarkImageLogger(Callback):
 
                 experiment = tb_logger.experiment
                 for filename, lr, sr, hr, psnr_dict, ssim_dict in samples:
-                    for key, psnr_val in psnr_dict.items():
-                        experiment.add_scalar(
-                            f"per_image/{dataset_name}/psnr/{key}/{filename}",
-                            psnr_val,
-                            global_step=step,
-                        )
-                    for key, ssim_val in ssim_dict.items():
-                        experiment.add_scalar(
-                            f"per_image/{dataset_name}/ssim/{key}/{filename}",
-                            ssim_val,
-                            global_step=step,
-                        )
+                    if self.log_per_image_metrics:
+                        for key, psnr_val in psnr_dict.items():
+                            experiment.add_scalar(
+                                f"per_image/{dataset_name}/psnr/{key}/{filename}",
+                                psnr_val,
+                                global_step=step,
+                            )
+                        for key, ssim_val in ssim_dict.items():
+                            experiment.add_scalar(
+                                f"per_image/{dataset_name}/ssim/{key}/{filename}",
+                                ssim_val,
+                                global_step=step,
+                            )
+
+                    if not should_log_images:
+                        continue
 
                     # Triptych: bicubic | SR | HR, all at HR size.
                     # The bicubic panel is the LR upsampled to HR via bicubic
