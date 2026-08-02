@@ -30,6 +30,12 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     ``init_strategy='default'`` to fall back to PyTorch's built-in init.
     Override any field in YAML to deviate.
 
+    ``scale`` is left at the inherited ``None`` default (not overridden
+    here): unlike SRResNet, ``SRCNN`` carries no ``scale`` hparam — it is
+    resolution-preserving and trains on whatever scale the datamodule
+    supplies — and the paper itself reports x2/x3/x4 results rather than a
+    single fixed factor, so there is no one paper-correct value to pin.
+
     Args:
         layer_lrs: Per-``Conv2d`` LRs ``[1e-4, 1e-4, 1e-5]`` matching the
             paper's recipe. Set to ``None`` to disable per-layer LRs.

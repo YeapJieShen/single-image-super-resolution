@@ -37,9 +37,17 @@ class SRResNetTrainingConfig(SRTrainingConfig):
     :meth:`SRModel.reset_parameters` (the inherited base) does nothing.
     The field exists now so a future PR can add the implementation without
     a YAML schema change.
+
+    ``scale`` defaults to ``4``: unlike SRCNN (whose paper reports multiple
+    scales and whose model carries no ``scale`` hparam at all), the SRResNet
+    baseline this project reproduces (Ledig et al. §3.2) is fixed at a single
+    4x upscaling factor, matching ``SRResNet``'s own ``scale`` hparam. The
+    default is therefore validated, not just recorded — see
+    ``SRTrainingConfig.validate_against``.
     """
 
     init_strategy: Literal["default", "paper"] = "default"
+    scale: int = 4
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Extend the base checks with SRResNet's ``in_out_channels``/processor correlation.

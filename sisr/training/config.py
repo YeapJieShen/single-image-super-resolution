@@ -91,6 +91,16 @@ class SRTrainingConfig:
             implementations. Not itself paper-derived — see ``init_mean``;
             e.g. ``SRCNNTrainingConfig`` overrides this to ``0.001``, the
             value its paper specifies. Defaults to ``0.01``.
+
+        scale: The model's upscaling factor, for provenance metadata and
+            cross-checking against the model's own ``scale`` hparam (see
+            :meth:`validate_against`). ``None`` (the default) leaves it
+            unchecked and out of exported metadata — appropriate for
+            architectures like SRCNN where scale is a training-data choice,
+            not a fixed property of the model itself. Deliberately not
+            inferred from ``trainer.datamodule.train_dataset.scale``: that
+            attribute lives outside the ``SRDataset`` contract (``PredictDataset``
+            has none at all), whereas per-paper knobs already live here.
     """
 
     layer_lrs: list[float] | None = None
@@ -98,18 +108,25 @@ class SRTrainingConfig:
     init_strategy: Literal["default", "paper"] = "default"
     init_mean: float = 0.0
     init_std: float = 0.01
+    scale: int | None = None
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Validate this config against the model/processor it will pair with.
 
-        Universal, architecture-agnostic checks: when ``example_input_shape``
-        is set, its channel dimension must equal ``processor.model_channels``,
-        and a ``torch.no_grad()`` forward pass of the real ``model`` on a
-        zero tensor of that shape must succeed. The probe exercises the
-        actual ``nn.Module`` rather than a separate description of it, so it
-        cannot go stale as the architecture evolves. A no-op when
-        ``example_input_shape`` is unset — it is optional (TensorBoard graph
-        / FLOPs reporting only).
+        Universal, architecture-agnostic checks:
+
+        - When ``self.scale`` is set and ``model.hparams`` declares a
+          ``'scale'`` entry, the two must agree. Either side being absent
+          (``self.scale is None``, or the model has no ``'scale'`` hparam —
+          e.g. SRCNN) skips the check silently rather than guessing.
+        - When ``example_input_shape`` is set, its channel dimension must
+          equal ``processor.model_channels``, and a ``torch.no_grad()``
+          forward pass of the real ``model`` on a zero tensor of that shape
+          must succeed. The probe exercises the actual ``nn.Module`` rather
+          than a separate description of it, so it cannot go stale as the
+          architecture evolves. This half is a no-op when
+          ``example_input_shape`` is unset — it is optional (TensorBoard
+          graph / FLOPs reporting only).
 
         Subclasses (e.g. ``SRCNNTrainingConfig``) override this to add
         architecture-specific correlation checks — e.g. ``num_channels`` vs
@@ -126,9 +143,20 @@ class SRTrainingConfig:
                 with ``model`` for this run.
 
         Raises:
-            ValueError: If ``example_input_shape`` is set and its channel
-                dimension doesn't match ``processor.model_channels``.
+            ValueError: If ``self.scale`` is set and disagrees with the
+                model's own ``scale`` hparam, or if ``example_input_shape``
+                is set and its channel dimension doesn't match
+                ``processor.model_channels``.
         """
+        if self.scale is not None and "scale" in model.hparams:
+            model_scale = model.hparams["scale"]
+            if self.scale != model_scale:
+                raise ValueError(
+                    f"training_config.scale={self.scale} does not match "
+                    f"model.hparams['scale']={model_scale}. Fix training_config.scale "
+                    f"or the model's scale hyperparameter — they must agree."
+                )
+
         if self.example_input_shape is None:
             return
         channels = self.example_input_shape[0]

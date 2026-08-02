@@ -3,6 +3,7 @@ from dataclasses import fields
 import pytest
 
 from sisr.models.srcnn import SRCNN
+from sisr.models.srresnet import SRResNet
 from sisr.processors import RGBProcessor
 from sisr.training import SREvalConfig, SRTrainingConfig
 
@@ -14,6 +15,7 @@ def test_sr_training_config_defaults():
     assert cfg.init_strategy == "default"
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
+    assert cfg.scale is None
 
 
 def test_sr_eval_config_defaults():
@@ -45,7 +47,14 @@ def test_sr_eval_config_ssim_channels_isolated_per_instance():
 def test_sr_training_config_field_names():
     """Reduced surface check — guards against accidental field renames."""
     names = {f.name for f in fields(SRTrainingConfig)}
-    assert names == {"layer_lrs", "example_input_shape", "init_strategy", "init_mean", "init_std"}
+    assert names == {
+        "layer_lrs",
+        "example_input_shape",
+        "init_strategy",
+        "init_mean",
+        "init_std",
+        "scale",
+    }
 
 
 def test_sr_eval_config_field_names():
@@ -209,4 +218,37 @@ def test_validate_against_forward_probe_catches_architecture_mismatch_not_just_c
     cfg = SRTrainingConfig(example_input_shape=(3, 5, 5))
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     with pytest.raises(RuntimeError):
+        cfg.validate_against(model, RGBProcessor())
+
+
+# ---------------------------------------------------------------------------
+# SRTrainingConfig.scale / validate_against's scale correlation check
+# ---------------------------------------------------------------------------
+
+
+def test_validate_against_noop_when_scale_unset_on_config():
+    """scale=None (the default) skips the check even when the model declares one."""
+    cfg = SRTrainingConfig()
+    model = SRResNet(scale=4, num_residual_blocks=1)
+    cfg.validate_against(model, RGBProcessor())  # must not raise
+
+
+def test_validate_against_noop_when_model_has_no_scale_hparam():
+    """SRCNN's hparams carry no 'scale' key; a configured scale goes unchecked
+    rather than raising on a key that was never meant to correlate."""
+    cfg = SRTrainingConfig(scale=4)
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    cfg.validate_against(model, RGBProcessor())  # must not raise
+
+
+def test_validate_against_accepts_matching_scale():
+    cfg = SRTrainingConfig(scale=4)
+    model = SRResNet(scale=4, num_residual_blocks=1)
+    cfg.validate_against(model, RGBProcessor())  # must not raise
+
+
+def test_validate_against_rejects_scale_mismatch():
+    cfg = SRTrainingConfig(scale=2)
+    model = SRResNet(scale=4, num_residual_blocks=1)
+    with pytest.raises(ValueError, match="scale"):
         cfg.validate_against(model, RGBProcessor())
