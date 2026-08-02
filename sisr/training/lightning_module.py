@@ -225,11 +225,20 @@ class SRLightning(lightning.LightningModule):
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — the raw model output in the model IO
-            colorspace, and the reconstructed SR RGB.
+            colorspace, and the reconstructed SR RGB clamped to ``[0, 1]``.
         """
         model_input = self.processor.extract(lr_img)
         sr_model_out = self.model(model_input)
         sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        # Clamp display-space output only, here, once — every reconstruct()
+        # consumer (_forward_sr's callers, predict_step) reads through this
+        # one line, so PSNR/SSIM never diverge from what an 8-bit image would
+        # score (P4.14). sr_model_out (the loss target) is untouched: clamping
+        # it would kill gradients on saturated pixels. Idempotent where
+        # reconstruct() already clamps (YCbCrProcessor/YChannelProcessor's
+        # ycbcr_to_rgb) — don't move this into forward() or a processor, or
+        # the bound would depend on training colorspace again.
+        sr_rgb = sr_rgb.clamp(0.0, 1.0)
         return sr_model_out, sr_rgb
 
     def _forward_sr(
@@ -250,9 +259,10 @@ class SRLightning(lightning.LightningModule):
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
 
         Returns:
-            ``(sr_model_out, sr_rgb, hr_cropped)`` — the raw model output in
-            the model IO colorspace, the reconstructed SR RGB, and HR
-            center-cropped to the SR spatial size.
+            ``(sr_model_out, sr_rgb, hr_cropped)`` — the raw (unclamped)
+            model output in the model IO colorspace, the reconstructed SR RGB
+            clamped to ``[0, 1]``, and HR center-cropped to the SR spatial
+            size.
         """
         sr_model_out, sr_rgb = self._forward_lr(lr_img)
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
@@ -276,8 +286,8 @@ class SRLightning(lightning.LightningModule):
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
 
         Returns:
-            ``(sr_rgb, hr_cropped)`` — SR RGB and HR center-cropped to the SR
-            spatial size, both RGB ``float32``.
+            ``(sr_rgb, hr_cropped)`` — SR RGB clamped to ``[0, 1]`` and HR
+            center-cropped to the SR spatial size, both RGB ``float32``.
         """
         _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
         return sr_rgb, hr_cropped
@@ -300,8 +310,9 @@ class SRLightning(lightning.LightningModule):
 
         Returns:
             ``(loss, lr_img, hr_img, sr_rgb, hr_cropped)``. ``loss`` is a
-            scalar tensor; ``sr_rgb`` and ``hr_cropped`` are RGB tensors
-            with matching spatial size.
+            scalar tensor computed on the unclamped model output; ``sr_rgb``
+            (clamped to ``[0, 1]``) and ``hr_cropped`` are RGB tensors with
+            matching spatial size.
         """
         lr_img, hr_img = batch
 
