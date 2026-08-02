@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import lightning
 import pytest
 import torch
+import torch._dynamo
 import torchmetrics
 
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
@@ -882,3 +883,171 @@ def test_val_psnr_is_per_image_mean_not_batch_pooled():
     batch_val = SRLightning._mean_psnr(sr, hr)
     assert torch.allclose(batch_val, per_image, atol=1e-5)
     assert not torch.allclose(batch_val, pooled, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# compile_backend — configurable torch.compile plumbing
+# ---------------------------------------------------------------------------
+
+
+def _make_compilable_lit(compile_backend: str | None, example_input_shape=(3, 8, 8)):
+    """Small SRCNN wrapped in SRLightning; 'eager'/'aot_eager' run on CPU and
+    are bit-identical to uncompiled, so this is CI-testable without a GPU."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(
+            compile_backend=compile_backend, example_input_shape=example_input_shape
+        ),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_compile_backend_invalid_name_raises_at_construction():
+    """A backend name torch._dynamo doesn't recognize fails immediately at
+    SRLightning construction — a YAML typo fails at startup, not mid-run."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    with pytest.raises(torch._dynamo.exc.InvalidBackend):
+        SRLightning(
+            model=model,
+            processor=RGBProcessor(),
+            training_config=SRTrainingConfig(compile_backend="not_a_real_backend"),
+            eval_config=SREvalConfig(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_compile_backend_none_leaves_compiled_unset():
+    lit = _make_compilable_lit(compile_backend=None)
+    assert lit._compiled is None
+
+
+def test_compile_backend_state_dict_has_no_compiled_or_orig_mod_keys():
+    """Regression: torch.compile() wraps the model in an OptimizedModule, an
+    nn.Module — a plain attribute assignment would register it as a
+    submodule and duplicate every parameter under '_compiled._orig_mod.*'
+    in state_dict(), the checkpoint-compatibility hazard this wiring exists
+    to avoid."""
+    lit = _make_compilable_lit(compile_backend="eager")
+    keys = list(lit.state_dict().keys())
+    assert keys == [
+        "model.feat.0.weight",
+        "model.feat.0.bias",
+        "model.mapping.0.weight",
+        "model.mapping.0.bias",
+        "model.recon.weight",
+        "model.recon.bias",
+    ]
+    assert not any("_compiled" in k or "_orig_mod" in k for k in keys)
+
+
+def test_compile_backend_shares_weights_no_copy():
+    """self.model and self._compiled._orig_mod are the exact same object —
+    one set of weights, two execution paths, no drift."""
+    lit = _make_compilable_lit(compile_backend="eager")
+    assert lit._compiled._orig_mod is lit.model
+
+
+def test_compile_backend_checkpoint_roundtrips_compiled_to_plain():
+    """A checkpoint saved with compile_backend set loads strict=True into a
+    module built with it unset — the wiring must be invisible to state_dict."""
+    compiled_lit = _make_compilable_lit(compile_backend="eager")
+    plain_lit = _make_compilable_lit(compile_backend=None)
+    plain_lit.load_state_dict(compiled_lit.state_dict(), strict=True)  # must not raise
+
+
+def test_compile_backend_checkpoint_roundtrips_plain_to_compiled():
+    """The reverse direction: a checkpoint saved with compilation off loads
+    strict=True into a module built with compile_backend set."""
+    plain_lit = _make_compilable_lit(compile_backend=None)
+    compiled_lit = _make_compilable_lit(compile_backend="eager")
+    compiled_lit.load_state_dict(plain_lit.state_dict(), strict=True)  # must not raise
+
+
+def test_compile_backend_eager_output_matches_uncompiled_exactly():
+    """Regression: the 'eager' backend is bit-identical to uncompiled, which
+    is what makes this wiring testable on CPU without a GPU."""
+    torch.manual_seed(0)
+    plain_lit = _make_compilable_lit(compile_backend=None)
+    torch.manual_seed(0)
+    compiled_lit = _make_compilable_lit(compile_backend="eager")
+    compiled_lit.load_state_dict(plain_lit.state_dict(), strict=True)
+
+    x = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        out_plain = plain_lit.model(x)
+        out_compiled = compiled_lit._compiled(x)
+    torch.testing.assert_close(out_plain, out_compiled, rtol=0, atol=0)
+
+
+def test_compile_backend_train_mode_dispatches_to_compiled_callable():
+    """In train mode, _forward_lr must call through self._compiled, not
+    self.model directly — proven by replacing each with an independent
+    tracking stub so neither call site can accidentally reach the other."""
+    lit = _make_compilable_lit(compile_backend="eager")
+    lit.train()
+
+    compiled_mock = MagicMock(return_value=torch.zeros(1, 3, 8, 8))
+    object.__setattr__(lit, "_compiled", compiled_mock)
+    lit.model.forward = MagicMock(return_value=torch.zeros(1, 3, 8, 8))
+
+    lit._forward_lr(torch.rand(1, 3, 8, 8))
+
+    compiled_mock.assert_called_once()
+    lit.model.forward.assert_not_called()
+
+
+def test_compile_backend_eval_mode_dispatches_to_eager_model():
+    """In eval mode, _forward_lr must call self.model directly and never
+    touch self._compiled — required because validation/predict see widely
+    varying image sizes that a static-shape backend can't handle."""
+    lit = _make_compilable_lit(compile_backend="eager")
+    lit.eval()
+
+    compiled_mock = MagicMock(return_value=torch.zeros(1, 3, 8, 8))
+    object.__setattr__(lit, "_compiled", compiled_mock)
+    lit.model.forward = MagicMock(return_value=torch.zeros(1, 3, 8, 8))
+
+    lit._forward_lr(torch.rand(1, 3, 8, 8))
+
+    lit.model.forward.assert_called_once()
+    compiled_mock.assert_not_called()
+
+
+def test_compile_backend_off_uses_eager_model_regardless_of_training_flag():
+    """compile_backend=None must route through self.model in both modes —
+    there is no compiled callable to ever dispatch to."""
+    lit = _make_compilable_lit(compile_backend=None)
+    x = torch.rand(1, 3, 8, 8, generator=torch.Generator().manual_seed(0))
+
+    lit.train()
+    out_train, _ = lit._forward_lr(x)
+    lit.eval()
+    out_eval, _ = lit._forward_lr(x)
+    torch.testing.assert_close(out_train, out_eval)
+
+
+def test_on_fit_start_warms_up_compiled_path():
+    """on_fit_start must actually invoke the compiled callable once, so a
+    missing-toolchain backend fails at fit-start rather than mid-run."""
+    lit = _make_compilable_lit(compile_backend="eager", example_input_shape=(3, 8, 8))
+    calls = []
+    object.__setattr__(lit, "_compiled", lambda x: calls.append(x) or lit.model(x))
+
+    lit.on_fit_start()
+
+    assert len(calls) == 1
+    assert calls[0].shape == (1, 3, 8, 8)
+
+
+def test_on_fit_start_noop_when_compile_backend_unset():
+    lit = _make_compilable_lit(compile_backend=None)
+    lit.on_fit_start()  # must not raise
+
+
+def test_on_fit_start_noop_when_example_input_shape_unset():
+    """No shape to probe with — must not raise, not fabricate an input."""
+    lit = _make_compilable_lit(compile_backend="eager", example_input_shape=None)
+    lit.on_fit_start()  # must not raise

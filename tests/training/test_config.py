@@ -16,6 +16,7 @@ def test_sr_training_config_defaults():
     assert cfg.init_mean == 0.0
     assert cfg.init_std == 0.01
     assert cfg.scale is None
+    assert cfg.compile_backend is None
 
 
 def test_sr_eval_config_defaults():
@@ -54,6 +55,7 @@ def test_sr_training_config_field_names():
         "init_mean",
         "init_std",
         "scale",
+        "compile_backend",
     }
 
 
