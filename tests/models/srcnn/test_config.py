@@ -13,9 +13,12 @@ def test_srcnn_training_config_paper_defaults():
 
 
 def test_srcnn_eval_config_paper_defaults():
+    """Regression (P2.9): defaults must report the paper's own Y-channel
+    metric, not the YCbCr 3-channel aggregate (which reads optimistically
+    high since chroma planes are far smoother than luma)."""
     cfg = SRCNNEvalConfig()
     assert cfg.crop_border == 3
-    assert cfg.psnr_channels == ["RGB", "YCbCr"]
+    assert cfg.psnr_channels == ["RGB", "Y"]
     assert cfg.separate_psnr is False
 
 
@@ -40,7 +43,7 @@ def test_srcnn_eval_config_psnr_channels_independent_per_instance():
     a = SRCNNEvalConfig()
     b = SRCNNEvalConfig()
     a.psnr_channels.append("X")
-    assert b.psnr_channels == ["RGB", "YCbCr"]
+    assert b.psnr_channels == ["RGB", "Y"]
 
 
 def test_srcnn_training_config_init_defaults():
