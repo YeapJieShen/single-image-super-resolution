@@ -20,7 +20,7 @@ Top-level ``matmul_precision:`` (``'highest' | 'high' | 'medium'``) calls
 :func:`torch.set_float32_matmul_precision` once at startup. Set to ``'high'``
 on Ampere+ GPUs to enable TF32 matmul kernels.
 
-``sisr export`` (INIT.7) is a thin CLI wrapper around
+``sisr export`` is a thin CLI wrapper around
 :func:`sisr.export.to_onnx` — see that module for what gets exported and its
 SRCNN limitation. It requires the optional ``export`` extra
 (``pip install '.[export]'``).

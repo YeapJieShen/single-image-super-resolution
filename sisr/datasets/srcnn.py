@@ -178,7 +178,7 @@ class TrainDataset(SRDataset):
 
         Single source of truth for the patch grid: :meth:`__len__` and
         :meth:`__getitem__`'s O(1) index -> ``(top, left)`` lookup both derive
-        from the values this returns, so they can never disagree (P2.5).
+        from the values this returns, so they can never disagree.
 
         Returns:
             ``(sizes, offsets, n_cols, total)`` where *sizes* is each image's
