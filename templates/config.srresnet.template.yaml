@@ -26,7 +26,10 @@ model:
   training_config:
     class_path: sisr.models.srresnet.SRResNetTrainingConfig
     init_args:
-      example_input_shape: [3, 24, 24]   # For TensorBoard graph
+      # Matches the real training input: RGB at hr_crop_size / scale. Not only a
+      # TensorBoard-graph dummy -- it also shapes the compile warm-up (a wrong size
+      # compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+      example_input_shape: [3, 24, 24]
   eval_config:
     class_path: sisr.models.srresnet.SRResNetEvalConfig
 
