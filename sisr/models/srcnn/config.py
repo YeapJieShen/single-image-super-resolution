@@ -26,7 +26,7 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     uses a per-layer learning rate of ``1e-4`` for the feature-extraction
     and non-linear-mapping layers and ``1e-5`` for the reconstruction layer
     — i.e. the last layer learns 10× slower. Weight initialization follows
-    the paper's Gaussian schedule (``N(0, 0.01)`` with zero biases); set
+    the paper's Gaussian schedule (``N(0, 0.001)`` with zero biases); set
     ``init_strategy='default'`` to fall back to PyTorch's built-in init.
     Override any field in YAML to deviate.
 
@@ -37,15 +37,16 @@ class SRCNNTrainingConfig(SRTrainingConfig):
             init via ``SRCNN.reset_parameters`` in
             ``SRLightning``'s constructor;
             ``'default'`` skips it and uses PyTorch's defaults.
-        init_mean / init_std: Gaussian parameters used by
-            ``init_strategy='paper'``; inherited from
-            ``SRTrainingConfig`` with defaults
-            ``0.0`` / ``0.01`` matching the SRCNN paper. Override in YAML
-            to deviate.
+        init_mean: Gaussian mean for ``init_strategy='paper'``; inherited
+            from ``SRTrainingConfig`` (``0.0``, matching the paper).
+        init_std: Gaussian std for ``init_strategy='paper'``; overrides
+            the shared base's ``0.01`` to ``0.001``, the value the SRCNN
+            paper actually specifies. Override in YAML to deviate.
     """
 
     layer_lrs: list[float] | None = field(default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5])
     init_strategy: Literal["default", "paper"] = "paper"
+    init_std: float = 0.001
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Extend the base checks with SRCNN's ``num_channels``/processor correlation.
