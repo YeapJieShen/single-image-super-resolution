@@ -66,13 +66,16 @@ class SRTrainingConfig:
             Subclasses pin a paper-faithful default (e.g. ``SRCNNTrainingConfig``
             uses ``'paper'``).
 
-        init_mean: Mean of the Gaussian used by SRCNN's
-            ``init_strategy='paper'``. Other paper-init implementations may
-            ignore this. Defaults to ``0.0``.
+        init_mean: Mean of the Gaussian for ``init_strategy='paper'``
+            implementations. Not itself paper-derived — this shared base
+            has no single paper to match; architectures with a paper init
+            (e.g. ``SRCNNTrainingConfig``) override with their actual value.
+            Defaults to ``0.0``.
 
-        init_std: Std of the Gaussian used by SRCNN's
-            ``init_strategy='paper'``. Other paper-init implementations may
-            ignore this. Defaults to ``0.01``.
+        init_std: Std of the Gaussian for ``init_strategy='paper'``
+            implementations. Not itself paper-derived — see ``init_mean``;
+            e.g. ``SRCNNTrainingConfig`` overrides this to ``0.001``, the
+            value its paper specifies. Defaults to ``0.01``.
     """
 
     layer_lrs: list[float] | None = None
