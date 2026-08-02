@@ -128,10 +128,31 @@ line-length = 100
 # is nothing to suppress. Do not add it to `ignore`: ruff warns "rules have been
 # removed and ignoring them has no effect" on every run, which is noise in a required
 # check. The isinstance(x, A | B) style it enforced is now convention, not lint.
-select = ["E", "F", "I", "UP", "B"]
+# D: pydocstyle (P4.15) — makes "Google-style docstrings on public API" (a stated
+# project non-negotiable) enforceable instead of review-only. D105 (undocumented
+# magic method) is ignored because dunder semantics are defined by the language,
+# not by us. D107 (undocumented __init__) is ignored because Google style documents
+# constructor args in the *class* docstring, which this repo already does —
+# requiring an __init__ docstring too would push against the very convention being
+# enforced.
+# Limitation worth knowing: D417 (missing Args entry) fires only on *partially*
+# documented functions, not undocumented ones — a docstring with its whole Args:
+# section deleted passes with D fully enabled (verified empirically with a
+# two-function probe; preview DOC rules were silent on it too). So this catches
+# half-documented functions and formatting drift, not the wholesale Args: deletion
+# that motivated adding it. That guardrail stays human review.
+select = ["E", "F", "I", "UP", "B", "D"]
+ignore = ["D105", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Re-export hubs import names purely to surface them under short class paths.
 # Names in __all__ are already treated as used; this documents the intent and
 # covers any future __init__.py that omits __all__.
 "__init__.py" = ["F401"]
+# Tests carry ~400 D violations, ~135 of them D103 (undocumented public function).
+# Test *names* are the documentation here; writing hundreds of docstrings to
+# satisfy a linter is churn, not clarity.
+"tests/**" = ["D"]
