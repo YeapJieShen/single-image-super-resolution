@@ -42,7 +42,7 @@ via `resize_backend`:
   Byte-exact inputs alone don't make **reported** PSNR/SSIM comparable, though:
   Y-channel figures here use BT.601 full-range Y (`sisr/colorspace.py`), while the
   literature's published Y-channel numbers use MATLAB `rgb2ycbcr`'s studio-range
-  convention — a known, exact `20·log10(255/219) ≈ 1.3225 dB` offset, not an unknown one.
+  convention — a known, exact `20·log10(255/219) ≈ 1.3219 dB` offset, not an unknown one.
 - **`'cv2'` (opt-in).** Plain `cv2.INTER_CUBIC`, no antialiasing of its own. SRCNN's
   `blur_sigma` (a pre-resize Gaussian blur) only has an effect on this path — passing
   `blur_sigma` together with `resize_backend='matlab'` raises `ValueError` at
