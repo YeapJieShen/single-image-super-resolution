@@ -304,9 +304,11 @@ class SRLightning(lightning.LightningModule):
         """Shared forward + loss for training and validation steps.
 
         The processor handles all colorspace conversion; loss is computed in
-        the model's IO colorspace (against HR converted to the same space
-        via ``processor.extract``). Metrics downstream consume ``sr_rgb`` /
-        ``hr_cropped`` (both full RGB, spatially aligned).
+        the model's *output* space (against HR mapped into it via
+        ``processor.extract_target``, which defaults to ``processor.extract``
+        and differs only where a model's input and output ranges differ).
+        Metrics downstream consume ``sr_rgb`` / ``hr_cropped`` (both full
+        RGB, spatially aligned).
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple from a loader. Both RGB,
@@ -320,7 +322,7 @@ class SRLightning(lightning.LightningModule):
         lr_img, hr_img = batch
 
         sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
-        hr_for_loss = self.processor.extract(hr_cropped)
+        hr_for_loss = self.processor.extract_target(hr_cropped)
         loss = self.criterion(sr_model_out, hr_for_loss)
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
