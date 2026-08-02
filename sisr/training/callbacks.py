@@ -23,9 +23,9 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 
 class BenchmarkImageLogger(Callback):
-    """Log per-image bicubic|SR|HR composites and scalar PSNR/SSIM to TensorBoard
-    for one or more held-out test/benchmark dataloaders (Set5, Set14, …).
+    """Logs bicubic|SR|HR image composites and PSNR/SSIM to TensorBoard for held-out sets.
 
+    Covers one or more held-out test/benchmark dataloaders (Set5, Set14, …).
     Fires during *both* validation and test stages:
 
     * **During `cli fit` / `cli validate`** — `SRDataModule.val_dataloader()`
@@ -447,8 +447,9 @@ class GradNormLogger(Callback):
 
 
 class WeightHistogramLogger(Callback):
-    """Log the weights of the model as histograms to TensorBoard periodically,
-    grouped by parameter prefixes (e.g., model.feat, model.mapping, model.recon).
+    """Logs model weights as TensorBoard histograms, grouped by parameter prefix.
+
+    Groups by prefix, e.g. ``model.feat``, ``model.mapping``, ``model.recon``.
 
     Args:
         log_every_n_steps (int): Log histograms every *n* training steps.

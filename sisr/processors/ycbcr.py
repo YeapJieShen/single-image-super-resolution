@@ -11,11 +11,14 @@ class YCbCrProcessor(SRProcessor):
     """Full YCbCr processor: model trains on YCbCr, output converted to RGB."""
 
     def extract(self, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Convert lr_rgb to YCbCr."""
         return rgb_to_ycbcr(lr_rgb)
 
     def reconstruct(self, sr_ycbcr: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
+        """Convert the model's YCbCr output back to RGB."""
         return ycbcr_to_rgb(sr_ycbcr)
 
     @property
     def model_channels(self) -> int:
+        """Number of model IO channels — 3 (YCbCr)."""
         return 3
