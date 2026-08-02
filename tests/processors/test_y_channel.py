@@ -14,6 +14,10 @@ def test_y_channel_model_channels_is_1():
     assert YChannelProcessor().model_channels == 1
 
 
+def test_y_channel_output_range_is_unit():
+    assert YChannelProcessor().output_range == (0.0, 1.0)
+
+
 def test_y_channel_extract_returns_single_y_channel():
     """extract returns Y of the LR in YCbCr (shape [B,1,H,W])."""
     p = YChannelProcessor()

@@ -36,3 +36,8 @@ class YChannelProcessor(SRProcessor):
     def model_channels(self) -> int:
         """Number of model IO channels — 1 (Y)."""
         return 1
+
+    @property
+    def output_range(self) -> tuple[float, float]:
+        """Model output range — ``(0.0, 1.0)``, unscaled Y."""
+        return (0.0, 1.0)
