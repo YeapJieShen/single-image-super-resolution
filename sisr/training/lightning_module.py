@@ -18,7 +18,7 @@ import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
-from ..colorspace import rgb_to_ycbcr
+from ..colorspace import rgb_to_ycbcr_studio
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
@@ -151,7 +151,12 @@ class SRLightning(lightning.LightningModule):
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """Pre-computes (sr, hr) RGB tensor pairs for every tracked PSNR key.
 
-        Colorspace conversions are performed at most once per call.
+        Colorspace conversions are performed at most once per call. ``Y`` /
+        ``Cb`` / ``Cr`` / ``YCbCr`` are converted via ``rgb_to_ycbcr_studio`` —
+        BT.601 studio range, the literature's PSNR convention (MATLAB's
+        ``rgb2ycbcr``, BasicSR's ``bgr2ycbcr``) — not the full-range
+        ``rgb_to_ycbcr`` the processors train in (see ``sisr.colorspace``
+        module docstring). ``RGB``/``R``/``G``/``B`` are untouched either way.
         """
         keys = set(self.eval_config.psnr_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -163,8 +168,8 @@ class SRLightning(lightning.LightningModule):
             tensors["B"] = (sr[:, 2:3], hr[:, 2:3])
 
         if keys & {"YCbCr", "Y", "Cb", "Cr"}:
-            sr_ycc = rgb_to_ycbcr(sr)
-            hr_ycc = rgb_to_ycbcr(hr)
+            sr_ycc = rgb_to_ycbcr_studio(sr)
+            hr_ycc = rgb_to_ycbcr_studio(hr)
             tensors["YCbCr"] = (sr_ycc, hr_ycc)
             tensors["Y"] = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
             tensors["Cb"] = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])

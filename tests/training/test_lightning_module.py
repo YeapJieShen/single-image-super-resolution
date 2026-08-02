@@ -264,6 +264,29 @@ def test_build_psnr_tensors_ycbcr_does_conversion():
     assert not torch.equal(sr_ycc, sr)
 
 
+def test_build_psnr_tensors_ycbcr_uses_studio_range_not_full_range():
+    """Regression (P2.8): the metric-side YCbCr conversion must be BT.601
+    studio range, not the full-range conversion SRProcessor subclasses train
+    in — locked by comparing against sisr.colorspace directly."""
+    from sisr.colorspace import rgb_to_ycbcr, rgb_to_ycbcr_studio
+
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(psnr_channels=["YCbCr"]),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    sr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(3))
+    hr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(4))
+    tensors = lit._build_psnr_tensors(sr, hr)
+    sr_ycc, hr_ycc = tensors["YCbCr"]
+    torch.testing.assert_close(sr_ycc, rgb_to_ycbcr_studio(sr))
+    torch.testing.assert_close(hr_ycc, rgb_to_ycbcr_studio(hr))
+    assert not torch.allclose(sr_ycc, rgb_to_ycbcr(sr))
+
+
 def test_flatten_hparams_handles_nested():
     flat = SRLightning._flatten_hparams(
         {
