@@ -22,6 +22,7 @@ from ..colorspace import rgb_to_ycbcr_studio
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
+from .metadata import build_metadata
 
 
 class SRLightning(lightning.LightningModule):
@@ -471,6 +472,31 @@ class SRLightning(lightning.LightningModule):
         }
         for tb in tb_loggers:
             tb.log_hyperparams(self._tb_hparams, metrics)
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Inject a ``sisr_meta`` provenance key into every saved ``.ckpt``.
+
+        Public, supported Lightning hook (unlike the private ``_save_checkpoint`` the
+        bare-weights ``SRWeightsCheckpoint`` callback must override instead). Adding a new
+        top-level key is safe for ``--ckpt_path`` resumption: ``LightningCLI._parse_ckpt_path``
+        reads only the ``hyper_parameters`` key to seed the model config, so ``sisr_meta``
+        is inert there. ``global_step``/``epoch`` are read back from ``checkpoint`` itself
+        (populated by Lightning before this hook runs) rather than ``self.trainer``, so the
+        metadata always describes the exact step being persisted. No ``monitor``/
+        ``monitor_value`` here — a full checkpoint isn't tied to any one monitored metric
+        (zero, one, or several ``SRCheckpoint`` callbacks may be watching independently);
+        that pairing only exists for :class:`~sisr.training.callbacks.SRWeightsCheckpoint`,
+        whose ``monitor`` is a well-defined single value.
+
+        Args:
+            checkpoint: The checkpoint dict Lightning is about to write to disk; mutated
+                in place to add ``checkpoint["sisr_meta"]``.
+        """
+        checkpoint["sisr_meta"] = build_metadata(
+            self,
+            global_step=checkpoint.get("global_step"),
+            epoch=checkpoint.get("epoch"),
+        )
 
     def test_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
