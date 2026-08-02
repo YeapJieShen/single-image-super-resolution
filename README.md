@@ -35,10 +35,14 @@ via `resize_backend`:
   MATLAB-`imresize`-compatible bicubic resize — antialiased (MATLAB widens the
   interpolation kernel by the scale factor on downscale; this widening *is* the
   low-pass, so no separate blur step is used or accepted with this backend) and using
-  MATLAB's own bicubic coefficient (a=-0.5, vs. OpenCV's a=-0.75). This is what makes
-  PSNR/SSIM numbers comparable to published papers, most of which generate their
+  MATLAB's own bicubic coefficient (a=-0.5, vs. OpenCV's a=-0.75). This makes the LR
+  **inputs** directly comparable to published papers, most of which generate their
   benchmark LR images with real MATLAB. See `sisr/imresize.py` for the implementation
   and its license/attribution header, and `tests/test_imresize.py` for verification.
+  Byte-exact inputs alone don't make **reported** PSNR/SSIM comparable, though:
+  Y-channel figures here use BT.601 full-range Y (`sisr/colorspace.py`), while the
+  literature's published Y-channel numbers use MATLAB `rgb2ycbcr`'s studio-range
+  convention — a known, exact `20·log10(255/219) ≈ 1.3225 dB` offset, not an unknown one.
 - **`'cv2'` (opt-in).** Plain `cv2.INTER_CUBIC`, no antialiasing of its own. SRCNN's
   `blur_sigma` (a pre-resize Gaussian blur) only has an effect on this path — passing
   `blur_sigma` together with `resize_backend='matlab'` raises `ValueError` at
@@ -208,8 +212,8 @@ Lightning subclass:
 1. Subclass `sisr.models.base.SRModel` with your network.
 2. Define `<Arch>TrainingConfig` / `<Arch>EvalConfig` dataclasses with the paper's
    defaults (see `sisr/models/srcnn/config.py`).
-3. Pick an `SRProcessor` (`RGBProcessor`, `YChannelProcessor`, `YCbCrProcessor`) or add
-   one.
+3. Pick an `SRProcessor` (`RGBProcessor`, `RGBSignedOutputProcessor`,
+   `YChannelProcessor`, `YCbCrProcessor`) or add one.
 4. Copy a template, point the `class_path`s at your new classes, and `sisr fit`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.

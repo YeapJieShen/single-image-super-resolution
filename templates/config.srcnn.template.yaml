@@ -1,6 +1,7 @@
 seed_everything: 42
 
-# TF32 matmul/conv on Ampere+ GPUs — free lever, no precision opt-in (unlike bf16-mixed below).
+# TF32 matmul on Ampere+ GPUs. Measured no-op on this repo's conv stacks: conv runs
+# through cuDNN, whose allow_tf32 already defaults True — kept for matmul-heavy archs.
 matmul_precision: high
 
 optimizer:
