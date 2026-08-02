@@ -61,7 +61,7 @@ data:
         img_dir: data/BSD100_HR
         scale: *scale
   train_dataloader_kwargs:
-    batch_size: 64
+    batch_size: 64             # not specified by the paper; this project's choice
     num_workers: 16
     pin_memory: true
     persistent_workers: true
@@ -72,8 +72,13 @@ data:
 
 trainer:
   max_epochs: -1
-  max_steps: 1000000
-  val_check_interval: 50000
+  # Paper gives 8e8 backprops, not steps; reading that as per-sample updates (the
+  # mini-batch reading implies implausible iters/sec on 2014 hardware) puts
+  # 1e7 steps * batch 64 = 6.4e8, ~0.8x the paper's figure. Approximation, not a quote.
+  max_steps: 10000000
+  # 20 validation cycles over the run (max_steps / val_check_interval) — matches the
+  # logging budget. Revisit this if max_steps changes, or event files balloon.
+  val_check_interval: 500000
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
