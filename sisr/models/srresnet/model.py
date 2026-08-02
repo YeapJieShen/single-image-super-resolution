@@ -5,6 +5,7 @@ Adversarial Network (https://arxiv.org/pdf/1609.04802).
 """
 
 import math
+from typing import ClassVar, Literal
 
 import torch
 
@@ -95,6 +96,9 @@ class SRResNet(SRModel):
         num_residual_blocks: Number of residual blocks in the network.
         padding: Padding for the conv layers. Defaults to ``'same'``.
     """
+
+    #: Consumes true low-resolution input and upsamples internally (sub-pixel conv).
+    input_contract: ClassVar[Literal["pre_upsampled", "native_lr"]] = "native_lr"
 
     def __init__(
         self,

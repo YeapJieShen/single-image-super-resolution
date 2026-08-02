@@ -4,6 +4,8 @@ Reference: Image Super-Resolution Using Deep Convolutional Networks
 (https://arxiv.org/pdf/1501.00092).
 """
 
+from typing import ClassVar, Literal
+
 import torch
 
 from sisr.models.base import SRModel
@@ -24,6 +26,9 @@ class SRCNN(SRModel):
         padding: ``'valid'``, ``'same'``, or an explicit pixel count.
             Defaults to ``'valid'``.
     """
+
+    #: Resolution-preserving: LR arrives already bicubic-upsampled to HR size.
+    input_contract: ClassVar[Literal["pre_upsampled", "native_lr"]] = "pre_upsampled"
 
     def __init__(
         self,
