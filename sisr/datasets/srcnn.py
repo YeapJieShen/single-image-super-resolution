@@ -24,12 +24,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
 
-from ..cache import LMDBCache, LMDBCacheBuildContext
+from ..cache import LMDBCacheBuildContext
 from ..imresize import resize
-from .base import SRDataset
-from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
+from .base import HRCachedTrainDataset, SRDataset
 from .hr_cache import process_hr_image as _process_hr_image
 
 
@@ -81,24 +79,23 @@ def _degrade(hr_arr: np.ndarray, scale: int) -> np.ndarray:
     return resize(down, (h, w))
 
 
-class TrainDataset(SRDataset):
+class TrainDataset(HRCachedTrainDataset):
     """Dataset serving deterministic LR/HR sub-image pairs, HR held in an LMDB cache.
 
     On first instantiation with a given set of files, every HR image is
-    decoded once and stored whole (uint8, RGB) in an LMDB database — see the
-    module docstring for why. Each ``__getitem__`` maps its flat index to a
-    source image and a deterministic ``(top, left)`` grid position in O(1)
-    (via :func:`_grid_dims`), reads that image's cached bytes through a
-    zero-copy :meth:`~sisr.cache.LMDBCache.get_buffer` view, slices out the
-    ``subimg_size`` square HR sub-image, and degrades it to LR with
-    :func:`_degrade`. The sliding-window grid itself — which sub-images exist
-    and in what order — is unaffected by this change: it is still derived
-    from exactly one place (:func:`_grid_dims`), so indices can never
-    silently misalign.
+    decoded once and stored whole (uint8, RGB) in an LMDB database — see
+    :mod:`~sisr.datasets.base`/:mod:`~sisr.datasets.hr_cache` for why. Each
+    ``__getitem__`` maps its flat index to a source image and a deterministic
+    ``(top, left)`` grid position in O(1) (via :func:`_grid_dims`), reads that
+    image's cached bytes through :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`,
+    slices out the ``subimg_size`` square HR sub-image, and degrades it to LR
+    with :func:`_degrade`. The sliding-window grid itself — which sub-images
+    exist and in what order — is derived from exactly one place
+    (:func:`_grid_dims`), so indices can never silently misalign.
 
     A SHA-256 checksum over the file manifest (plus a format tag) is stored
     inside the LMDB so subsequent runs over the same files skip the build
-    entirely — the checksum no longer depends on
+    entirely — the checksum does not depend on
     ``subimg_size``/``stride``/``scale``, since none of them affect the raw
     bytes written.
 
@@ -132,90 +129,40 @@ class TrainDataset(SRDataset):
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
     ):
-        super().__init__()
-
-        self._index_images(img_dir)
         self.sub_img_size = subimg_size
         self.stride = stride
         self.scale = scale
-        self.build_num_workers = build_num_workers
-
-        cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
-        checksum = self._compute_checksum()
-        self._img_sizes, self._img_offsets, self._img_n_cols, self._total_patches = (
-            self._compute_grid()
+        super().__init__(
+            img_dir, use_tqdm=use_tqdm, cache_dir=cache_dir, build_num_workers=build_num_workers
         )
+        self._img_offsets, self._img_n_cols, self._total_patches = self._compute_grid()
 
-        self._cache = LMDBCache(
-            cache_dir=cache_dir,
-            name=CACHE_NAME,
-            checksum=checksum,
-            length=len(self.img_paths),
-            map_size=estimate_map_size(self._img_sizes),
-            metadata={"format": FORMAT_TAG},
-            build_fn=self._build,
-            use_tqdm=use_tqdm,
-        )
-
-    def _compute_checksum(self) -> str:
-        """Computes a SHA-256 checksum over the file manifest only.
-
-        The cache stores whole raw HR images, so — unlike the LR-patch cache
-        this replaced — none of ``subimg_size``/``stride``/``scale`` enter the
-        hash: they only affect what gets sliced and degraded at read time,
-        never what is written to LMDB. Delegates to
-        :func:`~sisr.datasets.hr_cache.compute_checksum`, shared verbatim with
-        :mod:`sisr.datasets.srresnet` so the same file set hashes identically
-        regardless of which architecture asks first.
-
-        Returns:
-            A hex-encoded SHA-256 digest string.
-        """
-        return compute_checksum(self.img_paths)
-
-    def _compute_grid(self) -> tuple[list[tuple[int, int]], list[int], list[int], int]:
-        """Computes the deterministic sub-image grid from image dimensions alone.
+    def _compute_grid(self) -> tuple[list[int], list[int], int]:
+        """Computes the deterministic sub-image grid from :attr:`_img_sizes`.
 
         Single source of truth for the patch grid: :meth:`__len__` and
         :meth:`__getitem__`'s O(1) index -> ``(top, left)`` lookup both derive
         from the values this returns, so they can never disagree.
 
         Returns:
-            ``(sizes, offsets, n_cols, total)`` where *sizes* is each image's
-            ``(h, w)``, *offsets* is the cumulative starting patch index per
-            image, *n_cols* is each image's column count (needed to invert a
-            flat patch index back to a grid position), and *total* is the
-            grand total of patches.
+            ``(offsets, n_cols, total)`` where *offsets* is the cumulative
+            starting patch index per image, *n_cols* is each image's column
+            count (needed to invert a flat patch index back to a grid
+            position), and *total* is the grand total of patches.
         """
-        sizes: list[tuple[int, int]] = []
         offsets: list[int] = []
         n_cols_list: list[int] = []
         offset = 0
-        for path in self.img_paths:
-            img = Image.open(path)
-            w, h = img.size
-            img.close()
+        for h, w in self._img_sizes:
             n_rows, n_cols = _grid_dims(h, w, self.scale, self.sub_img_size, self.stride)
-            sizes.append((h, w))
             n_cols_list.append(n_cols)
             offsets.append(offset)
             offset += n_rows * n_cols
-        return sizes, offsets, n_cols_list, offset
+        return offsets, n_cols_list, offset
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
-        """Populates the LMDB cache by decoding each HR image once, in parallel.
-
-        Args:
-            ctx (LMDBCacheBuildContext): Build context provided by
-                :class:`LMDBCache`.
-        """
-        ctx.parallel_build(
-            items=self.img_paths,
-            process_fn=_process_hr_image,
-            process_args=[(i,) for i in range(len(self.img_paths))],
-            num_workers=self.build_num_workers,
-            desc="Building LMDB cache",
-        )
+        """Populates the LMDB cache by decoding each HR image once, in parallel."""
+        self._parallel_build_hr(ctx, _process_hr_image)
 
     def __len__(self) -> int:
         return self._total_patches
@@ -225,11 +172,10 @@ class TrainDataset(SRDataset):
 
         Locates *idx*'s source image and grid position in O(1) via
         :attr:`_img_offsets`/:attr:`_img_n_cols`, slices the HR sub-image out
-        of that image's cached raw bytes (a zero-copy
-        :meth:`~sisr.cache.LMDBCache.get_buffer` view, copied out before the
-        transaction closes), and derives LR from it with :func:`_degrade` —
-        numerically identical to computing both at build time, just performed
-        at load time instead.
+        of that image's cached raw bytes (via
+        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`), and
+        derives LR from it with :func:`_degrade` — numerically identical to
+        computing both at build time, just performed at load time instead.
 
         Args:
             idx (int): Zero-based sub-image index.
@@ -250,17 +196,8 @@ class TrainDataset(SRDataset):
         local_idx = idx - self._img_offsets[img_idx]
         row, col = divmod(local_idx, self._img_n_cols[img_idx])
         top, left = row * self.stride, col * self.stride
-        h, w = self._img_sizes[img_idx]
 
-        key = f"hr_{img_idx:08d}"
-        with self._cache.get_buffer(key) as buf:
-            if buf is None:
-                raise KeyError(key)
-            # Read-only view into the LMDB transaction's mmap page — sliced and
-            # copied out below, before the `with` block ends and the view dies.
-            # (h, w) come from _compute_grid (the source file), not the header:
-            # only its byte offset matters here, consistent with SRResNet's read.
-            arr = np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
+        with self._read_hr(img_idx) as arr:
             hr_subimg = arr[
                 top : top + self.sub_img_size, left : left + self.sub_img_size, :
             ].copy()

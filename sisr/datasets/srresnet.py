@@ -20,29 +20,27 @@ LR is derived via MATLAB-compatible antialiased bicubic resizing (see
 import random
 from pathlib import Path
 
-import numpy as np
 import torch
-from PIL import Image
 
-from ..cache import LMDBCache, LMDBCacheBuildContext
+from ..cache import LMDBCacheBuildContext
 from ..imresize import resize
-from .base import SRDataset
-from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
+from .base import HRCachedTrainDataset, SRDataset
 from .hr_cache import process_hr_image as _process_hr_image
 
 
-class TrainDataset(SRDataset):
+class TrainDataset(HRCachedTrainDataset):
     """Random-crop HR/LR pairs for SRResNet-style training, HR held in an LMDB cache.
 
     On first instantiation with a given set of parameters, every HR image is
     decoded once and stored whole (uint8, RGB, with its own ``(H, W)`` header)
-    in an LMDB database — see module docstring for why. Each ``__getitem__``
-    then reads that image's cached bytes via a zero-copy
-    :meth:`~sisr.cache.LMDBCache.get_buffer` view, takes a fresh random
-    ``hr_crop_size`` square crop (plain numpy slicing — crop randomness must
-    survive the cache, so only the *decode* is memoized, never the crop), and
-    bicubic-downsamples it by ``scale`` (via :func:`sisr.imresize.resize`) to
-    form the LR input. Unlike
+    in an LMDB database — see :mod:`~sisr.datasets.base`/
+    :mod:`~sisr.datasets.hr_cache` for why. Each ``__getitem__`` then reads
+    that image's cached bytes via
+    :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`, takes a fresh
+    random ``hr_crop_size`` square crop (plain numpy slicing — crop
+    randomness must survive the cache, so only the *decode* is memoized,
+    never the crop), and bicubic-downsamples it by ``scale`` (via
+    :func:`sisr.imresize.resize`) to form the LR input. Unlike
     :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     blur+downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is
@@ -88,74 +86,20 @@ class TrainDataset(SRDataset):
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
     ):
-        super().__init__()
-
         if hr_crop_size % scale != 0:
             raise ValueError(f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({scale}).")
 
-        self._index_images(img_dir)
         self.scale = scale
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
-        self.build_num_workers = build_num_workers
         self.lr_size = hr_crop_size // scale
-
-        cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
-        checksum = self._compute_checksum()
-
-        self._cache = LMDBCache(
-            cache_dir=cache_dir,
-            name=CACHE_NAME,
-            checksum=checksum,
-            length=len(self.img_paths),
-            map_size=estimate_map_size(self._collect_sizes()),
-            metadata={"format": FORMAT_TAG},
-            build_fn=self._build,
-            use_tqdm=use_tqdm,
+        super().__init__(
+            img_dir, use_tqdm=use_tqdm, cache_dir=cache_dir, build_num_workers=build_num_workers
         )
-
-    def _compute_checksum(self) -> str:
-        """Computes a SHA-256 checksum over the file manifest only.
-
-        No crop/scale parameter enters this hash: the cache stores whole raw
-        images, so it is valid for any ``hr_crop_size``/``crops_per_image``/
-        ``scale`` combination over the same file set. Delegates to
-        :func:`~sisr.datasets.hr_cache.compute_checksum`, shared verbatim with
-        :mod:`sisr.datasets.srcnn` so the same file set hashes identically
-        regardless of which architecture asks first.
-
-        Returns:
-            A hex-encoded SHA-256 digest string.
-        """
-        return compute_checksum(self.img_paths)
-
-    def _collect_sizes(self) -> list[tuple[int, int]]:
-        """Reads each image's ``(h, w)`` from its file header, without decoding pixels.
-
-        Returns:
-            Each source image's ``(height, width)``, in :attr:`img_paths` order.
-        """
-        sizes = []
-        for path in self.img_paths:
-            img = Image.open(path)
-            w, h = img.size
-            img.close()
-            sizes.append((h, w))
-        return sizes
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
-        """Populates the LMDB cache by decoding each HR image once in parallel.
-
-        Args:
-            ctx (LMDBCacheBuildContext): Build context provided by :class:`~sisr.cache.LMDBCache`.
-        """
-        ctx.parallel_build(
-            items=self.img_paths,
-            process_fn=_process_hr_image,
-            process_args=[(i,) for i in range(len(self.img_paths))],
-            num_workers=self.build_num_workers,
-            desc="Building SRResNet HR cache",
-        )
+        """Populates the LMDB cache by decoding each HR image once in parallel."""
+        self._parallel_build_hr(ctx, _process_hr_image)
 
     def __len__(self) -> int:
         return len(self.img_paths) * self.crops_per_image
@@ -169,20 +113,14 @@ class TrainDataset(SRDataset):
         with shape ``(3, H, W)``.
         """
         img_idx = idx % len(self.img_paths)
-        key = f"hr_{img_idx:08d}"
 
-        with self._cache.get_buffer(key) as buf:
-            if buf is None:
-                raise KeyError(key)
-            h, w = HEADER.unpack_from(buf, 0)
+        with self._read_hr(img_idx) as arr:
+            h, w = arr.shape[:2]
             if w < self.hr_crop_size or h < self.hr_crop_size:
                 raise ValueError(
                     f"Image {self.img_paths[img_idx].name} ({w}x{h}) is smaller than "
                     f"hr_crop_size {self.hr_crop_size}."
                 )
-            # Read-only view into the LMDB transaction's mmap page — sliced and
-            # copied out below, before the `with` block ends and the view dies.
-            arr = np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
             top = random.randint(0, h - self.hr_crop_size)
             left = random.randint(0, w - self.hr_crop_size)
             hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()
