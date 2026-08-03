@@ -211,6 +211,25 @@ def test_optimizer_lr_override_in_process():
     assert cli.config.optimizer.init_args.lr == pytest.approx(0.005)
 
 
+def test_dataset_cli_override_fails_loudly_instead_of_silently_ignored():
+    """--data.train_dataset.init_args.crops_per_image=8 must not silently no-op.
+
+    jsonargparse treats `data.train_dataset` as an opaque `dict[str, Any]`, so a
+    dotted CLI override targeting a nested `init_args` key lands as a stray
+    sibling key next to `class_path`/`init_args` instead — `instantiate_class`
+    never sees it, and the constructed dataset silently keeps
+    crops_per_image=1. SRDataModule must reject the malformed spec loudly at
+    construction (during `instantiate_classes()`, i.e. CLI resolution here)
+    instead of quietly building the wrong dataset.
+    """
+    with pytest.raises(ValueError, match="crops_per_image"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            "--data.train_dataset.init_args.crops_per_image=8",
+        )
+
+
 def test_matmul_precision_accepted_in_process():
     """--matmul_precision=medium overrides the template's shipped 'high' default."""
     cli = _resolve("--config", str(TEMPLATE), "--matmul_precision=medium")

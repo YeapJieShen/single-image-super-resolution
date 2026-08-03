@@ -285,6 +285,133 @@ def test_predict_dataloader_without_predict_dataset_raises(tiny_rgb_image_dir: P
         dm.predict_dataloader()
 
 
+# ---------------------------------------------------------------------------
+# Dataset spec validation — catches malformed {class_path, init_args} dicts,
+# including the shape a CLI dotted override produces when it can't reach a
+# nested init_args key on this dict[str, Any]-typed field (see test_cli.py's
+# test_dataset_cli_override_fails_loudly_instead_of_silently_ignored).
+# ---------------------------------------------------------------------------
+
+
+def test_train_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
+    """A key alongside class_path/init_args — exactly what a dotted CLI
+    override produces when it can't reach nested init_args — must raise
+    instead of silently building the wrong dataset."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+        },
+        "crops_per_image": 8,  # stray — never reaches init_args
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    with pytest.raises(ValueError, match="crops_per_image"):
+        SRDataModule(train_dataset=train_spec, val_dataset=val_spec)
+
+
+def test_val_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+        "scale": 3,
+    }
+    with pytest.raises(ValueError, match="val_dataset"):
+        SRDataModule(train_dataset=train_spec, val_dataset=val_spec)
+
+
+def test_test_datasets_spec_rejects_stray_sibling_key_names_the_entry(tiny_rgb_image_dir: Path):
+    """The error must name which test_datasets entry is malformed — 'Set14',
+    not just 'test_datasets' — since there can be several."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    bad_test_spec = {**val_spec, "scale": 4}
+    with pytest.raises(ValueError, match="Set14"):
+        SRDataModule(
+            train_dataset=train_spec,
+            val_dataset=val_spec,
+            test_datasets={"Set5": val_spec, "Set14": bad_test_spec},
+        )
+
+
+def test_predict_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    bad_predict_spec = {
+        "class_path": "sisr.datasets.predict.PredictDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir)},
+        "extra": 1,
+    }
+    with pytest.raises(ValueError, match="predict_dataset"):
+        SRDataModule(
+            train_dataset=train_spec, val_dataset=val_spec, predict_dataset=bad_predict_spec
+        )
+
+
+def test_predict_dataset_none_skips_validation(tiny_rgb_image_dir: Path):
+    """predict_dataset=None (the default, unconfigured predict) must not be
+    validated as if it were a malformed spec."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": 2,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    SRDataModule(train_dataset=train_spec, val_dataset=val_spec)  # must not raise
+
+
+def test_dataset_spec_missing_class_path_rejected(tiny_rgb_image_dir: Path):
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    with pytest.raises(ValueError, match="class_path"):
+        SRDataModule(train_dataset={"init_args": {"scale": 2}}, val_dataset=val_spec)
+
+
 def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
     """train_dataset accepts {class_path, init_args} and setup() instantiates it."""
     train_spec = {
