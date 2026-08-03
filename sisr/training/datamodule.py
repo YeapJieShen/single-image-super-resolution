@@ -99,6 +99,26 @@ class SRDataModule(lightning.LightningDataModule):
         """
         return list(self._test_specs.keys())
 
+    @property
+    def train_dataset(self) -> Dataset | None:
+        """The instantiated train dataset, or ``None`` before ``setup('fit')`` runs.
+
+        Public read accessor — lets consumers outside this module (e.g.
+        :meth:`~sisr.training.SRLightning.setup`'s input-contract probe)
+        inspect the real dataset without reaching into private state.
+        """
+        return self._train_ds
+
+    @property
+    def val_dataset(self) -> Dataset | None:
+        """The instantiated primary val dataset, or ``None`` before setup runs."""
+        return self._val_ds
+
+    @property
+    def test_datasets(self) -> dict[str, Dataset]:
+        """Instantiated test datasets by name — empty before setup runs (or if none configured)."""
+        return dict(self._test_ds)
+
     def setup(self, stage: str | None = None) -> None:
         """Instantiate datasets lazily based on the trainer stage.
 
