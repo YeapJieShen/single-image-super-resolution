@@ -148,6 +148,40 @@ def test_fast_dev_run_raises_on_cross_wired_model_and_dataset_through_real_train
         trainer.fit(module, datamodule=datamodule)
 
 
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_fast_dev_run_reconstruct_never_runs_mid_training_step(tiny_rgb_image_dir: Path):
+    """training_step passes need_sr_rgb=False (see SRLightning._forward_lr), so
+    processor.reconstruct must never fire while the module is in train mode —
+    only validation_step (self.training False) may call it. A real Trainer
+    loop, not a direct _step() call, is the only way to prove training_step
+    itself (not just _step) actually requests the skip."""
+    module = _make_srcnn_module()
+    datamodule = _make_datamodule(tiny_rgb_image_dir)
+
+    call_training_flags = []
+    real_reconstruct = module.processor.reconstruct
+
+    def _spy(*args, **kwargs):
+        call_training_flags.append(module.training)
+        return real_reconstruct(*args, **kwargs)
+
+    module.processor.reconstruct = _spy
+
+    trainer = lightning.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+    trainer.fit(module, datamodule=datamodule)
+
+    assert call_training_flags, "expected at least one reconstruct call, from validation_step"
+    assert not any(call_training_flags), "reconstruct must never run while self.training is True"
+
+
 # ---------------------------------------------------------------------------
 # cli predict end-to-end — LR-only inference path, both architectures
 # ---------------------------------------------------------------------------

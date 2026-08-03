@@ -130,6 +130,67 @@ def test_step_ycbcr_path():
 
 
 # ---------------------------------------------------------------------------
+# need_sr_rgb=False — training_step's reconstruct skip (measured: reconstruct
+# costs ~11.5% of a data-free SRCNN step for YChannelProcessor, ~0 for
+# SRResNet's identity/elementwise processors; training_step never consumes
+# sr_rgb, so paying for it there was pure waste).
+# ---------------------------------------------------------------------------
+
+
+def test_step_need_sr_rgb_false_skips_reconstruct(srcnn_y_lit: SRLightning, rgb_lr_hr_batch):
+    """The exact call training_step makes: reconstruct must not run, and
+    sr_rgb must come back None rather than a silently-wrong placeholder."""
+    lr, hr = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_y_lit.processor.reconstruct)
+    srcnn_y_lit.processor.reconstruct = spy
+
+    loss, _, _, sr_rgb, hr_cropped = srcnn_y_lit._step((lr, hr), need_sr_rgb=False)
+
+    spy.assert_not_called()
+    assert sr_rgb is None
+    assert hr_cropped.shape == (2, 3, 21, 21)
+    assert torch.isfinite(loss)
+
+
+def test_step_default_still_reconstructs(srcnn_y_lit: SRLightning, rgb_lr_hr_batch):
+    """need_sr_rgb defaults to True — validation/predict/direct callers must
+    keep getting the exact reconstruction this project has always produced."""
+    lr, hr = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_y_lit.processor.reconstruct)
+    srcnn_y_lit.processor.reconstruct = spy
+
+    loss, _, _, sr_rgb, hr_cropped = srcnn_y_lit._step((lr, hr))
+
+    spy.assert_called_once()
+    assert sr_rgb is not None
+    assert sr_rgb.shape == (2, 3, 21, 21)
+
+
+def test_step_loss_bit_identical_with_and_without_reconstruct_skip(
+    srcnn_y_lit: SRLightning, rgb_lr_hr_batch
+):
+    """The loss is computed from sr_model_out/hr_cropped alone — never sr_rgb
+    — so skipping reconstruct must not move it by even a rounding error."""
+    lr, hr = rgb_lr_hr_batch
+
+    loss_with, *_ = srcnn_y_lit._step((lr, hr))
+    loss_without, *_ = srcnn_y_lit._step((lr, hr), need_sr_rgb=False)
+
+    assert torch.equal(loss_with, loss_without)
+
+
+def test_forward_sr_need_sr_rgb_false_hr_crop_matches_sr_model_out_size(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """hr_cropped must still land at the correct spatial size (derived from
+    sr_model_out, not sr_rgb, when reconstruct is skipped)."""
+    lr, hr = rgb_lr_hr_batch
+    sr_model_out, sr_rgb, hr_cropped = srcnn_rgb_lit._forward_sr(lr, hr, need_sr_rgb=False)
+    assert sr_rgb is None
+    assert hr_cropped.shape[-2:] == sr_model_out.shape[-2:] == (21, 21)
+
+
+# ---------------------------------------------------------------------------
 # configure_optimizers
 # ---------------------------------------------------------------------------
 
@@ -625,6 +686,19 @@ def test_predict_rgb_returns_sr_and_hr_pair(srcnn_rgb_lit: SRLightning, rgb_lr_h
     # SRCNN with valid padding: 33 -> 21; HR center-cropped to match.
     assert sr_rgb.shape == (2, 3, 21, 21)
     assert hr_cropped.shape == (2, 3, 21, 21)
+
+
+def test_predict_rgb_always_reconstructs_regardless_of_need_sr_rgb_default(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """predict_rgb (the BenchmarkImageLogger/scoring seam) never passes
+    need_sr_rgb=False — its whole contract is returning a real sr_rgb."""
+    lr, hr = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.processor.reconstruct)
+    srcnn_rgb_lit.processor.reconstruct = spy
+    sr_rgb, _ = srcnn_rgb_lit.predict_rgb(lr, hr)
+    spy.assert_called_once()
+    assert sr_rgb is not None
 
 
 def test_predict_rgb_matches_step_forward_path(srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch):

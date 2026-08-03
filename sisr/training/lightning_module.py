@@ -486,8 +486,10 @@ class SRLightning(lightning.LightningModule):
         """
         return self.model(x)
 
-    def _forward_lr(self, lr_img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """LR-only core of the forward pipeline: extract → model → reconstruct.
+    def _forward_lr(
+        self, lr_img: torch.Tensor, need_sr_rgb: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """LR-only core of the forward pipeline: extract → model → (reconstruct).
 
         Factored out of :meth:`_forward_sr` so :meth:`predict_step` can share
         the exact colorspace pipeline instead of forking it — HR is only ever
@@ -503,14 +505,27 @@ class SRLightning(lightning.LightningModule):
         Args:
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
                 ``(B, 3, H, W)``.
+            need_sr_rgb: Whether to run ``processor.reconstruct`` at all.
+                ``training_step`` (via :meth:`_step`) is the only caller that
+                passes ``False``: it discards ``sr_rgb`` entirely
+                (``loss, *_ = self._step(...)``), yet reconstruct still costs
+                real per-step time (measured: ~11.5% of a data-free SRCNN
+                step for ``YChannelProcessor``'s bicubic Cb/Cr interpolate;
+                ~0 for SRResNet's identity/elementwise processors). Every
+                other caller — validation, test, predict, and direct calls
+                like these from tests — keeps the default ``True`` and gets
+                exactly the reconstruction this project has always produced.
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — the raw model output in the model IO
-            colorspace, and the reconstructed SR RGB clamped to ``[0, 1]``.
+            colorspace, and the reconstructed SR RGB clamped to ``[0, 1]``;
+            ``sr_rgb`` is ``None`` iff ``need_sr_rgb`` is ``False``.
         """
         model_input = self.processor.extract(lr_img)
         model_fn = self._compiled if self.training and self._compiled is not None else self.model
         sr_model_out = model_fn(model_input)
+        if not need_sr_rgb:
+            return sr_model_out, None
         sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
         # Clamp display-space output only, here, once — every reconstruct()
         # consumer (_forward_sr's callers, predict_step) reads through this
@@ -524,9 +539,9 @@ class SRLightning(lightning.LightningModule):
         return sr_model_out, sr_rgb
 
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Canonical SR forward: extract → model → reconstruct → crop HR.
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Canonical SR forward: extract → model → (reconstruct) → crop HR.
 
         The single source of truth for the forward pipeline. Shared by
         :meth:`_step` (which also needs the model-space output for the loss),
@@ -539,28 +554,32 @@ class SRLightning(lightning.LightningModule):
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
                 ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
+            need_sr_rgb: Forwarded to :meth:`_forward_lr` — see there. The
+                HR crop uses ``sr_model_out.shape[-2:]`` regardless, since
+                every shipped ``SRProcessor.reconstruct`` preserves H/W, so
+                it always agrees with what ``sr_rgb.shape[-2:]`` would be.
 
         Returns:
             ``(sr_model_out, sr_rgb, hr_cropped)`` — the raw (unclamped)
             model output in the model IO colorspace, the reconstructed SR RGB
-            clamped to ``[0, 1]``, and HR center-cropped to the SR spatial
-            size.
+            clamped to ``[0, 1]`` (``None`` iff ``need_sr_rgb`` is ``False``),
+            and HR center-cropped to the SR spatial size.
 
         Raises:
-            ValueError: If ``hr_img`` is spatially smaller than ``sr_rgb`` in
-                either dimension — ``center_crop`` would zero-pad instead of
-                cropping, silently corrupting the loss/metrics that follow.
-                :meth:`setup` catches the common cause (a model/dataset
-                ``input_contract`` mismatch) earlier and louder; this is the
-                last-resort guard for callers that bypass it (e.g. direct
-                ``_forward_sr``/``_step`` calls in tests, or a datamodule with
-                no ``trainer`` attached).
+            ValueError: If ``hr_img`` is spatially smaller than the model
+                output in either dimension — ``center_crop`` would zero-pad
+                instead of cropping, silently corrupting the loss/metrics
+                that follow. :meth:`setup` catches the common cause (a
+                model/dataset ``input_contract`` mismatch) earlier and
+                louder; this is the last-resort guard for callers that
+                bypass it (e.g. direct ``_forward_sr``/``_step`` calls in
+                tests, or a datamodule with no ``trainer`` attached).
         """
-        sr_model_out, sr_rgb = self._forward_lr(lr_img)
-        hr_hw, sr_hw = hr_img.shape[-2:], sr_rgb.shape[-2:]
+        sr_model_out, sr_rgb = self._forward_lr(lr_img, need_sr_rgb=need_sr_rgb)
+        hr_hw, sr_hw = hr_img.shape[-2:], sr_model_out.shape[-2:]
         if hr_hw[0] < sr_hw[0] or hr_hw[1] < sr_hw[1]:
             raise ValueError(
-                f"hr_img spatial size {tuple(hr_hw)} is smaller than sr_rgb "
+                f"hr_img spatial size {tuple(hr_hw)} is smaller than the model output "
                 f"{tuple(sr_hw)} — torchvision.transforms.functional.center_crop "
                 f"would zero-pad instead of cropping, silently corrupting the loss "
                 f"and every metric downstream. This usually means the dataset's "
@@ -568,7 +587,7 @@ class SRLightning(lightning.LightningModule):
                 f"input_contract={self.model.input_contract!r} — check "
                 f"data.train_dataset/val_dataset/test_datasets in your config."
             )
-        hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
+        hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_hw)
         return sr_model_out, sr_rgb, hr_cropped
 
     def predict_rgb(
@@ -596,8 +615,8 @@ class SRLightning(lightning.LightningModule):
         return sr_rgb, hr_cropped
 
     def _step(
-        self, batch: tuple[torch.Tensor, torch.Tensor]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, batch: tuple[torch.Tensor, torch.Tensor], need_sr_rgb: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Shared forward + loss for training and validation steps.
 
         The processor handles all colorspace conversion; loss is computed in
@@ -605,21 +624,26 @@ class SRLightning(lightning.LightningModule):
         ``processor.extract_target``, which defaults to ``processor.extract``
         and differs only where a model's input and output ranges differ).
         Metrics downstream consume ``sr_rgb`` / ``hr_cropped`` (both full
-        RGB, spatially aligned).
+        RGB, spatially aligned) — unavailable (``None``) when the caller
+        passed ``need_sr_rgb=False``, which is only correct for callers (like
+        ``training_step``) that never look at ``sr_rgb``.
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple from a loader. Both RGB,
                 ``float32`` in ``[0, 1]``.
+            need_sr_rgb: Forwarded to :meth:`_forward_sr` — see there.
+                ``training_step`` passes ``False``.
 
         Returns:
             ``(loss, lr_img, hr_img, sr_rgb, hr_cropped)``. ``loss`` is a
             scalar tensor computed on the unclamped model output; ``sr_rgb``
-            (clamped to ``[0, 1]``) and ``hr_cropped`` are RGB tensors with
-            matching spatial size.
+            (clamped to ``[0, 1]``, or ``None`` iff ``need_sr_rgb`` is
+            ``False``) and ``hr_cropped`` are RGB tensors with matching
+            spatial size.
         """
         lr_img, hr_img = batch
 
-        sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
+        sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=need_sr_rgb)
         hr_for_loss = self.processor.extract_target(hr_cropped)
         loss = self.criterion(sr_model_out, hr_for_loss)
 
@@ -632,6 +656,9 @@ class SRLightning(lightning.LightningModule):
 
         Delegates the forward + colorspace + loss pipeline to :meth:`_step`
         and logs ``loss/train`` on every step for the progress bar.
+        ``need_sr_rgb=False``: this method never looks at ``sr_rgb``, so
+        skips ``processor.reconstruct`` — real per-step time (see
+        :meth:`_forward_lr`) for a value that would only be discarded.
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple as produced by the
@@ -642,7 +669,7 @@ class SRLightning(lightning.LightningModule):
         Returns:
             Scalar loss tensor for the optimizer.
         """
-        loss, *_ = self._step(batch)
+        loss, *_ = self._step(batch, need_sr_rgb=False)
         self.log("loss/train", loss, prog_bar=True, on_step=True)
         return loss
 
