@@ -9,6 +9,7 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 
 import dataclasses
+import random
 from typing import Any
 
 import lightning
@@ -166,9 +167,20 @@ class SRLightning(lightning.LightningModule):
         set, its spatial dims are checked against the real train LR patch —
         train-only, since validation/test images vary in size.
 
-        No-op when no ``Trainer`` is attached (direct/unit-test construction)
-        or when ``trainer.datamodule`` has nothing instantiated yet for this
-        stage.
+        No-op when no ``Trainer`` is attached (direct/unit-test construction),
+        when ``trainer.datamodule`` has nothing instantiated yet for this
+        stage, or when ``trainer.datamodule`` is some foreign object that
+        doesn't expose the ``train_dataset``/``val_dataset``/``test_datasets``
+        read accessors (degrades to a skip rather than ``AttributeError``).
+
+        The probe's own dataset reads are isolated from the global
+        :mod:`random` state: :class:`~sisr.datasets.srresnet.TrainDataset`
+        draws its random crop via ``random.randint`` in ``__getitem__``, so an
+        unguarded probe call would consume draws from the same sequence the
+        real training loop uses, shifting every seeded crop after it — a real
+        change in a paper-reproduction repo, not just a probe side effect.
+        ``random.getstate()``/``setstate()`` around the whole probe make it
+        transparent regardless of what a dataset's ``__getitem__`` consumes.
 
         Args:
             stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
@@ -184,16 +196,24 @@ class SRLightning(lightning.LightningModule):
         if dm is None:
             return
 
-        probe = self._first_probe_dataset(dm)
-        if probe is not None:
-            source, dataset = probe
-            lr, hr = dataset[0]
-            self._check_input_contract(lr, hr, source, dataset)
+        rng_state = random.getstate()
+        try:
+            probe = self._first_probe_dataset(dm)
+            train_lr = None
+            if probe is not None:
+                source, dataset = probe
+                lr, hr = dataset[0]
+                self._check_input_contract(lr, hr, source, dataset)
+                if source == "train_dataset":
+                    train_lr = lr  # reuse below instead of re-sampling index 0
 
-        train_ds = dm.train_dataset
-        if train_ds is not None and self.training_config.example_input_shape is not None:
-            lr, _ = train_ds[0]
-            self._check_example_input_shape(lr, train_ds)
+            train_ds = getattr(dm, "train_dataset", None)
+            if train_ds is not None and self.training_config.example_input_shape is not None:
+                if train_lr is None:
+                    train_lr, _ = train_ds[0]
+                self._check_example_input_shape(train_lr, train_ds)
+        finally:
+            random.setstate(rng_state)
 
     @staticmethod
     def _first_probe_dataset(dm: Any) -> tuple[str, Any] | None:
@@ -204,19 +224,23 @@ class SRLightning(lightning.LightningModule):
         is never considered: its samples have no HR to pair-check against.
 
         Args:
-            dm: The attached ``SRDataModule`` (or any object exposing the
-                same ``train_dataset``/``val_dataset``/``test_datasets``
-                read accessors).
+            dm: The attached datamodule. Normally an ``SRDataModule``, but
+                accessed via ``getattr(..., None)`` throughout so a foreign
+                datamodule missing these read accessors degrades to "nothing
+                to probe" instead of raising ``AttributeError``.
 
         Returns:
             ``(source_name, dataset)`` for the first available dataset, or
-            ``None`` if train/val/test are all unset (e.g. a predict-only run).
+            ``None`` if train/val/test are all unset (e.g. a predict-only run,
+            or a datamodule that isn't an ``SRDataModule`` at all).
         """
-        if dm.train_dataset is not None:
-            return "train_dataset", dm.train_dataset
-        if dm.val_dataset is not None:
-            return "val_dataset", dm.val_dataset
-        test_datasets = dm.test_datasets
+        train_ds = getattr(dm, "train_dataset", None)
+        if train_ds is not None:
+            return "train_dataset", train_ds
+        val_ds = getattr(dm, "val_dataset", None)
+        if val_ds is not None:
+            return "val_dataset", val_ds
+        test_datasets = getattr(dm, "test_datasets", None) or {}
         if test_datasets:
             name, dataset = next(iter(test_datasets.items()))
             return f"test_datasets.{name}", dataset
@@ -235,7 +259,8 @@ class SRLightning(lightning.LightningModule):
             dataset: The dataset instance, for its class name in the error.
 
         Raises:
-            ValueError: See :meth:`setup`.
+            ValueError: See :meth:`setup`, or if ``model.input_contract`` is
+                neither ``'pre_upsampled'`` nor ``'native_lr'``.
         """
         contract = self.model.input_contract
         lr_hw, hr_hw = tuple(lr.shape[-2:]), tuple(hr.shape[-2:])
@@ -254,10 +279,20 @@ class SRLightning(lightning.LightningModule):
                 f"or switch to a native_lr model."
             )
 
-        # native_lr: skip when training_config.scale is unset — nothing to check
-        # against (mirrors SRTrainingConfig.scale's own "absent skips silently"
-        # rule; the shipped SRResNetTrainingConfig always sets it).
+        if contract != "native_lr":
+            raise ValueError(
+                f"{type(self.model).__name__}.input_contract={contract!r} is not a "
+                f"recognised contract — expected 'pre_upsampled' or 'native_lr'. Fix "
+                f"{type(self.model).__name__}.input_contract."
+            )
+
+        # Fall back to the model's own 'scale' hparam when training_config.scale
+        # is unset (e.g. a bare SRTrainingConfig()) — only skip the check when
+        # BOTH are absent. Falling back keeps this from silently no-opping for
+        # exactly the native_lr construction several existing tests use.
         scale = self.training_config.scale
+        if scale is None:
+            scale = self.model.hparams.get("scale")
         if scale is None:
             return
         expected_hw = (lr_hw[0] * scale, lr_hw[1] * scale)

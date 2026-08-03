@@ -1387,3 +1387,128 @@ def test_forward_sr_accepts_hr_exactly_equal_to_sr():
     hr = torch.rand(1, 3, 16, 16)  # exactly lr * scale
     _, sr_rgb, hr_cropped = lit._forward_sr(lr, hr)
     assert sr_rgb.shape == hr_cropped.shape == (1, 3, 16, 16)
+
+
+# ---------------------------------------------------------------------------
+# Code-review follow-ups: model.hparams['scale'] fallback, RNG isolation,
+# foreign-datamodule degradation, unrecognised input_contract
+# ---------------------------------------------------------------------------
+
+
+def test_setup_raises_using_model_scale_fallback_when_training_config_scale_unset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: a native_lr model paired with a bare SRTrainingConfig()
+    (scale=None — the construction several existing tests use) must still
+    catch a scale-mismatched dataset via the model's own 'scale' hparam,
+    instead of silently skipping the check just because
+    training_config.scale wasn't set. Model declares scale=2; the dataset
+    actually downsamples by 4."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),  # scale=None
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=4, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="input_contract"):
+        lit.setup(stage="fit")
+
+
+def test_setup_still_skips_when_both_training_config_and_model_scale_absent(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """When neither training_config.scale nor model.hparams['scale'] is
+    set, there is genuinely nothing to check against — must not raise."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    del model.hparams["scale"]  # simulate a native_lr model with no scale hparam at all
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),  # scale=None
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=4, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_samples_train_dataset_index_zero_only_once(
+    tiny_rgb_image_dir: Path, tmp_path: Path, monkeypatch
+):
+    """When train_dataset is both the input_contract probe target and the
+    example_input_shape check's source, __getitem__(0) must be read once
+    and reused — not sampled twice.
+
+    Wraps with a plain function (not a MagicMock instance) assigned onto the
+    class: CPython's implicit special-method dispatch for `dataset[0]` only
+    passes `self` through when the found `__getitem__` is a real function
+    object — a Mock instance stored there is invoked without `self`, which
+    would silently miscount (or crash) here.
+    """
+    lit = _srresnet_lit(scale=2)
+    lit.training_config.example_input_shape = (3, 12, 12)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    ds_cls = type(dm.train_dataset)
+    original_getitem = ds_cls.__getitem__
+    calls: list[int] = []
+
+    def counting_getitem(self, idx):
+        calls.append(idx)
+        return original_getitem(self, idx)
+
+    monkeypatch.setattr(ds_cls, "__getitem__", counting_getitem)
+
+    lit.setup(stage="fit")
+
+    assert calls == [0]
+
+
+def test_setup_does_not_perturb_global_random_state(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """Regression: TrainDataset.__getitem__'s random.randint crop draws must
+    not leak into the global random sequence the real training loop consumes
+    — this is a paper-reproduction repo, so an unguarded probe call would
+    silently shift every seeded crop drawn after setup()."""
+    import random
+
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    random.seed(12345)
+    state_before = random.getstate()
+    lit.setup(stage="fit")
+    assert random.getstate() == state_before
+
+
+def test_setup_skips_when_datamodule_lacks_dataset_accessors():
+    """A foreign datamodule (not an SRDataModule — exposes none of
+    train_dataset/val_dataset/test_datasets) must degrade to 'nothing to
+    probe' instead of raising AttributeError."""
+    lit = _srcnn_lit()
+    lit.trainer = SimpleNamespace(datamodule=SimpleNamespace())
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_check_input_contract_raises_on_unrecognised_contract(srcnn_rgb_lit: SRLightning):
+    """A future/typo'd input_contract value must raise clearly, instead of
+    silently falling into the native_lr branch (the old bare if/else)."""
+    srcnn_rgb_lit.model.input_contract = "not_a_real_contract"
+    lr = torch.rand(1, 3, 8, 8)
+    hr = torch.rand(1, 3, 8, 8)
+
+    with pytest.raises(ValueError, match="not_a_real_contract"):
+        srcnn_rgb_lit._check_input_contract(lr, hr, "train_dataset", object())
