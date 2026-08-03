@@ -33,6 +33,11 @@ class BenchmarkSample(NamedTuple):
     Fields are accessed by name at every read site — a bare positional
     tuple here previously made ``_flush_buffer``'s mean computation
     (``s[4]``/``s[5]``) unreadable at the call site.
+
+    Attributes:
+        filename: Stem of the source image path, used as the TensorBoard tag suffix.
+        psnr: PSNR value per configured key (``eval_config.psnr_keys``).
+        ssim: SSIM value per configured key (``eval_config.ssim_keys``).
     """
 
     filename: str

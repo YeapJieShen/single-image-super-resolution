@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import lightning
 import pytest
 import torch
+import torchmetrics.functional
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
@@ -617,6 +618,81 @@ def test_benchmark_collect_batch_buffers_no_image_tensors():
     assert isinstance(sample, BenchmarkSample)
     for value in sample:
         assert not isinstance(value, torch.Tensor)
+
+
+def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering():
+    """D3 equivalence proof: the pre-change code moved each image to CPU
+    FIRST (``sr[i].unsqueeze(0).cpu()``), THEN cropped, THEN built metric
+    tensors + PSNR/SSIM; the shipped _collect_batch crops the (on-device)
+    per-image slice directly and computes PSNR/SSIM on it without any
+    intervening host copy. Both orderings must agree exactly on every
+    configured metric key. CPU-only (no GPU dependency), so this runs on CI.
+    """
+    torch.manual_seed(0)
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(
+            crop_border=3,
+            psnr_channels=["RGB", "YCbCr"],
+            separate_psnr=True,
+            ssim_channels=["RGB", "Y"],
+        ),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr_img = torch.rand(4, 3, 20, 20)
+    hr_img = torch.rand(4, 3, 20, 20)
+    with torch.no_grad():
+        sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
+
+    n = pl_module.eval_config.crop_border
+    psnr_keys = pl_module.eval_config.psnr_keys
+    ssim_keys = pl_module.eval_config.ssim_keys
+    assert n > 0 and len(psnr_keys) > 1 and len(ssim_keys) > 1  # actually exercises both
+
+    for i in range(lr_img.size(0)):
+        # Pre-change ordering: host-copy the per-image slice FIRST, then crop.
+        sr_old = sr[i].unsqueeze(0).cpu()
+        hr_old = hr_cropped[i].unsqueeze(0).cpu()
+        sr_old = sr_old[..., n:-n, n:-n]
+        hr_old = hr_old[..., n:-n, n:-n]
+        metric_tensors_old = pl_module._build_metric_tensors(sr_old, hr_old)
+        psnr_old = {
+            key: torchmetrics.functional.image.peak_signal_noise_ratio(
+                *metric_tensors_old[key], data_range=1.0
+            ).item()
+            for key in psnr_keys
+        }
+        ssim_old = {
+            key: torchmetrics.functional.image.structural_similarity_index_measure(
+                *metric_tensors_old[key], data_range=1.0
+            ).item()
+            for key in ssim_keys
+        }
+
+        # Shipped ordering: crop the per-image slice directly, no intervening copy.
+        sr_new = sr[i : i + 1][..., n:-n, n:-n]
+        hr_new = hr_cropped[i : i + 1][..., n:-n, n:-n]
+        metric_tensors_new = pl_module._build_metric_tensors(sr_new, hr_new)
+        psnr_new = {
+            key: torchmetrics.functional.image.peak_signal_noise_ratio(
+                *metric_tensors_new[key], data_range=1.0
+            ).item()
+            for key in psnr_keys
+        }
+        ssim_new = {
+            key: torchmetrics.functional.image.structural_similarity_index_measure(
+                *metric_tensors_new[key], data_range=1.0
+            ).item()
+            for key in ssim_keys
+        }
+
+        for key in psnr_keys:
+            assert psnr_new[key] == pytest.approx(psnr_old[key], abs=1e-6), f"psnr[{key}]"
+        for key in ssim_keys:
+            assert ssim_new[key] == pytest.approx(ssim_old[key], abs=1e-6), f"ssim[{key}]"
 
 
 def test_benchmark_validation_epoch_end_logs_means():
