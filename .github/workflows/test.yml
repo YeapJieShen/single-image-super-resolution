@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -73,7 +76,7 @@ jobs:
         run: pytest -n 2 --dist=loadscope --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
           token: ${{ env.CODECOV_TOKEN }}
           files: coverage.xml
