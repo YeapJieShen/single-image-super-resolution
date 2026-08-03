@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from sisr.models.srcnn import SRCNN
+from sisr.models.srresnet import SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
@@ -109,6 +110,42 @@ def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
     test_metrics = set(trainer.callback_metrics)
     # test_step is a no-op; these come solely from BenchmarkImageLogger.on_test_*.
     assert {"psnr/Set5/RGB", "ssim/Set5/RGB", "ssim/Set5/Y"} <= test_metrics
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_fast_dev_run_raises_on_cross_wired_model_and_dataset_through_real_trainer(
+    tiny_rgb_image_dir: Path,
+):
+    """Regression: SRLightning.setup()'s input_contract probe must actually
+    fire through a real Trainer.fit() call, not only the SimpleNamespace-
+    stubbed trainer every setup() unit test in test_lightning_module.py uses.
+    Locks Lightning's documented DataModule.setup-before-LightningModule.setup
+    hook ordering (Trainer._call_setup_hook) against a silent regression that
+    every stubbed-trainer test would stay green through.
+    """
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    # srcnn's datasets are pre_upsampled (lr.shape == hr.shape) -- mismatched
+    # against SRResNet's native_lr contract.
+    datamodule = _make_datamodule(tiny_rgb_image_dir)
+    trainer = lightning.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    with pytest.raises(ValueError, match="input_contract"):
+        trainer.fit(module, datamodule=datamodule)
 
 
 # ---------------------------------------------------------------------------
