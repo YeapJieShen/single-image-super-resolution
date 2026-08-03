@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+  # An explicit permissions block zeroes unlisted scopes; actions: write keeps
+  # Actions-cache saves working (setup-uv enable-cache / setup-python cache: pip).
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
