@@ -259,9 +259,11 @@ def test_lmdb_missing_dir_with_no_build_fn_raises(tmp_path: Path):
         )
 
 
-def test_lmdb_try_load_swallows_lmdb_error_and_drops_cache(tmp_path: Path):
-    """An unreadable cache (lmdb.Error) is treated as stale: _try_load returns
-    False and removes the directory so it can be rebuilt."""
+def test_lmdb_try_load_drops_cache_on_genuine_corruption(tmp_path: Path):
+    """A corruption-specific exception (bad file header, wrong LMDB version)
+    means the directory itself is broken: _try_load returns False and removes
+    it so it can be rebuilt. Nothing else can be legitimately using data that
+    is genuinely corrupt."""
     cache = LMDBCache(
         cache_dir=tmp_path,
         name="test",
@@ -271,9 +273,104 @@ def test_lmdb_try_load_swallows_lmdb_error_and_drops_cache(tmp_path: Path):
         build_fn=_make_build_fn(1),
     )
     assert cache.path.exists()
-    with patch("sisr.cache.lmdb.open", side_effect=lmdb.Error("corrupt")):
+    with patch("sisr.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")):
         assert cache._try_load("abc") is False
     assert not cache.path.exists()
+
+
+def test_lmdb_try_load_does_not_raise_when_rmtree_fails_on_corruption(tmp_path: Path):
+    """Even genuine corruption must not let a failed cleanup (e.g. a file
+    still locked by another handle on Windows) escape as an unhandled
+    exception -- _try_load must still just report not-ready."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with (
+        patch("sisr.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")),
+        patch("sisr.cache.shutil.rmtree", side_effect=PermissionError("locked")),
+    ):
+        assert cache._try_load("abc") is False
+
+
+def test_lmdb_try_load_does_not_delete_cache_on_same_process_reopen_error(tmp_path: Path):
+    """A second lmdb.open of an already-open environment in the same process
+    raises a bare lmdb.Error ('environment already open in this process'),
+    not a corruption-specific subclass -- empirically hit when two datasets
+    in one process both open caches with lock=False. This is environmental,
+    not corruption: the directory must survive and _try_load must just
+    report not-ready so a later retry can succeed."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    cache.get_env()  # holds an open Environment at cache.path in this process
+
+    assert cache._try_load("abc") is False
+    assert cache.path.exists(), "a same-process reopen conflict is not corruption"
+
+
+def test_lmdb_try_load_does_not_delete_cache_on_permission_error(tmp_path: Path):
+    """A PermissionError opening the environment (e.g. Windows denying access
+    to a file another process still has mapped) is environmental too, not
+    corruption -- must not delete the directory."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with patch("sisr.cache.lmdb.open", side_effect=PermissionError("denied")):
+        assert cache._try_load("abc") is False
+    assert cache.path.exists()
+
+
+def test_lmdb_try_load_does_not_delete_cache_on_non_corruption_lmdb_error(tmp_path: Path):
+    """Only the specific corruption subclasses (CorruptedError, InvalidError,
+    VersionMismatchError) justify deleting the directory. Other lmdb.Error
+    subclasses (e.g. a full lock table) are environmental and must not delete."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    with patch("sisr.cache.lmdb.open", side_effect=lmdb.LockError("lock table full")):
+        assert cache._try_load("abc") is False
+    assert cache.path.exists()
+
+
+def test_lmdb_try_load_treats_missing_length_as_stale_not_crash(tmp_path: Path):
+    """A cache whose __checksum__ matches but __length__ is absent (e.g. a
+    hand-built or foreign-layout cache) must be treated as incomplete/stale,
+    not crash with AttributeError from int(None.decode())."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="test",
+        checksum="abc",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    env = lmdb.open(str(cache.path), map_size=_MAP_SIZE)
+    with env.begin(write=True) as txn:
+        txn.delete(b"__length__")
+    env.close()
+
+    assert cache._try_load("abc") is False
+    assert cache.path.exists(), "an incomplete cache is stale, not corrupt -- must not be deleted"
 
 
 def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
@@ -406,6 +503,31 @@ def test_release_lock_removes_sentinel_and_is_idempotent(tmp_path: Path):
     cache._release_lock()  # must not raise when there is nothing to remove
 
 
+def test_release_lock_does_not_remove_a_sentinel_it_never_created(tmp_path: Path):
+    """_release_lock must be a no-op for an instance that never won (or
+    stole) the build lock -- otherwise any call to it (e.g. a defensive
+    double-call, or reuse of a cache object across a retry) could delete a
+    live builder's sentinel out from under it, letting a third process
+    immediately win a fresh race into the same directory."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="own",
+        checksum="c",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    # cache already built + released its own lock inside __init__ above.
+    lock_path = cache._lock_path()
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, b"424242")  # simulates another (live) process's sentinel
+    os.close(fd)
+
+    cache._release_lock()
+
+    assert lock_path.exists(), "must not delete a sentinel this instance never created"
+
+
 _RACE_WORKER_SCRIPT = """
 import sys, time
 from sisr.cache import LMDBCache
@@ -459,6 +581,60 @@ def test_lmdb_cache_builds_exactly_once_across_two_racing_processes(tmp_path: Pa
     )
     assert result_1.read_text() == "v0"
     assert result_2.read_text() == "v0"
+
+
+_LIVE_BUILDER_WORKER_SCRIPT = """
+import sys, time
+from sisr.cache import LMDBCache
+
+def build(ctx):
+    time.sleep(float(sys.argv[3]))
+    ctx.write_batch([("key_0", b"v0")])
+
+cache = LMDBCache(
+    cache_dir=sys.argv[1], name="live", checksum="livecs", length=1,
+    map_size=16 * 1024 * 1024, build_fn=build,
+    lock_poll_interval=0.02, lock_timeout=float(sys.argv[4]),
+)
+with open(sys.argv[2], "w") as f:
+    f.write((cache.get("key_0") or b"").decode())
+"""
+
+
+def test_live_builder_past_lock_timeout_is_never_preempted(tmp_path: Path):
+    """Process A wins the lock and is still inside a slow build_fn when
+    process B's much shorter lock_timeout elapses. B must not treat that as
+    an abandoned lock: A's pid is still alive, so B must wait rather than
+    rebuild -- the old fall-through-on-timeout behaviour instead had B call
+    _build, which opened by shutil.rmtree-ing A's live, memory-mapped LMDB
+    directory (a PermissionError crash on Windows, silent lost writes on
+    Linux). Both processes must finish cleanly and agree on the one real
+    result.
+    """
+    result_a, result_b = tmp_path / "result_a.txt", tmp_path / "result_b.txt"
+    script = tmp_path / "live_worker.py"
+    script.write_text(_LIVE_BUILDER_WORKER_SCRIPT)
+    cache_path = tmp_path / "live_livecs"
+
+    # A: wins the lock immediately, then sleeps 1.5s inside build_fn --
+    # comfortably longer than B's lock_timeout below.
+    proc_a = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), str(result_a), "1.5", "30"]
+    )
+    time.sleep(0.2)  # let A win the O_EXCL race and enter build_fn's sleep
+    # B: loses the race, and its own lock_timeout (0.2s) elapses long before
+    # A's build_fn returns.
+    proc_b = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), str(result_b), "0", "0.2"]
+    )
+
+    assert proc_a.wait(timeout=15) == 0, "A's build must complete without a crash from B"
+    assert proc_b.wait(timeout=15) == 0, (
+        "B must not crash trying to destroy A's live cache after its lock_timeout elapses"
+    )
+    assert cache_path.exists(), "A's cache directory must survive B's timed-out wait"
+    assert result_a.read_text() == "v0"
+    assert result_b.read_text() == "v0"
 
 
 def test_acquire_lock_times_out_and_builds_anyway_on_stale_lock(tmp_path: Path):
