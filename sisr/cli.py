@@ -30,13 +30,14 @@ already assigns ``torch.backends.cudnn.benchmark``, and it coordinates with
 ``trainer.deterministic``. A separate top-level key would silently bypass that.
 """
 
+import re
 import sys
 from pathlib import Path
 from typing import Any, Literal
 
 import torch
 from lightning.pytorch import Trainer
-from lightning.pytorch.cli import LightningCLI
+from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
 from .export import to_onnx
 from .training import SRDataModule, SRLightning
@@ -47,6 +48,57 @@ from .training import SRDataModule, SRLightning
 # 'model/*'/'processor'/'criterion' entries that were never part of the loadable
 # contract. _reconstruct_ckpt_hparams rebuilds exactly what current SRLightning saves.
 _CKPT_HPARAM_KEYS = ("training_config", "eval_config")
+
+# Matches a --data.<dataset field> flag, with an optional trailing .init_args,
+# and (for the --flag=value form) captures the value. SRDataModule's dataset
+# fields (train_dataset, val_dataset, predict_dataset, each test_datasets.<name>
+# entry) are all typed dict[str, Any] for lazy per-stage instantiation — see
+# _find_whole_dict_dataset_override's docstring for why that makes a whole-JSON
+# CLI override crash inside jsonargparse instead of raising cleanly.
+_DATASET_FIELD_FLAG = re.compile(
+    r"^--data\.(train_dataset|val_dataset|predict_dataset|test_datasets\.[^.=]+)"
+    r"(\.init_args)?(?:=(.*))?$",
+    re.DOTALL,
+)
+
+
+def _find_whole_dict_dataset_override(args: list[str]) -> str | None:
+    """Return the offending ``--data.*_dataset`` flag if ``args`` has a whole dict/JSON override.
+
+    jsonargparse crashes with an unactionable ``AttributeError`` (raised deep
+    inside its own ``_typehints.py``, from code that assumes the field's
+    previous value is a ``Namespace`` with an ``.init_args`` attribute) when a
+    CLI override's value looks like a subclass spec (starts with ``{``) and
+    gets merged against an already-parsed value that is a plain ``dict`` —
+    exactly what every ``data.*_dataset`` field on :class:`~sisr.training.SRDataModule`
+    is, since each is typed ``dict[str, Any]`` rather than the real dataset
+    class (so datasets can be instantiated lazily, only for the stages that
+    need them). Both ``--data.train_dataset='{...}'`` (whole spec) and
+    ``--data.train_dataset.init_args='{...}'`` (whole ``init_args``) hit this.
+
+    Scanning here lets :meth:`SRLightningCLI.parse_arguments` raise an
+    actionable error *before* handing off to jsonargparse's own parser,
+    instead of letting the bare ``AttributeError`` surface.
+
+    Args:
+        args: Raw CLI argument tokens (as passed to ``LightningCLI(args=...)``,
+            or ``sys.argv[1:]``). Handles both the ``--flag=value`` and the
+            ``--flag value`` (separate token) forms.
+
+    Returns:
+        The matched flag (e.g. ``'--data.train_dataset.init_args'``), or
+        ``None`` if no argument matches the crashing shape.
+    """
+    for i, arg in enumerate(args):
+        match = _DATASET_FIELD_FLAG.match(arg)
+        if match is None:
+            continue
+        value = match.group(3)
+        if value is None:  # split "--flag value" form: value is the next token
+            value = args[i + 1] if i + 1 < len(args) else None
+        if value is not None and value.strip().startswith("{"):
+            return arg.split("=", 1)[0]
+    return None
 
 
 def _reconstruct_ckpt_hparams(hparams: dict[str, Any], sep: str = "/") -> dict[str, Any]:
@@ -168,6 +220,40 @@ class SRLightningCLI(LightningCLI):
                 f"an `export` method with the same signature."
             )
         super().__init__(*args, trainer_class=trainer_class, **kwargs)
+
+    def parse_arguments(self, parser: LightningArgumentParser, args: ArgsType) -> None:
+        """Parse CLI arguments, turning a known jsonargparse crash into an actionable error.
+
+        ``LightningCLI.__init__`` calls this before ``before_instantiate_classes``/
+        ``instantiate_classes`` even run, so it is the earliest seam available —
+        the crash :func:`_find_whole_dict_dataset_override` guards against
+        happens *during* ``parser.parse_args``, deep inside jsonargparse
+        itself, not at class-instantiation time.
+
+        Args:
+            parser: The top-level parser (unchanged, passed through).
+            args: CLI arguments as given to ``LightningCLI(args=...)`` — a
+                list of tokens, a dict/``Namespace`` (structured config, not
+                scanned here since it never takes the crashing ``parse_args``
+                code path), or ``None`` (read from ``sys.argv[1:]``).
+
+        Raises:
+            SystemExit: If ``args`` contains a whole-dict/JSON override of a
+                ``data.*_dataset`` field.
+        """
+        arg_list = args if isinstance(args, list) else (sys.argv[1:] if args is None else None)
+        if arg_list is not None:
+            offending = _find_whole_dict_dataset_override(arg_list)
+            if offending is not None:
+                raise SystemExit(
+                    f"{offending} passes a whole JSON/dict value. jsonargparse cannot "
+                    f"merge that into the class_path/init_args shape of this "
+                    f"dict[str, Any]-typed field — it fails with an internal "
+                    f"AttributeError instead of a clean error. Edit data.train_dataset / "
+                    f"data.val_dataset / data.test_datasets.<name> / data.predict_dataset "
+                    f"directly in your YAML config instead of overriding it from the CLI."
+                )
+        super().parse_arguments(parser, args)
 
     def add_arguments_to_parser(self, parser):
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.

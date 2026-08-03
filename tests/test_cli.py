@@ -230,6 +230,36 @@ def test_dataset_cli_override_fails_loudly_instead_of_silently_ignored():
         )
 
 
+def test_dataset_whole_dict_cli_override_fails_loudly_not_with_internal_error():
+    """--data.train_dataset='{...}' must not crash with jsonargparse's raw,
+    unactionable AttributeError ('dict' object has no attribute 'init_args').
+
+    SRLightningCLI.parse_arguments must intercept this shape before handing
+    off to jsonargparse's own parser and raise a SystemExit naming the
+    offending flag instead.
+    """
+    with pytest.raises(SystemExit, match="data.train_dataset"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            '--data.train_dataset={"class_path": "sisr.datasets.srresnet.TrainDataset", '
+            '"init_args": {"img_dir": "data/DIV2K_train_HR", "scale": 4, "hr_crop_size": 96, '
+            '"crops_per_image": 8, "use_tqdm": true, "cache_dir": ".lmdb_cache/DIV2K_train_HR"}}',
+        )
+
+
+def test_dataset_whole_init_args_cli_override_fails_loudly_not_with_internal_error():
+    """--data.train_dataset.init_args='{...}' hits the same jsonargparse crash
+    (a whole-dict CLI value merged against an already-dict prev_val) and must
+    also fail loudly with an actionable SystemExit."""
+    with pytest.raises(SystemExit, match="data.train_dataset"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            '--data.train_dataset.init_args={"crops_per_image": 8}',
+        )
+
+
 def test_matmul_precision_accepted_in_process():
     """--matmul_precision=medium overrides the template's shipped 'high' default."""
     cli = _resolve("--config", str(TEMPLATE), "--matmul_precision=medium")
