@@ -71,6 +71,7 @@ from PIL import Image
 from sisr.imresize import (
     _contributions,
     _cubic,
+    _resize_axis,
     _round_half_away_from_zero,
     matlab_imresize,
     resize,
@@ -120,6 +121,117 @@ def test_contributions_folds_out_of_range_indices_symmetrically():
     # Mirror padding revisits near-edge source pixels rather than saturating
     # at a single edge value -- i.e. more than one distinct low index is used.
     assert len(set(indices[0].tolist())) > 1
+
+
+##########################################################################
+# _contributions memoization (functools.lru_cache)
+##########################################################################
+
+
+def test_contributions_repeat_call_returns_identical_cached_arrays():
+    """Same args must return the exact same (cached) array objects, not
+    merely equal ones -- proves the lru_cache is actually hit, not just
+    present and bypassed."""
+    weights1, indices1 = _contributions(50, 20, 0.4)
+    weights2, indices2 = _contributions(50, 20, 0.4)
+    assert weights1 is weights2
+    assert indices1 is indices2
+
+
+def test_contributions_cached_arrays_are_read_only():
+    """Cached arrays are shared across every call with the same args; a
+    mutating caller would corrupt every other consumer, so both arrays must
+    refuse in-place writes."""
+    weights, indices = _contributions(50, 20, 0.4)
+    assert weights.flags.writeable is False
+    assert indices.flags.writeable is False
+    with pytest.raises(ValueError):
+        weights[0, 0] = 999.0
+    with pytest.raises(ValueError):
+        indices[0, 0] = 999
+
+
+def test_contributions_cache_matches_uncached_computation():
+    """The memoized wrapper must compute the exact same weights/indices as
+    the undecorated function -- reached via __wrapped__, lru_cache's
+    standard escape hatch to the raw callable, so this holds regardless of
+    what else has populated the cache."""
+    for in_length, out_length, scale in [(100, 25, 0.25), (25, 100, 4.0), (24, 8, 1 / 3)]:
+        cached_weights, cached_indices = _contributions(in_length, out_length, scale)
+        raw_weights, raw_indices = _contributions.__wrapped__(in_length, out_length, scale)
+        assert np.array_equal(cached_weights, raw_weights)
+        assert np.array_equal(cached_indices, raw_indices)
+
+
+def test_matlab_imresize_output_unchanged_by_contributions_cache():
+    """End-to-end resize output must be byte-identical whether _contributions
+    is served from cache or recomputed via __wrapped__ -- the strongest
+    available proof that memoizing it didn't change matlab_imresize's
+    numerics."""
+    rng = np.random.default_rng(3)
+    img = rng.integers(0, 256, size=(24, 24, 3), dtype=np.uint8)
+    out_shape = (8, 8)
+
+    cached_out = matlab_imresize(img, out_shape)
+
+    in_h, in_w = img.shape[:2]
+    out_h, out_w = out_shape
+    scale = out_h / in_h  # square image, square target -> one scale for both axes
+    weights_h, indices_h = _contributions.__wrapped__(in_h, out_h, scale)
+    weights_w, indices_w = _contributions.__wrapped__(in_w, out_w, scale)
+    arr = _resize_axis(img, 0, weights_h, indices_h)
+    arr = _resize_axis(arr, 1, weights_w, indices_w)
+
+    assert np.array_equal(cached_out, arr)
+
+
+##########################################################################
+# _resize_axis single-pass einsum contraction
+##########################################################################
+
+
+def _naive_resize_axis(image: np.ndarray, axis: int, weights: np.ndarray, indices: np.ndarray):
+    """Pre-optimization reference: materializes the full weights*gathered
+    temporary before np.sum -- the exact computation _resize_axis's einsum
+    now replaces. Kept local to this test so the einsum path has an
+    independent, un-optimized oracle to compare against."""
+    if axis == 0:
+        gathered = image[indices].astype(np.float64)
+        out = np.sum(weights[:, :, None, None] * gathered, axis=1)
+    else:
+        gathered = image[:, indices].astype(np.float64)
+        out = np.sum(weights[None, :, :, None] * gathered, axis=2)
+    return _round_half_away_from_zero(np.clip(out, 0.0, 255.0)).astype(np.uint8)
+
+
+@pytest.mark.parametrize(
+    "in_h,in_w,out_h,out_w,channels",
+    [
+        (30, 45, 10, 15, 3),  # downscale, non-square
+        (10, 15, 30, 45, 3),  # upscale, non-square
+        (17, 23, 9, 8, 1),  # downscale, 1-channel, odd sizes
+        (9, 8, 17, 23, 1),  # upscale, 1-channel
+        (24, 24, 24, 24, 3),  # identity scale
+    ],
+)
+def test_resize_axis_einsum_matches_naive_multiply_then_sum(in_h, in_w, out_h, out_w, channels):
+    """The einsum contraction in _resize_axis must be bit-identical to the
+    multiply-then-np.sum it replaces, for both axis passes, non-square
+    shapes, 1- and 3-channel images, and both up- and down-scaling."""
+    rng = np.random.default_rng(hash((in_h, in_w, out_h, out_w, channels)) % (2**32))
+    img = rng.integers(0, 256, size=(in_h, in_w, channels), dtype=np.uint8)
+
+    weights_h, indices_h = _contributions(in_h, out_h, out_h / in_h)
+    weights_w, indices_w = _contributions(in_w, out_w, out_w / in_w)
+
+    assert np.array_equal(
+        _resize_axis(img, 0, weights_h, indices_h),
+        _naive_resize_axis(img, 0, weights_h, indices_h),
+    )
+    assert np.array_equal(
+        _resize_axis(img, 1, weights_w, indices_w),
+        _naive_resize_axis(img, 1, weights_w, indices_w),
+    )
 
 
 def test_matlab_imresize_constant_image_is_invariant():
