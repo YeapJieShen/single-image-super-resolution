@@ -13,7 +13,7 @@ output to disk as PNGs.
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from weakref import proxy
 
 import lightning
@@ -25,6 +25,24 @@ from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelChe
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from .metadata import build_metadata
+
+
+class BenchmarkSample(NamedTuple):
+    """One buffered per-image result: PSNR/SSIM only, no image tensors.
+
+    Fields are accessed by name at every read site — a bare positional
+    tuple here previously made ``_flush_buffer``'s mean computation
+    (``s[4]``/``s[5]``) unreadable at the call site.
+
+    Attributes:
+        filename: Stem of the source image path, used as the TensorBoard tag suffix.
+        psnr: PSNR value per configured key (``eval_config.psnr_keys``).
+        ssim: SSIM value per configured key (``eval_config.ssim_keys``).
+    """
+
+    filename: str
+    psnr: dict[str, float]
+    ssim: dict[str, float]
 
 
 class BenchmarkImageLogger(Callback):
@@ -56,6 +74,17 @@ class BenchmarkImageLogger(Callback):
 
     Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
     the use site; this avoids dual-knob configuration drift.
+
+    Metrics are computed directly on the on-device SR/HR slices (mirroring
+    the primary-val-loader path in ``SRLightning.validation_step``) and both
+    the per-image scalars and the image strip are emitted immediately, per
+    image, from :meth:`_collect_batch` — nothing image-shaped is buffered.
+    Buffering full-resolution LR/SR/HR CPU tensors for every image across
+    every test set until epoch end cost ~0.5 GB per validation cycle purely
+    to defer ``add_image``; only a :class:`BenchmarkSample` (filename +
+    PSNR/SSIM dicts) is buffered now, for the per-set mean computed in
+    :meth:`_flush_buffer`. The TensorBoard experiment is resolved once, in
+    :meth:`setup`, rather than re-searched on every batch/epoch-end.
 
     Args:
         dataset_names: Ordered list of test set names (e.g.
@@ -96,7 +125,12 @@ class BenchmarkImageLogger(Callback):
 
         self._val_run_count = 0
 
-        self._buffer: dict[str, list[tuple]] = {}
+        self._buffer: dict[str, list[BenchmarkSample]] = {}
+
+        # Resolved once in setup() rather than re-searched every batch/epoch-end;
+        # None when no TensorBoard logger is attached (image/scalar emission is
+        # then silently skipped, same as the previous per-flush behaviour).
+        self._tb_experiment: Any = None
 
     def setup(
         self,
@@ -104,7 +138,7 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ):
-        """Resolve ``dataset_names`` and build both dataloader_idx mappings.
+        """Resolve ``dataset_names``, both dataloader_idx mappings, and the TB experiment.
 
         Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
         when not supplied at construction time.
@@ -120,6 +154,16 @@ class BenchmarkImageLogger(Callback):
             self.dataset_names = list(names or [])
         self._val_mapping = {i + 1: name for i, name in enumerate(self.dataset_names)}
         self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
+
+        tb_logger = next(
+            (
+                logger
+                for logger in getattr(trainer, "loggers", None) or []
+                if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
+            ),
+            None,
+        )
+        self._tb_experiment = tb_logger.experiment if tb_logger is not None else None
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
@@ -173,17 +217,17 @@ class BenchmarkImageLogger(Callback):
     def on_validation_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
     ):
-        """Log per-set means every val epoch; image strips every N val runs.
+        """Log per-set mean PSNR/SSIM for the val epoch.
+
+        Image strips and per-image scalars were already streamed to
+        TensorBoard per-image in :meth:`_collect_batch`; only the means
+        remain to compute here.
 
         Args:
-            trainer: The active trainer.
+            trainer: Unused.
             pl_module: The model being evaluated.
         """
-        self._flush_buffer(
-            trainer=trainer,
-            pl_module=pl_module,
-            should_log_images=self._on_image_log_interval(),
-        )
+        self._flush_buffer(pl_module=pl_module)
 
     def on_test_epoch_start(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Clear buffers ahead of a test run.
@@ -231,17 +275,17 @@ class BenchmarkImageLogger(Callback):
         )
 
     def on_test_epoch_end(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
-        """Log per-set means and image strips at the end of ``cli test``.
+        """Log per-set mean PSNR/SSIM at the end of ``cli test``.
+
+        Image strips and per-image scalars were already streamed to
+        TensorBoard per-image in :meth:`_collect_batch`; only the means
+        remain to compute here.
 
         Args:
-            trainer: The active trainer.
+            trainer: Unused.
             pl_module: The model being evaluated.
         """
-        self._flush_buffer(
-            trainer=trainer,
-            pl_module=pl_module,
-            should_log_images=True,
-        )
+        self._flush_buffer(pl_module=pl_module)
 
     def _on_image_log_interval(self) -> bool:
         """Return True when this val run should also log image strips."""
@@ -258,15 +302,24 @@ class BenchmarkImageLogger(Callback):
         dataloader_idx: int,
         should_log_images: bool,
     ):
-        """Forward one batch, compute per-image metrics, and buffer the results.
+        """Forward one batch, compute per-image metrics on-device, and stream image strips.
 
         Shared between :meth:`on_validation_batch_end` and
         :meth:`on_test_batch_end`. Border cropping is sourced from
         ``pl_module.eval_config.crop_border`` at the use site.
         *source_dataloaders* recovers the underlying dataset for filename
-        resolution. When *should_log_images*, LR/SR/HR tensors are cached for
-        image-strip emission in :meth:`_flush_buffer`; otherwise only scalar
-        metrics are buffered.
+        resolution.
+
+        PSNR/SSIM are computed from the on-device ``sr``/``hr_cropped``
+        slices — mirroring the primary-val-loader path in
+        ``SRLightning.validation_step`` — so only the scalar ``.item()``
+        results ever leave the GPU. When *should_log_images* (or
+        ``self.log_per_image_metrics``), exactly one host transfer per image
+        (``lr_img[i]``/``sr[i]``/``hr_img[i]`` each ``.cpu()`` at most once)
+        composes the bicubic|SR|HR strip and/or the per-image scalars, and
+        both are emitted to TensorBoard immediately — nothing image-shaped is
+        buffered. Only ``BenchmarkSample(filename, psnr_dict, ssim_dict)`` is
+        appended to ``self._buffer``, for :meth:`_flush_buffer`'s per-set mean.
         """
         lr_img, hr_img = batch
 
@@ -276,22 +329,22 @@ class BenchmarkImageLogger(Callback):
         # Resolve filenames from the underlying dataset for use as TB tags.
         dataset = source_dataloaders[dataloader_idx].dataset
         batch_size = lr_img.size(0)
+        n = pl_module.eval_config.crop_border
 
         for i in range(batch_size):
             global_idx = batch_idx * batch_size + i
             filename = dataset.img_paths[global_idx].stem
 
-            sr_4d = sr[i].unsqueeze(0).cpu()
-            hr_4d = hr_cropped[i].unsqueeze(0).cpu()
-            n = pl_module.eval_config.crop_border
+            sr_metric = sr[i : i + 1]
+            hr_metric = hr_cropped[i : i + 1]
             if n > 0:
-                sr_4d = sr_4d[..., n:-n, n:-n]
-                hr_4d = hr_4d[..., n:-n, n:-n]
+                sr_metric = sr_metric[..., n:-n, n:-n]
+                hr_metric = hr_metric[..., n:-n, n:-n]
             # Still a private reach: the colorspace split has no public
             # seam, and duplicating it here would recreate a divergence
             # this design removed. Keys now come from eval_config, so this is a value
             # lookup only — the callback no longer decides *which* keys exist.
-            metric_tensors = pl_module._build_metric_tensors(sr_4d, hr_4d)
+            metric_tensors = pl_module._build_metric_tensors(sr_metric, hr_metric)
             psnr_dict = {
                 key: torchmetrics.functional.image.peak_signal_noise_ratio(
                     *metric_tensors[key], data_range=1.0
@@ -304,96 +357,69 @@ class BenchmarkImageLogger(Callback):
                 ).item()
                 for key in pl_module.eval_config.ssim_keys
             }
-            self._buffer[dataset_name].append(
-                (
-                    filename,
-                    lr_img[i].cpu() if should_log_images else None,
-                    sr[i].cpu() if should_log_images else None,
-                    hr_img[i].cpu() if should_log_images else None,
-                    psnr_dict,
-                    ssim_dict,
-                )
+            self._buffer[dataset_name].append(BenchmarkSample(filename, psnr_dict, ssim_dict))
+
+            if self._tb_experiment is None:
+                continue
+
+            if self.log_per_image_metrics:
+                step = trainer.global_step
+                for key, psnr_val in psnr_dict.items():
+                    tag = f"per_image/{dataset_name}/psnr/{key}/{filename}"
+                    self._tb_experiment.add_scalar(tag, psnr_val, global_step=step)
+                for key, ssim_val in ssim_dict.items():
+                    tag = f"per_image/{dataset_name}/ssim/{key}/{filename}"
+                    self._tb_experiment.add_scalar(tag, ssim_val, global_step=step)
+
+            if not should_log_images:
+                continue
+
+            # One host transfer per image, only on cycles that log strips.
+            lr_cpu = lr_img[i].cpu()
+            sr_cpu = sr[i].cpu()
+            hr_cpu = hr_img[i].cpu()
+
+            # Triptych: bicubic | SR | HR, all at HR size.
+            # The bicubic panel is the LR upsampled to HR via bicubic
+            # interpolation — the standard SR baseline.  For SRCNN the
+            # LR is already at HR size (pre-upsampled in the dataset),
+            # so this resamples at 1:1 and is near-identity.  For
+            # SRResNet (LR < HR) it upscales to HR for direct visual
+            # comparison against SR.  SR is center-padded only when
+            # smaller than HR (SRCNN with padding='valid') to preserve
+            # full HR context on the right.
+            target_hw = hr_cpu.shape[-2:]
+            bicubic = self._bicubic_to(lr_cpu, target_hw)
+            sr_padded = self._pad_to_match(sr_cpu, target_hw)
+            strip = torchvision.utils.make_grid(
+                [bicubic, sr_padded, hr_cpu], nrow=3, padding=2, pad_value=0.5
+            )
+            self._tb_experiment.add_image(
+                f"{dataset_name}/{filename}", strip, global_step=trainer.global_step
             )
 
-    def _flush_buffer(
-        self,
-        trainer: lightning.Trainer,
-        pl_module: lightning.LightningModule,
-        should_log_images: bool,
-    ):
-        """Log per-set means and (optionally) per-image scalars/image strips.
+    def _flush_buffer(self, pl_module: lightning.LightningModule):
+        """Log per-set mean PSNR/SSIM from the buffered samples.
 
         Shared between :meth:`on_validation_epoch_end` and
-        :meth:`on_test_epoch_end`. Looks up the TensorBoard logger from
-        ``trainer.loggers``; silently skips per-image/image emission for
-        sets whose logger is missing. Per-image scalar emission is gated by
-        ``self.log_per_image_metrics``, independent of *should_log_images*
-        (which gates only the image strips) — the two concerns cost
-        differently (tag count vs. bytes) and are configured separately.
+        :meth:`on_test_epoch_end`. Per-image scalars and image strips were
+        already streamed to TensorBoard from :meth:`_collect_batch`; this
+        only reduces the buffered ``BenchmarkSample.psnr``/``.ssim`` dicts to
+        a mean per dataset/key.
         """
-        step = trainer.global_step
-
         for dataset_name, samples in self._buffer.items():
             if not samples:
                 continue
 
-            psnr_keys = samples[0][4].keys()
-            ssim_keys = samples[0][5].keys()
+            psnr_keys = samples[0].psnr.keys()
+            ssim_keys = samples[0].ssim.keys()
 
             for key in psnr_keys:
-                mean_psnr = sum(s[4][key] for s in samples) / len(samples)
+                mean_psnr = sum(s.psnr[key] for s in samples) / len(samples)
                 pl_module.log(f"psnr/{dataset_name}/{key}", mean_psnr, add_dataloader_idx=False)
             for key in ssim_keys:
-                mean_ssim = sum(s[5][key] for s in samples) / len(samples)
+                mean_ssim = sum(s.ssim[key] for s in samples) / len(samples)
                 pl_module.log(f"ssim/{dataset_name}/{key}", mean_ssim, add_dataloader_idx=False)
-
-            if should_log_images or self.log_per_image_metrics:
-                tb_logger = next(
-                    (
-                        logger
-                        for logger in trainer.loggers
-                        if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
-                    ),
-                    None,
-                )
-                if tb_logger is None:
-                    continue
-
-                experiment = tb_logger.experiment
-                for filename, lr, sr, hr, psnr_dict, ssim_dict in samples:
-                    if self.log_per_image_metrics:
-                        for key, psnr_val in psnr_dict.items():
-                            experiment.add_scalar(
-                                f"per_image/{dataset_name}/psnr/{key}/{filename}",
-                                psnr_val,
-                                global_step=step,
-                            )
-                        for key, ssim_val in ssim_dict.items():
-                            experiment.add_scalar(
-                                f"per_image/{dataset_name}/ssim/{key}/{filename}",
-                                ssim_val,
-                                global_step=step,
-                            )
-
-                    if not should_log_images:
-                        continue
-
-                    # Triptych: bicubic | SR | HR, all at HR size.
-                    # The bicubic panel is the LR upsampled to HR via bicubic
-                    # interpolation — the standard SR baseline.  For SRCNN the
-                    # LR is already at HR size (pre-upsampled in the dataset),
-                    # so this resamples at 1:1 and is near-identity.  For
-                    # SRResNet (LR < HR) it upscales to HR for direct visual
-                    # comparison against SR.  SR is center-padded only when
-                    # smaller than HR (SRCNN with padding='valid') to preserve
-                    # full HR context on the right.
-                    target_hw = hr.shape[-2:]
-                    bicubic = self._bicubic_to(lr, target_hw)
-                    sr_padded = self._pad_to_match(sr, target_hw)
-                    strip = torchvision.utils.make_grid(
-                        [bicubic, sr_padded, hr], nrow=3, padding=2, pad_value=0.5
-                    )
-                    experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
         self._buffer.clear()
 

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import lightning
 import pytest
 import torch
+import torchmetrics.functional
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
@@ -22,6 +23,7 @@ from sisr.training import (
     SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
+from sisr.training.callbacks import BenchmarkSample
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -562,8 +564,7 @@ def test_benchmark_validation_batch_end_skips_primary_loader():
 
 
 def test_benchmark_validation_batch_end_collects_for_test_loader():
-    """dataloader_idx >= 1 populates the buffer with metrics + (since
-    log_every_n_val_runs=1) cached LR/SR/HR tensors."""
+    """dataloader_idx >= 1 populates the buffer with a BenchmarkSample per image."""
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
@@ -586,13 +587,112 @@ def test_benchmark_validation_batch_end_collects_for_test_loader():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 2
-    # Each entry: (filename, lr|None, sr|None, hr|None, psnr_dict, ssim_dict).
-    fname, lr, sr, hr, psnr, ssim = cb._buffer["Set5"][0]
-    assert fname == "Set5_000"
-    assert lr is not None and sr is not None and hr is not None
-    assert "RGB" in psnr
-    assert "RGB" in ssim and "Y" in ssim  # eval_config.ssim_channels default
-    assert isinstance(ssim["RGB"], float)
+    sample = cb._buffer["Set5"][0]
+    assert sample.filename == "Set5_000"
+    assert "RGB" in sample.psnr
+    assert "RGB" in sample.ssim and "Y" in sample.ssim  # eval_config.ssim_channels default
+    assert isinstance(sample.ssim["RGB"], float)
+
+
+def test_benchmark_collect_batch_buffers_no_image_tensors():
+    """The buffer must hold BenchmarkSample(filename, psnr, ssim) only -- no
+    LR/SR/HR tensors -- even when should_log_images is True, since image
+    strips are now streamed directly from _collect_batch instead of being
+    deferred to epoch end."""
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = _make_real_pl_module()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+    sample = cb._buffer["Set5"][0]
+    assert isinstance(sample, BenchmarkSample)
+    for value in sample:
+        assert not isinstance(value, torch.Tensor)
+
+
+def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering():
+    """D3 equivalence proof: the pre-change code moved each image to CPU
+    FIRST (``sr[i].unsqueeze(0).cpu()``), THEN cropped, THEN built metric
+    tensors + PSNR/SSIM; the shipped _collect_batch crops the (on-device)
+    per-image slice directly and computes PSNR/SSIM on it without any
+    intervening host copy. Both orderings must agree exactly on every
+    configured metric key. CPU-only (no GPU dependency), so this runs on CI.
+    """
+    torch.manual_seed(0)
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(
+            crop_border=3,
+            psnr_channels=["RGB", "YCbCr"],
+            separate_psnr=True,
+            ssim_channels=["RGB", "Y"],
+        ),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr_img = torch.rand(4, 3, 20, 20)
+    hr_img = torch.rand(4, 3, 20, 20)
+    with torch.no_grad():
+        sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
+
+    n = pl_module.eval_config.crop_border
+    psnr_keys = pl_module.eval_config.psnr_keys
+    ssim_keys = pl_module.eval_config.ssim_keys
+    assert n > 0 and len(psnr_keys) > 1 and len(ssim_keys) > 1  # actually exercises both
+
+    for i in range(lr_img.size(0)):
+        # Pre-change ordering: host-copy the per-image slice FIRST, then crop.
+        sr_old = sr[i].unsqueeze(0).cpu()
+        hr_old = hr_cropped[i].unsqueeze(0).cpu()
+        sr_old = sr_old[..., n:-n, n:-n]
+        hr_old = hr_old[..., n:-n, n:-n]
+        metric_tensors_old = pl_module._build_metric_tensors(sr_old, hr_old)
+        psnr_old = {
+            key: torchmetrics.functional.image.peak_signal_noise_ratio(
+                *metric_tensors_old[key], data_range=1.0
+            ).item()
+            for key in psnr_keys
+        }
+        ssim_old = {
+            key: torchmetrics.functional.image.structural_similarity_index_measure(
+                *metric_tensors_old[key], data_range=1.0
+            ).item()
+            for key in ssim_keys
+        }
+
+        # Shipped ordering: crop the per-image slice directly, no intervening copy.
+        sr_new = sr[i : i + 1][..., n:-n, n:-n]
+        hr_new = hr_cropped[i : i + 1][..., n:-n, n:-n]
+        metric_tensors_new = pl_module._build_metric_tensors(sr_new, hr_new)
+        psnr_new = {
+            key: torchmetrics.functional.image.peak_signal_noise_ratio(
+                *metric_tensors_new[key], data_range=1.0
+            ).item()
+            for key in psnr_keys
+        }
+        ssim_new = {
+            key: torchmetrics.functional.image.structural_similarity_index_measure(
+                *metric_tensors_new[key], data_range=1.0
+            ).item()
+            for key in ssim_keys
+        }
+
+        for key in psnr_keys:
+            assert psnr_new[key] == pytest.approx(psnr_old[key], abs=1e-6), f"psnr[{key}]"
+        for key in ssim_keys:
+            assert ssim_new[key] == pytest.approx(ssim_old[key], abs=1e-6), f"ssim[{key}]"
 
 
 def test_benchmark_validation_epoch_end_logs_means():
@@ -602,14 +702,11 @@ def test_benchmark_validation_epoch_end_logs_means():
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    # Hand-populate buffer with two entries; image tensors set None so the
-    # image-strip branch is skipped (covered by the next test).
     cb._buffer["Set5"] = [
-        ("img_0", None, None, None, {"RGB": 30.0}, {"RGB": 0.9}),
-        ("img_1", None, None, None, {"RGB": 32.0}, {"RGB": 0.85}),
+        BenchmarkSample("img_0", {"RGB": 30.0}, {"RGB": 0.9}),
+        BenchmarkSample("img_1", {"RGB": 32.0}, {"RGB": 0.85}),
     ]
-    trainer = SimpleNamespace(global_step=42, loggers=[])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb.on_validation_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
     # Two log calls per dataset: psnr + ssim.
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
     assert "psnr/Set5/RGB" in log_keys
@@ -622,30 +719,13 @@ def test_benchmark_validation_epoch_end_logs_means():
     assert ssim_call.args[1] == pytest.approx(0.875)
 
 
-def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path: Path, monkeypatch):
-    """With log_per_image_metrics=True and on the log interval, _flush_buffer
-    must actually call experiment.add_image once (the bicubic|SR|HR strip) and
-    experiment.add_scalar for the per-image psnr + ssim. The old test only
-    checked it didn't raise, so a silently-skipped emit would have passed."""
+def test_benchmark_collect_batch_emits_add_image_and_add_scalar(tmp_path: Path, monkeypatch):
+    """With log_per_image_metrics=True and on the log interval, _collect_batch
+    must call experiment.add_image once (the bicubic|SR|HR strip) and
+    experiment.add_scalar for the per-image psnr + ssim -- streamed immediately
+    from the batch hook rather than deferred to epoch end."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = BenchmarkImageLogger(
-        dataset_names=["Set5"], log_every_n_val_runs=1, log_per_image_metrics=True
-    )
-    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
-    pl_module = MagicMock()
-    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    # SRCNN-style: LR already at HR size (4x4). One image, one psnr key.
-    cb._buffer["Set5"] = [
-        (
-            "img_0",
-            torch.rand(3, 4, 4),
-            torch.rand(3, 4, 4),
-            torch.rand(3, 4, 4),
-            {"RGB": 30.0},
-            {"RGB": 0.9},
-        ),
-    ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment  # materialize the SummaryWriter before wrapping
     add_image = MagicMock(wraps=experiment.add_image)
@@ -653,40 +733,48 @@ def test_benchmark_validation_epoch_end_emits_add_image_and_add_scalar(tmp_path:
     monkeypatch.setattr(experiment, "add_image", add_image)
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
-    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb = BenchmarkImageLogger(
+        dataset_names=["Set5"], log_every_n_val_runs=1, log_per_image_metrics=True
+    )
+    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    cb.setup(trainer, pl_module=None, stage="fit")
+    pl_module = _make_real_pl_module()  # SRCNN + RGBProcessor: LR/SR/HR all 16x16
+    cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer.val_dataloaders = [_stub_dataloader(None), _stub_dataloader(ds)]
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
     tb_logger.finalize("success")
 
     add_image.assert_called_once()
     tag, strip = add_image.call_args.args[0], add_image.call_args.args[1]
-    assert tag == "Set5/img_0"
+    assert tag == "Set5/Set5_000"
     assert strip.ndim == 3 and strip.shape[0] == 3  # (C, H, W) triptych
-    # One psnr scalar (RGB) + one ssim scalar for the single buffered image.
+    # psnr_channels default ['RGB'] + ssim_channels default ['RGB', 'Y'].
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
-    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/RGB/img_0"]
+    assert scalar_tags == [
+        "per_image/Set5/psnr/RGB/Set5_000",
+        "per_image/Set5/ssim/RGB/Set5_000",
+        "per_image/Set5/ssim/Y/Set5_000",
+    ]
 
 
-def test_benchmark_default_omits_per_image_scalars_but_keeps_set_means(tmp_path: Path, monkeypatch):
-    """log_per_image_metrics defaults to False: image strips still log (gated
-    only by should_log_images), but no per_image/... scalar is emitted. Per-set
-    mean psnr/ssim (via pl_module.log) are unaffected by this flag entirely."""
+def test_benchmark_collect_batch_default_omits_per_image_scalars_but_keeps_images(
+    tmp_path: Path, monkeypatch
+):
+    """log_per_image_metrics defaults to False: image strips still stream
+    (gated only by should_log_images), but no per_image/... scalar is
+    emitted."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
-    assert cb.log_per_image_metrics is False
-    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
-    pl_module = MagicMock()
-    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    cb._buffer["Set5"] = [
-        (
-            "img_0",
-            torch.rand(3, 4, 4),
-            torch.rand(3, 4, 4),
-            torch.rand(3, 4, 4),
-            {"RGB": 30.0},
-            {"RGB": 0.9},
-        ),
-    ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment
     add_image = MagicMock(wraps=experiment.add_image)
@@ -694,33 +782,38 @@ def test_benchmark_default_omits_per_image_scalars_but_keeps_set_means(tmp_path:
     monkeypatch.setattr(experiment, "add_image", add_image)
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
-    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    assert cb.log_per_image_metrics is False
+    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    cb.setup(trainer, pl_module=None, stage="fit")
+    pl_module = _make_real_pl_module()
+    cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer.val_dataloaders = [_stub_dataloader(None), _stub_dataloader(ds)]
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
     tb_logger.finalize("success")
 
     add_image.assert_called_once()  # image strip unaffected by the flag
     add_scalar.assert_not_called()  # no per_image/... scalar emitted
-    log_keys = [call.args[0] for call in pl_module.log.call_args_list]
-    assert "psnr/Set5/RGB" in log_keys
-    assert "ssim/Set5/RGB" in log_keys
 
 
-def test_benchmark_log_per_image_metrics_decoupled_from_image_strips(tmp_path: Path, monkeypatch):
+def test_benchmark_collect_batch_log_per_image_metrics_decoupled_from_image_strips(
+    tmp_path: Path, monkeypatch
+):
     """log_per_image_metrics=True must emit per-image scalars even on a val run
     where should_log_images is False (log_every_n_val_runs throttles images,
     not per-image metrics) — proving the two concerns are independently gated."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = BenchmarkImageLogger(
-        dataset_names=["Set5"], log_every_n_val_runs=99, log_per_image_metrics=True
-    )
-    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
-    pl_module = MagicMock()
-    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    assert cb._on_image_log_interval() is False  # confirms should_log_images will be False
-    cb._buffer["Set5"] = [
-        ("img_0", None, None, None, {"RGB": 30.0}, {"RGB": 0.9}),
-    ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment
     add_image = MagicMock(wraps=experiment.add_image)
@@ -728,16 +821,40 @@ def test_benchmark_log_per_image_metrics_decoupled_from_image_strips(tmp_path: P
     monkeypatch.setattr(experiment, "add_image", add_image)
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
-    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb = BenchmarkImageLogger(
+        dataset_names=["Set5"], log_every_n_val_runs=99, log_per_image_metrics=True
+    )
+    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    cb.setup(trainer, pl_module=None, stage="fit")
+    pl_module = _make_real_pl_module()
+    cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
+    assert cb._on_image_log_interval() is False  # confirms should_log_images will be False
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer.val_dataloaders = [_stub_dataloader(None), _stub_dataloader(ds)]
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
     tb_logger.finalize("success")
 
     add_image.assert_not_called()  # images still throttled
     scalar_tags = [c.args[0] for c in add_scalar.call_args_list]
-    assert scalar_tags == ["per_image/Set5/psnr/RGB/img_0", "per_image/Set5/ssim/RGB/img_0"]
+    assert scalar_tags == [
+        "per_image/Set5/psnr/RGB/Set5_000",
+        "per_image/Set5/ssim/RGB/Set5_000",
+        "per_image/Set5/ssim/Y/Set5_000",
+    ]
 
 
-def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path, monkeypatch):
+def test_benchmark_collect_batch_image_strip_first_panel_is_bicubic_at_hr_size(
+    tmp_path: Path, monkeypatch
+):
     """The first triptych panel must be the bicubic-upsampled LR at HR size,
     not the original LR or a zero-padded LR. Locks the Bicubic|SR|HR layout."""
     import lightning.pytorch.loggers as pl_loggers
@@ -752,58 +869,81 @@ def test_benchmark_image_strip_first_panel_is_bicubic_at_hr_size(tmp_path: Path,
 
     monkeypatch.setattr(torchvision.utils, "make_grid", spy_make_grid)
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
-    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
-    pl_module = MagicMock()
-    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    lr = torch.rand(3, 4, 4)
-    sr = torch.rand(3, 16, 16)
-    hr = torch.rand(3, 16, 16)
-    cb._buffer["Set5"] = [("img_0", lr, sr, hr, {"RGB": 30.0}, {"RGB": 0.9})]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
-    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    cb.setup(trainer, pl_module=None, stage="fit")
+
+    pl_module = _make_real_pl_module()
+    # Fix predict_rgb's output so the SR/HR panel content is known exactly,
+    # independent of the (untrained) model's actual forward pass.
+    sr_fixed = torch.rand(1, 3, 16, 16)
+    hr_cropped_fixed = torch.rand(1, 3, 16, 16)
+    monkeypatch.setattr(
+        pl_module, "predict_rgb", MagicMock(return_value=(sr_fixed, hr_cropped_fixed))
+    )
+    cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer.val_dataloaders = [_stub_dataloader(None), _stub_dataloader(ds)]
+    lr_batch = torch.rand(1, 3, 4, 4)
+    hr_batch = torch.rand(1, 3, 16, 16)
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=(lr_batch, hr_batch),
+        batch_idx=0,
+        dataloader_idx=1,
+    )
     tb_logger.finalize("success")
 
     assert len(captured) == 1
     panels = captured[0]
     assert len(panels) == 3
-    expected_bicubic = BenchmarkImageLogger._bicubic_to(lr, hr.shape[-2:])
+    expected_bicubic = BenchmarkImageLogger._bicubic_to(lr_batch[0], hr_batch[0].shape[-2:])
     torch.testing.assert_close(panels[0], expected_bicubic)
-    # SR is already HR-sized so _pad_to_match is a no-op; HR is untouched.
-    torch.testing.assert_close(panels[1], sr)
-    torch.testing.assert_close(panels[2], hr)
+    # SR is already HR-sized so _pad_to_match is a no-op; HR panel is the
+    # original (uncropped) batch HR, not predict_rgb's cropped hr_cropped.
+    torch.testing.assert_close(panels[1], sr_fixed[0])
+    torch.testing.assert_close(panels[2], hr_batch[0])
 
 
-def test_benchmark_image_strips_upsample_lr_to_hr_size(tmp_path: Path, monkeypatch):
+def test_benchmark_collect_batch_image_strip_upsamples_lr_to_hr_size(tmp_path: Path, monkeypatch):
     """For an upscaling model (SRResNet) LR (4x4) is smaller than SR/HR (16x16);
     the strip must bicubic-upsample LR to HR size, so add_image is called once
-    with a panel taller than the LR (not crash make_grid on a size mismatch, and
-    not log at LR size). The old test only asserted it didn't raise."""
+    with a panel taller than the LR (not crash make_grid on a size mismatch)."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
-    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
-    pl_module = MagicMock()
-    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    # LR 4x4, SR and HR 16x16 (x4 model).
-    cb._buffer["Set5"] = [
-        (
-            "img_0",
-            torch.rand(3, 4, 4),
-            torch.rand(3, 16, 16),
-            torch.rand(3, 16, 16),
-            {"RGB": 30.0},
-            {"RGB": 0.9},
-        ),
-    ]
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     experiment = tb_logger.experiment
     add_image = MagicMock(wraps=experiment.add_image)
     monkeypatch.setattr(experiment, "add_image", add_image)
 
-    trainer = SimpleNamespace(global_step=42, loggers=[tb_logger])
-    cb.on_validation_epoch_end(trainer=trainer, pl_module=pl_module)  # must not raise
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    cb.setup(trainer, pl_module=None, stage="fit")
+
+    pl_module = _make_real_pl_module()
+    sr_fixed = torch.rand(1, 3, 16, 16)
+    hr_cropped_fixed = torch.rand(1, 3, 16, 16)
+    monkeypatch.setattr(
+        pl_module, "predict_rgb", MagicMock(return_value=(sr_fixed, hr_cropped_fixed))
+    )
+    cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer.val_dataloaders = [_stub_dataloader(None), _stub_dataloader(ds)]
+    lr_batch = torch.rand(1, 3, 4, 4)  # LR 4x4, SR/HR (mocked) 16x16 -- x4 model
+    hr_batch = torch.rand(1, 3, 16, 16)
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=(lr_batch, hr_batch),
+        batch_idx=0,
+        dataloader_idx=1,
+    )  # must not raise
     tb_logger.finalize("success")
 
     add_image.assert_called_once()
@@ -842,11 +982,8 @@ def test_benchmark_test_epoch_end_logs_means():
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
     pl_module = MagicMock()
     cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    cb._buffer["Set5"] = [
-        ("img_0", None, None, None, {"RGB": 28.0}, {"RGB": 0.7}),
-    ]
-    trainer = SimpleNamespace(global_step=0, loggers=[])
-    cb.on_test_epoch_end(trainer=trainer, pl_module=pl_module)
+    cb._buffer["Set5"] = [BenchmarkSample("img_0", {"RGB": 28.0}, {"RGB": 0.7})]
+    cb.on_test_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
     assert "psnr/Set5/RGB" in log_keys
     assert "ssim/Set5/RGB" in log_keys
@@ -929,16 +1066,17 @@ def test_benchmark_collect_batch_crops_per_eval_config():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
-    _, _, _, _, psnr_dict, ssim_dict = cb._buffer["Set5"][0]
-    assert "RGB" in psnr_dict
-    assert "RGB" in ssim_dict
-    assert isinstance(ssim_dict["RGB"], float)
+    sample = cb._buffer["Set5"][0]
+    assert "RGB" in sample.psnr
+    assert "RGB" in sample.ssim
+    assert isinstance(sample.ssim["RGB"], float)
 
 
 def test_benchmark_collect_batch_routes_through_processor():
     """SRCNN+YChannelProcessor: _collect_batch must extract Y from RGB LR before the
     model forward, then reconstruct SR back to RGB. Bypassing the processor would
-    feed 3-channel RGB to a 1-channel Conv2d and crash with a shape mismatch."""
+    feed 3-channel RGB to a 1-channel Conv2d and crash with a shape mismatch (proven
+    here by the forward completing and yielding the expected metric key sets)."""
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     # 1-channel SRCNN paired with YChannelProcessor — production SRCNN template shape.
@@ -966,15 +1104,11 @@ def test_benchmark_collect_batch_routes_through_processor():
         dataloader_idx=1,
     )
     assert len(cb._buffer["Set5"]) == 1
-    _, lr_cached, sr_cached, hr_cached, psnr_dict, ssim_dict = cb._buffer["Set5"][0]
-    # All cached tensors are full RGB (reconstruct stitched SR-Y with bicubic Cb/Cr).
-    assert lr_cached.shape == (3, 16, 16)
-    assert sr_cached.shape == (3, 16, 16)
-    assert hr_cached.shape == (3, 16, 16)
-    assert "RGB" in psnr_dict
-    assert "YCbCr" in psnr_dict
-    assert "RGB" in ssim_dict and "Y" in ssim_dict  # eval_config.ssim_channels default
-    assert isinstance(ssim_dict["RGB"], float)
+    sample = cb._buffer["Set5"][0]
+    assert "RGB" in sample.psnr
+    assert "YCbCr" in sample.psnr
+    assert "RGB" in sample.ssim and "Y" in sample.ssim  # eval_config.ssim_channels default
+    assert isinstance(sample.ssim["RGB"], float)
 
 
 def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_false():
@@ -1008,8 +1142,8 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_fals
         batch_idx=0,
         dataloader_idx=1,
     )
-    _, _, _, _, psnr_dict, _ = cb._buffer["Set5"][0]
-    assert set(psnr_dict.keys()) == set(pl_module.eval_config.psnr_keys) == {"RGB", "YCbCr"}
+    sample = cb._buffer["Set5"][0]
+    assert set(sample.psnr.keys()) == set(pl_module.eval_config.psnr_keys) == {"RGB", "YCbCr"}
 
 
 def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true():
@@ -1038,8 +1172,8 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true
         batch_idx=0,
         dataloader_idx=1,
     )
-    _, _, _, _, psnr_dict, _ = cb._buffer["Set5"][0]
-    assert set(psnr_dict.keys()) == set(pl_module.eval_config.psnr_keys) == {"R", "G", "B", "RGB"}
+    sample = cb._buffer["Set5"][0]
+    assert set(sample.psnr.keys()) == set(pl_module.eval_config.psnr_keys) == {"R", "G", "B", "RGB"}
 
 
 # ---------------------------------------------------------------------------
@@ -1048,15 +1182,10 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true
 
 
 def test_benchmark_collect_batch_routes_through_predict_rgb():
-    """_collect_batch must call the public pl_module.predict_rgb, and the
-    buffered SR/HR must equal its output — proving no re-implemented, divergent
-    forward path remains in the callback."""
-    from unittest.mock import MagicMock
-
+    """_collect_batch must call the public pl_module.predict_rgb -- proving no
+    re-implemented, divergent forward path remains in the callback."""
     pl_module = _make_real_pl_module()  # SRCNN + RGBProcessor, crop_border=0
     batch = (torch.rand(2, 3, 16, 16), torch.rand(2, 3, 16, 16))
-    with torch.no_grad():
-        ref_sr, ref_hr = pl_module.predict_rgb(*batch)
 
     spy = MagicMock(wraps=pl_module.predict_rgb)
     pl_module.predict_rgb = spy
@@ -1081,10 +1210,7 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
     call_args, _ = spy.call_args
     torch.testing.assert_close(call_args[0], batch[0])
     torch.testing.assert_close(call_args[1], batch[1])
-    # Buffered SR/HR (uncropped, crop_border=0) match the public forward output.
-    _, _, sr0, hr0, _, _ = cb._buffer["Set5"][0]
-    torch.testing.assert_close(sr0, ref_sr[0].cpu())
-    torch.testing.assert_close(hr0, ref_hr[0].cpu())
+    assert len(cb._buffer["Set5"]) == 2
 
 
 def test_prediction_writer_creates_output_dir(tmp_path: Path):
