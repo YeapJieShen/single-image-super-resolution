@@ -472,17 +472,26 @@ class SRLightning(lightning.LightningModule):
         """Run the wrapped SR model on ``x`` and return its raw output.
 
         Pure inference path — no colorspace conversion, no metrics, no
-        cropping. Used by ``trainer.predict`` and direct ``module(x)``
-        calls. The training / validation paths go through :meth:`_step`,
-        which adds the colorspace pipeline.
+        cropping. Used by TensorBoard graph logging (tracing
+        ``example_input_array``) and direct ``module(x)`` calls — NOT the
+        ``trainer.predict`` path, which :meth:`predict_step` overrides,
+        calling :meth:`_forward_lr` (extract → model → reconstruct)
+        instead. Training and validation likewise bypass this method,
+        going through :meth:`_step`, which adds the same colorspace
+        pipeline.
 
         Args:
-            x: LR input tensor of shape ``(B, C, H, W)``.
+            x: Input tensor of shape ``(B, C, H, W)``, already in the
+                model's own IO colorspace (e.g. Y for SRCNN, RGB for
+                SRResNet).
 
         Returns:
-            SR tensor as produced by the wrapped model. Shape depends on
-            the architecture (same as ``x`` for SRCNN; ``(B, C, H*scale,
-            W*scale)`` for SRResNet).
+            SR tensor as produced by the wrapped model. SRResNet upscales
+            spatially to ``(B, C, H*scale, W*scale)``; SRCNN preserves
+            H/W only when ``padding='same'`` — the default ``'valid'``
+            (or an explicit int) shrinks each dim by
+            ``kernel_size - 1 - 2*padding`` per conv layer instead (see
+            :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
         """
         return self.model(x)
 
@@ -836,8 +845,11 @@ class SRLightning(lightning.LightningModule):
 
         Returns:
             SR RGB tensor, ``float32`` in ``[0, 1]``, shape
-            ``(B, 3, H', W')`` — same size as the input for SRCNN,
-            ``H'=H*scale``/``W'=W*scale`` for SRResNet.
+            ``(B, 3, H', W')`` — ``H'=H*scale``/``W'=W*scale`` for
+            SRResNet; for SRCNN, same size as the input only when
+            ``padding='same'``, since the default ``'valid'`` (or an
+            explicit int) shrinks H/W per conv layer (see
+            :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
         """
         _, sr_rgb = self._forward_lr(batch)
         return sr_rgb

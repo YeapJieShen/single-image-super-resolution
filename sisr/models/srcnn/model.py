@@ -137,7 +137,10 @@ class SRCNN(SRModel):
             clamp_minmax: Min/max values for clamping the output.
 
         Returns:
-            Output tensor, same shape as *x*.
+            Output tensor. Same shape as *x* only when ``padding='same'``;
+            with the default ``'valid'`` (or an explicit int), each conv
+            layer shrinks H/W by ``kernel_size - 1 - 2*padding``, e.g. -12 px
+            total for the shipped ``(9, 1, 5)`` kernels at padding 0.
         """
         x = self.feat(x)
         x = self.mapping(x)
