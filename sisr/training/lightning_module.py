@@ -9,6 +9,8 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 
 import dataclasses
+import pickle
+import random
 from typing import Any
 
 import lightning
@@ -141,6 +143,254 @@ class SRLightning(lightning.LightningModule):
 
         if self.training_config.example_input_shape is not None:
             self.example_input_array = torch.zeros(1, *self.training_config.example_input_shape)
+
+    def setup(self, stage: str | None = None) -> None:
+        """Probe one real sample against ``model.input_contract`` / ``example_input_shape``.
+
+        Lightning always runs ``DataModule.setup(stage)`` before
+        ``LightningModule.setup(stage)`` (``Trainer._call_setup_hook``), so
+        ``trainer.datamodule``'s stage-relevant datasets are already
+        instantiated by the time this runs. Cross-wiring a model and dataset
+        with mismatched ``input_contract`` (e.g. SRResNet's ``native_lr``
+        trained on SRCNN's ``pre_upsampled`` dataset, or the mirror) produces
+        no error downstream otherwise — :meth:`_forward_sr`'s ``center_crop``
+        silently zero-pads instead, and every loss/PSNR number that follows is
+        meaningless. Checking one real sample here is cheap and fires before
+        the first step.
+
+        Picks the first dataset ``trainer.datamodule`` has actually
+        instantiated for this stage — train, else the primary val set, else
+        the first test set — so the check runs for ``fit`` as well as a
+        bare ``validate``/``test`` invocation, not only ``fit``.
+        ``PredictDataset`` (bare LR tensor, no HR) is never in that list, so
+        a predict-only datamodule has nothing to check. Separately, when a
+        train dataset exists and ``training_config.example_input_shape`` is
+        set, its spatial dims are checked against the real train LR patch —
+        train-only, since validation/test images vary in size.
+
+        No-op when no ``Trainer`` is attached (direct/unit-test construction),
+        when ``trainer.datamodule`` has nothing instantiated yet for this
+        stage, or when ``trainer.datamodule`` is some foreign object that
+        doesn't expose the ``train_dataset``/``val_dataset``/``test_datasets``
+        read accessors (degrades to a skip rather than ``AttributeError``).
+
+        The probe's own dataset reads are isolated from the global
+        :mod:`random` state: :class:`~sisr.datasets.srresnet.TrainDataset`
+        draws its random crop via ``random.randint`` in ``__getitem__``, so an
+        unguarded probe call would consume draws from the same sequence the
+        real training loop uses, shifting every seeded crop after it — a real
+        change in a paper-reproduction repo, not just a probe side effect.
+        ``random.getstate()``/``setstate()`` around the whole probe make it
+        transparent regardless of what a dataset's ``__getitem__`` consumes.
+
+        Every sample is read via :meth:`_sample_zero`, never
+        ``dataset[0]`` directly on the live object: the LMDB-backed train
+        datasets (SRCNN/SRResNet) open their ``lmdb.Environment`` lazily on
+        first read and cache it on the instance, and an open
+        ``lmdb.Environment`` cannot be pickled. Reading straight from
+        ``trainer.datamodule``'s own (still-pristine) dataset would poison
+        that exact instance for any later ``num_workers > 0`` ``DataLoader``
+        — ``spawn`` (the only start method on Windows) must pickle the
+        dataset to hand it to worker processes, and would then crash inside
+        torch/Lightning long after this probe ran. :meth:`_sample_zero`
+        samples a disposable pickle clone instead, leaving the original
+        untouched, so this probe can never be what first poisons it.
+
+        Args:
+            stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
+                ``'test'``, or ``'predict'``.
+
+        Raises:
+            ValueError: If the sampled LR/HR pair disagrees with
+                ``self.model.input_contract``, or (train stage only) if
+                ``training_config.example_input_shape``'s spatial dims don't
+                match the real train LR sample.
+        """
+        dm = self._trainer.datamodule if self._trainer is not None else None
+        if dm is None:
+            return
+
+        rng_state = random.getstate()
+        try:
+            probe = self._first_probe_dataset(dm)
+            train_lr = None
+            if probe is not None:
+                source, dataset = probe
+                lr, hr = self._sample_zero(dataset)
+                self._check_input_contract(lr, hr, source, dataset)
+                if source == "train_dataset":
+                    train_lr = lr  # reuse below instead of re-sampling index 0
+
+            train_ds = getattr(dm, "train_dataset", None)
+            if train_ds is not None and self.training_config.example_input_shape is not None:
+                if train_lr is None:
+                    train_lr, _ = self._sample_zero(train_ds)
+                self._check_example_input_shape(train_lr, train_ds)
+        finally:
+            random.setstate(rng_state)
+
+    @staticmethod
+    def _sample_zero(dataset: Any) -> Any:
+        """Reads index 0 from a disposable pickle clone of ``dataset`` when possible.
+
+        LMDB-backed datasets (:class:`~sisr.datasets.srcnn.TrainDataset` /
+        :class:`~sisr.datasets.srresnet.TrainDataset`) open their
+        ``lmdb.Environment`` lazily on first read and cache it on the
+        instance (``LMDBCache._env``); an open ``lmdb.Environment`` is not
+        picklable. Sampling the live dataset object handed to the
+        ``DataLoader`` would open its environment and poison that exact,
+        still-pristine instance for any later ``num_workers > 0`` loader,
+        since ``spawn`` (unconditional on Windows) must pickle every dataset
+        to send it to worker processes. Cloning first means the
+        eventually-opened environment belongs to the throwaway clone, which
+        is discarded right after — the original ``dataset`` is never touched
+        by this call and stays exactly as picklable as it was before.
+
+        Falls back to reading ``dataset`` directly if it can't currently be
+        pickled — e.g. a prior ``num_workers=0`` in-process read (real
+        training, not this probe) already opened its environment for real,
+        which is harmless on its own (a ``num_workers=0`` loader never
+        pickles anything) but would make *this* call's own pickle attempt
+        fail on a re-probe (e.g. ``fit`` followed by ``test`` in the same
+        process). Reading the live object further at that point adds no new
+        harm: something other than this probe already made it what it is.
+        This method only *prevents* being the first thing to open a
+        pristine dataset's environment — it does not guarantee a dataset
+        stays picklable forever regardless of what real training does to it
+        afterwards.
+
+        Args:
+            dataset: The live dataset instance to sample from. Mutated only
+                in the fallback case, and only exactly as a real
+                ``num_workers=0`` read already would.
+
+        Returns:
+            ``dataset[0]`` (via the clone when picklable) — an ``(lr, hr)``
+            tuple for every paired dataset, or a bare LR tensor for
+            :class:`~sisr.datasets.predict.PredictDataset`.
+        """
+        try:
+            clone = pickle.loads(pickle.dumps(dataset))
+        except (pickle.PickleError, TypeError, AttributeError):
+            return dataset[0]
+        return clone[0]
+
+    @staticmethod
+    def _first_probe_dataset(dm: Any) -> tuple[str, Any] | None:
+        """First stage-instantiated (source_name, dataset) pair, or ``None``.
+
+        Priority train > primary val > first test set — whichever loader
+        would actually run first for the live stage. ``predict_dataset``
+        is never considered: its samples have no HR to pair-check against.
+
+        Args:
+            dm: The attached datamodule. Normally an ``SRDataModule``, but
+                accessed via ``getattr(..., None)`` throughout so a foreign
+                datamodule missing these read accessors degrades to "nothing
+                to probe" instead of raising ``AttributeError``.
+
+        Returns:
+            ``(source_name, dataset)`` for the first available dataset, or
+            ``None`` if train/val/test are all unset (e.g. a predict-only run,
+            or a datamodule that isn't an ``SRDataModule`` at all).
+        """
+        train_ds = getattr(dm, "train_dataset", None)
+        if train_ds is not None:
+            return "train_dataset", train_ds
+        val_ds = getattr(dm, "val_dataset", None)
+        if val_ds is not None:
+            return "val_dataset", val_ds
+        test_datasets = getattr(dm, "test_datasets", None) or {}
+        if test_datasets:
+            name, dataset = next(iter(test_datasets.items()))
+            return f"test_datasets.{name}", dataset
+        return None
+
+    def _check_input_contract(
+        self, lr: torch.Tensor, hr: torch.Tensor, source: str, dataset: Any
+    ) -> None:
+        """Raise if the sampled ``(lr, hr)`` pair disagrees with ``model.input_contract``.
+
+        Args:
+            lr: LR sample tensor, shape ``(C, H, W)``.
+            hr: HR sample tensor, shape ``(C, H, W)``.
+            source: Config path of the dataset the sample came from (e.g.
+                ``'train_dataset'``), for the error message.
+            dataset: The dataset instance, for its class name in the error.
+
+        Raises:
+            ValueError: See :meth:`setup`, or if ``model.input_contract`` is
+                neither ``'pre_upsampled'`` nor ``'native_lr'``.
+        """
+        contract = self.model.input_contract
+        lr_hw, hr_hw = tuple(lr.shape[-2:]), tuple(hr.shape[-2:])
+        ds_name = type(dataset).__name__
+
+        if contract == "pre_upsampled":
+            if lr_hw == hr_hw:
+                return
+            raise ValueError(
+                f"{type(self.model).__name__}.input_contract='pre_upsampled' requires "
+                f"LR and HR to share spatial size, but data.{source} ({ds_name}) served "
+                f"lr {lr_hw} != hr {hr_hw}. A native-LR dataset (e.g. "
+                f"sisr.datasets.srresnet) paired with a pre-upsampled model silently "
+                f"zero-pads in SRLightning._forward_sr instead of raising — point "
+                f"data.{source} at a pre-upsampled dataset (e.g. sisr.datasets.srcnn), "
+                f"or switch to a native_lr model."
+            )
+
+        if contract != "native_lr":
+            raise ValueError(
+                f"{type(self.model).__name__}.input_contract={contract!r} is not a "
+                f"recognised contract — expected 'pre_upsampled' or 'native_lr'. Fix "
+                f"{type(self.model).__name__}.input_contract."
+            )
+
+        # Fall back to the model's own 'scale' hparam when training_config.scale
+        # is unset (e.g. a bare SRTrainingConfig()) — only skip the check when
+        # BOTH are absent. Falling back keeps this from silently no-opping for
+        # exactly the native_lr construction several existing tests use.
+        scale = self.training_config.scale
+        if scale is None:
+            scale = self.model.hparams.get("scale")
+        if scale is None:
+            return
+        expected_hw = (lr_hw[0] * scale, lr_hw[1] * scale)
+        if hr_hw == expected_hw:
+            return
+        raise ValueError(
+            f"{type(self.model).__name__}.input_contract='native_lr' requires "
+            f"hr.shape[-2:] == lr.shape[-2:] * training_config.scale ({scale}), but "
+            f"data.{source} ({ds_name}) served lr {lr_hw}, hr {hr_hw} (expected "
+            f"{expected_hw}). A pre-upsampled dataset (e.g. sisr.datasets.srcnn) "
+            f"paired with a native-LR model silently zero-pads in "
+            f"SRLightning._forward_sr instead of raising — point data.{source} at a "
+            f"native-LR dataset (e.g. sisr.datasets.srresnet), or fix "
+            f"training_config.scale."
+        )
+
+    def _check_example_input_shape(self, lr: torch.Tensor, train_dataset: Any) -> None:
+        """Raise if ``example_input_shape``'s H/W disagrees with the real train LR patch.
+
+        Args:
+            lr: Real LR sample from the train dataset, shape ``(C, H, W)``.
+            train_dataset: The train dataset instance, for its class name in
+                the error.
+
+        Raises:
+            ValueError: If ``example_input_shape[1:] != lr.shape[-2:]``.
+        """
+        expected_hw = tuple(self.training_config.example_input_shape[1:])
+        actual_hw = tuple(lr.shape[-2:])
+        if expected_hw == actual_hw:
+            return
+        raise ValueError(
+            f"training_config.example_input_shape has spatial dims {expected_hw}, but "
+            f"data.train_dataset ({type(train_dataset).__name__}) serves LR patches of "
+            f"{actual_hw}. example_input_shape drives the compile warm-up shape and "
+            f"FLOPs reporting — set it to match the true train patch (hr_crop_size // "
+            f"scale for SRResNet-style datasets, subimg_size for SRCNN-style)."
+        )
 
     @staticmethod
     def _flatten_hparams(hparams: dict[str, Any], sep: str = "/") -> dict:
@@ -295,8 +545,29 @@ class SRLightning(lightning.LightningModule):
             model output in the model IO colorspace, the reconstructed SR RGB
             clamped to ``[0, 1]``, and HR center-cropped to the SR spatial
             size.
+
+        Raises:
+            ValueError: If ``hr_img`` is spatially smaller than ``sr_rgb`` in
+                either dimension — ``center_crop`` would zero-pad instead of
+                cropping, silently corrupting the loss/metrics that follow.
+                :meth:`setup` catches the common cause (a model/dataset
+                ``input_contract`` mismatch) earlier and louder; this is the
+                last-resort guard for callers that bypass it (e.g. direct
+                ``_forward_sr``/``_step`` calls in tests, or a datamodule with
+                no ``trainer`` attached).
         """
         sr_model_out, sr_rgb = self._forward_lr(lr_img)
+        hr_hw, sr_hw = hr_img.shape[-2:], sr_rgb.shape[-2:]
+        if hr_hw[0] < sr_hw[0] or hr_hw[1] < sr_hw[1]:
+            raise ValueError(
+                f"hr_img spatial size {tuple(hr_hw)} is smaller than sr_rgb "
+                f"{tuple(sr_hw)} — torchvision.transforms.functional.center_crop "
+                f"would zero-pad instead of cropping, silently corrupting the loss "
+                f"and every metric downstream. This usually means the dataset's "
+                f"LR/HR pairing doesn't match {type(self.model).__name__}."
+                f"input_contract={self.model.input_contract!r} — check "
+                f"data.train_dataset/val_dataset/test_datasets in your config."
+            )
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_rgb.shape[-2:])
         return sr_model_out, sr_rgb, hr_cropped
 

@@ -211,6 +211,74 @@ def test_optimizer_lr_override_in_process():
     assert cli.config.optimizer.init_args.lr == pytest.approx(0.005)
 
 
+def test_dataset_cli_override_fails_loudly_instead_of_silently_ignored():
+    """--data.train_dataset.init_args.crops_per_image=8 must not silently no-op.
+
+    jsonargparse treats `data.train_dataset` as an opaque `dict[str, Any]`, so a
+    dotted CLI override targeting a nested `init_args` key lands as a stray
+    sibling key next to `class_path`/`init_args` instead — `instantiate_class`
+    never sees it, and the constructed dataset silently keeps
+    crops_per_image=1. SRDataModule must reject the malformed spec loudly at
+    construction (during `instantiate_classes()`, i.e. CLI resolution here)
+    instead of quietly building the wrong dataset.
+    """
+    with pytest.raises(ValueError, match="crops_per_image"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            "--data.train_dataset.init_args.crops_per_image=8",
+        )
+
+
+def test_dataset_whole_dict_cli_override_colliding_with_config_fails_loudly():
+    """--data.train_dataset='{...}' colliding with the template's own
+    train_dataset (--config already sets one) must not crash with
+    jsonargparse's raw, unactionable AttributeError ('dict' object has no
+    attribute 'init_args'). SRLightningCLI.parse_arguments must convert that
+    into an actionable SystemExit instead.
+    """
+    with pytest.raises(SystemExit, match="already has a class_path"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            '--data.train_dataset={"class_path": "sisr.datasets.srresnet.TrainDataset", '
+            '"init_args": {"img_dir": "data/DIV2K_train_HR", "scale": 4, "hr_crop_size": 96, '
+            '"crops_per_image": 8, "use_tqdm": true, "cache_dir": ".lmdb_cache/DIV2K_train_HR"}}',
+        )
+
+
+def test_dataset_whole_init_args_cli_override_colliding_with_config_fails_loudly():
+    """--data.train_dataset.init_args='{...}' hits the same jsonargparse crash
+    (a whole-dict CLI value merged against an already-dict prev_val the
+    template set) and must also fail loudly with an actionable SystemExit."""
+    with pytest.raises(SystemExit, match="already has a class_path"):
+        _resolve(
+            "--config",
+            str(SRRESNET_TEMPLATE),
+            '--data.train_dataset.init_args={"crops_per_image": 8}',
+        )
+
+
+def test_dataset_whole_dict_override_without_prior_config_value_still_works():
+    """Regression: --data.predict_dataset='{...}' must keep working when
+    neither shipped template sets predict_dataset — there is no prior dict
+    value to collide with, so jsonargparse's merge never hits the
+    prev_val.init_args crash. This is the documented `sisr predict` workflow
+    (SRDataModule.predict_dataloader's own error message tells users to set
+    data.predict_dataset exactly this way). A blanket pre-scan that rejects
+    every whole-dict dataset override regardless of a prior value would break
+    this working case — the guard must only intercept an actual collision.
+    """
+    cli = _resolve(
+        "--config",
+        str(SRRESNET_TEMPLATE),
+        '--data.predict_dataset={"class_path": "sisr.datasets.predict.PredictDataset", '
+        '"init_args": {"img_dir": "data/Set5_HR"}}',
+    )
+    assert cli.config.data.predict_dataset["class_path"] == "sisr.datasets.predict.PredictDataset"
+    assert cli.config.data.predict_dataset["init_args"]["img_dir"] == "data/Set5_HR"
+
+
 def test_matmul_precision_accepted_in_process():
     """--matmul_precision=medium overrides the template's shipped 'high' default."""
     cli = _resolve("--config", str(TEMPLATE), "--matmul_precision=medium")

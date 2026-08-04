@@ -13,6 +13,48 @@ import lightning
 from lightning.pytorch.cli import instantiate_class
 from torch.utils.data import DataLoader, Dataset
 
+_SPEC_KEYS = frozenset({"class_path", "init_args"})
+
+
+def _validate_spec(field_name: str, spec: dict[str, Any]) -> None:
+    """Raise if ``spec`` isn't a well-formed ``{class_path, init_args}`` mapping.
+
+    Every dataset field on this module is typed ``dict[str, Any]`` (not the
+    real dataset class) so :meth:`SRDataModule.setup` can instantiate it
+    lazily, only for the stages that need it (see the module docstring). That
+    laziness has a cost: jsonargparse treats the field as an opaque dict, so a
+    dotted CLI override like ``--data.train_dataset.init_args.crops_per_image=8``
+    cannot reach the nested ``init_args`` key — it lands as a stray sibling
+    key next to ``class_path``/``init_args`` instead, invisible to
+    :func:`~lightning.pytorch.cli.instantiate_class`, which silently keeps
+    building the dataset with its old, unoverridden value. This check turns
+    that silent no-op into an immediate, actionable error.
+
+    Args:
+        field_name: Dotted config path for the error message, e.g.
+            ``'data.train_dataset'`` or ``'data.test_datasets.Set14'``.
+        spec: The value to validate.
+
+    Raises:
+        ValueError: If ``spec`` isn't a dict, has no ``class_path``, has any
+            key besides ``class_path``/``init_args``, or has a non-dict
+            ``init_args``.
+    """
+    if not isinstance(spec, dict) or "class_path" not in spec:
+        raise ValueError(f"{field_name} must be a {{class_path, init_args}} mapping; got {spec!r}.")
+    extra = sorted(set(spec) - _SPEC_KEYS)
+    if extra:
+        raise ValueError(
+            f"{field_name} has unexpected key(s) {extra} alongside class_path/init_args: "
+            f"{spec!r}. This usually means a CLI override like "
+            f"--{field_name}.init_args.<key>=<value> landed as a sibling key instead of "
+            f"inside init_args — jsonargparse cannot merge a dotted override into this "
+            f"dict[str, Any]-typed field. Edit the YAML directly instead."
+        )
+    init_args = spec.get("init_args", {})
+    if not isinstance(init_args, dict):
+        raise ValueError(f"{field_name}.init_args must be a mapping; got {init_args!r}.")
+
 
 class SRDataModule(lightning.LightningDataModule):
     """Generic LightningDataModule for single-image super-resolution.
@@ -75,6 +117,13 @@ class SRDataModule(lightning.LightningDataModule):
         predict_dataloader_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
+        _validate_spec("data.train_dataset", train_dataset)
+        _validate_spec("data.val_dataset", val_dataset)
+        for name, spec in (test_datasets or {}).items():
+            _validate_spec(f"data.test_datasets.{name}", spec)
+        if predict_dataset is not None:
+            _validate_spec("data.predict_dataset", predict_dataset)
+
         self._train_spec = train_dataset
         self._val_spec = val_dataset
         self._test_specs = test_datasets or {}
@@ -98,6 +147,26 @@ class SRDataModule(lightning.LightningDataModule):
             ``test_datasets``. Empty when no test sets are configured.
         """
         return list(self._test_specs.keys())
+
+    @property
+    def train_dataset(self) -> Dataset | None:
+        """The instantiated train dataset, or ``None`` before ``setup('fit')`` runs.
+
+        Public read accessor — lets consumers outside this module (e.g.
+        :meth:`~sisr.training.SRLightning.setup`'s input-contract probe)
+        inspect the real dataset without reaching into private state.
+        """
+        return self._train_ds
+
+    @property
+    def val_dataset(self) -> Dataset | None:
+        """The instantiated primary val dataset, or ``None`` before setup runs."""
+        return self._val_ds
+
+    @property
+    def test_datasets(self) -> dict[str, Dataset]:
+        """Instantiated test datasets by name — empty before setup runs (or if none configured)."""
+        return dict(self._test_ds)
 
     def setup(self, stage: str | None = None) -> None:
         """Instantiate datasets lazily based on the trainer stage.

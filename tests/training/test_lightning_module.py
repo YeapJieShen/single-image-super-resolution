@@ -1,4 +1,5 @@
 import functools
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,7 +19,7 @@ from sisr.processors import (
     YCbCrProcessor,
     YChannelProcessor,
 )
-from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
+from sisr.training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -1116,3 +1117,451 @@ def test_on_save_checkpoint_round_trips_weights_only(tmp_path, srcnn_rgb_lit: SR
 
     assert loaded["sisr_meta"] == checkpoint["sisr_meta"]
     assert set(loaded["state_dict"].keys()) == set(srcnn_rgb_lit.state_dict().keys())
+
+
+# ---------------------------------------------------------------------------
+# setup() — input_contract probe + example_input_shape probe (real datasets)
+# ---------------------------------------------------------------------------
+
+
+def _srcnn_datamodule(tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2) -> SRDataModule:
+    """SRDataModule over srcnn's pre-upsampled datasets (lr.shape == hr.shape)."""
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "subimg_size": 33,
+            "stride": 14,
+            "scale": scale,
+            "use_tqdm": False,
+            "cache_dir": str(tmp_path / ".lmdb_cache_srcnn"),
+            "build_num_workers": 1,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
+    }
+    return SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
+        val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+
+
+def _srresnet_datamodule(
+    tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2, hr_crop_size: int = 24
+) -> SRDataModule:
+    """SRDataModule over srresnet's native-LR datasets (hr.shape == lr.shape * scale)."""
+    train_spec = {
+        "class_path": "sisr.datasets.srresnet.TrainDataset",
+        "init_args": {
+            "img_dir": str(tiny_rgb_image_dir),
+            "scale": scale,
+            "hr_crop_size": hr_crop_size,
+            "use_tqdm": False,
+            "cache_dir": str(tmp_path / ".lmdb_cache_srresnet"),
+            "build_num_workers": 1,
+        },
+    }
+    val_spec = {
+        "class_path": "sisr.datasets.srresnet.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
+    }
+    return SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=val_spec,
+        train_dataloader_kwargs={"batch_size": 2, "num_workers": 0},
+        val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+    )
+
+
+def _srresnet_lit(scale: int = 2) -> SRLightning:
+    model = SRResNet(scale=scale, num_residual_blocks=1)
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRResNetTrainingConfig(scale=scale),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def _srcnn_lit() -> SRLightning:
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_setup_raises_on_native_lr_model_with_pre_upsampled_dataset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: SRResNet (native_lr) wired to SRCNN's pre-upsampled dataset
+    must raise at setup(), not silently corrupt training via _forward_sr's
+    center_crop zero-padding."""
+    lit = _srresnet_lit(scale=2)
+    dm = _srcnn_datamodule(tiny_rgb_image_dir, tmp_path, scale=2)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="input_contract"):
+        lit.setup(stage="fit")
+
+
+def test_setup_raises_on_pre_upsampled_model_with_native_lr_dataset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Mirror of the above: SRCNN (pre_upsampled) wired to SRResNet's
+    native-LR dataset must also raise."""
+    lit = _srcnn_lit()
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="input_contract"):
+        lit.setup(stage="fit")
+
+
+def test_setup_accepts_correctly_paired_native_lr_model_and_dataset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_accepts_correctly_paired_pre_upsampled_model_and_dataset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    lit = _srcnn_lit()
+    dm = _srcnn_datamodule(tiny_rgb_image_dir, tmp_path, scale=2)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_checks_validate_stage_too_not_just_fit(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """Regression: the probe must cover validate/test, not only fit — a
+    validate-only run (no train dataset instantiated at all) must still
+    catch a cross-wired model/dataset pairing via the primary val dataset."""
+    lit = _srresnet_lit(scale=2)
+    dm = _srcnn_datamodule(tiny_rgb_image_dir, tmp_path, scale=2)
+    dm.setup(stage="validate")
+    assert dm.train_dataset is None, "validate stage must not build the train dataset"
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="input_contract"):
+        lit.setup(stage="validate")
+
+
+def test_setup_skips_pair_check_for_predict_only_datamodule(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """PredictDataset has no HR pair; a predict-only datamodule (train/val/test
+    all unbuilt) must not raise even for a would-be-mismatched model."""
+    lit = _srresnet_lit(scale=2)
+    train_spec = {
+        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+    }
+    dm = SRDataModule(
+        train_dataset=train_spec,
+        val_dataset=train_spec,
+        predict_dataset={
+            "class_path": "sisr.datasets.predict.PredictDataset",
+            "init_args": {"img_dir": str(tiny_rgb_image_dir)},
+        },
+    )
+    dm.setup(stage="predict")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="predict")  # must not raise
+
+
+def test_setup_noop_when_trainer_unattached(srcnn_rgb_lit: SRLightning):
+    """Guard: pure-module unit-test construction (no Trainer attached) must
+    not raise — self._trainer is None."""
+    srcnn_rgb_lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_noop_when_datamodule_unset():
+    """Guard: a Trainer attached but with no datamodule must not raise."""
+    lit = _srcnn_lit()
+    lit.trainer = SimpleNamespace(datamodule=None)
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_raises_on_wrong_example_input_shape(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """Regression: training_config.example_input_shape spatial dims must
+    match the real train LR patch — currently unvalidated (validate_against
+    only checks the channel count)."""
+    lit = _srresnet_lit(scale=2)
+    lit.training_config.example_input_shape = (3, 999, 999)  # wrong H/W
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="example_input_shape"):
+        lit.setup(stage="fit")
+
+
+def test_setup_accepts_correct_example_input_shape(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """hr_crop_size=24 // scale=2 == 12: the real train LR patch side."""
+    lit = _srresnet_lit(scale=2)
+    lit.training_config.example_input_shape = (3, 12, 12)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_skips_example_input_shape_check_when_unset(tiny_rgb_image_dir: Path, tmp_path: Path):
+    lit = _srresnet_lit(scale=2)
+    assert lit.training_config.example_input_shape is None
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_skips_example_input_shape_check_when_no_train_dataset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """example_input_shape is train-only — a validate run (no train dataset
+    instantiated) must not check it, even when it's set and would mismatch
+    the (variable-size) val images."""
+    lit = _srresnet_lit(scale=2)
+    lit.training_config.example_input_shape = (3, 999, 999)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="validate")
+    assert dm.train_dataset is None
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="validate")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _forward_sr belt-and-braces: HR must not be smaller than SR (center_crop
+# would otherwise zero-pad silently instead of cropping)
+# ---------------------------------------------------------------------------
+
+
+def test_forward_sr_raises_when_hr_smaller_than_sr():
+    """A native-LR model whose SR output outgrows the HR it's paired with
+    must raise before torchvision.center_crop would zero-pad it."""
+    lit = _srresnet_lit(scale=4)
+    lr = torch.rand(1, 3, 8, 8)  # sr_rgb will be 32x32
+    hr = torch.rand(1, 3, 16, 16)  # smaller than sr_rgb in both dims
+
+    with pytest.raises(ValueError, match="center_crop|zero-pad|smaller"):
+        lit._forward_sr(lr, hr)
+
+
+def test_forward_sr_accepts_hr_larger_than_sr_srcnn_direction(srcnn_rgb_lit: SRLightning):
+    """SRCNN's legitimate direction — HR strictly larger than SR (valid-padding
+    shrinkage) — must keep working unchanged."""
+    lr = torch.rand(1, 3, 33, 33)
+    hr = torch.rand(1, 3, 33, 33)
+    _, sr_rgb, hr_cropped = srcnn_rgb_lit._forward_sr(lr, hr)
+    assert sr_rgb.shape == (1, 3, 21, 21)
+    assert hr_cropped.shape == (1, 3, 21, 21)
+
+
+def test_forward_sr_accepts_hr_exactly_equal_to_sr():
+    """HR exactly equal to SR (the common same-padding / native-LR-correct
+    case) must not raise — only strictly smaller HR is a problem."""
+    lit = _srresnet_lit(scale=2)
+    lr = torch.rand(1, 3, 8, 8)
+    hr = torch.rand(1, 3, 16, 16)  # exactly lr * scale
+    _, sr_rgb, hr_cropped = lit._forward_sr(lr, hr)
+    assert sr_rgb.shape == hr_cropped.shape == (1, 3, 16, 16)
+
+
+# ---------------------------------------------------------------------------
+# Code-review follow-ups: model.hparams['scale'] fallback, RNG isolation,
+# foreign-datamodule degradation, unrecognised input_contract
+# ---------------------------------------------------------------------------
+
+
+def test_setup_raises_using_model_scale_fallback_when_training_config_scale_unset(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: a native_lr model paired with a bare SRTrainingConfig()
+    (scale=None — the construction several existing tests use) must still
+    catch a scale-mismatched dataset via the model's own 'scale' hparam,
+    instead of silently skipping the check just because
+    training_config.scale wasn't set. Model declares scale=2; the dataset
+    actually downsamples by 4."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),  # scale=None
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=4, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="input_contract"):
+        lit.setup(stage="fit")
+
+
+def test_setup_still_skips_when_both_training_config_and_model_scale_absent(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """When neither training_config.scale nor model.hparams['scale'] is
+    set, there is genuinely nothing to check against — must not raise."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    del model.hparams["scale"]  # simulate a native_lr model with no scale hparam at all
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),  # scale=None
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=4, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_setup_samples_train_dataset_index_zero_only_once(
+    tiny_rgb_image_dir: Path, tmp_path: Path, monkeypatch
+):
+    """When train_dataset is both the input_contract probe target and the
+    example_input_shape check's source, __getitem__(0) must be read once
+    and reused — not sampled twice.
+
+    Wraps with a plain function (not a MagicMock instance) assigned onto the
+    class: CPython's implicit special-method dispatch for `dataset[0]` only
+    passes `self` through when the found `__getitem__` is a real function
+    object — a Mock instance stored there is invoked without `self`, which
+    would silently miscount (or crash) here.
+    """
+    lit = _srresnet_lit(scale=2)
+    lit.training_config.example_input_shape = (3, 12, 12)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    ds_cls = type(dm.train_dataset)
+    original_getitem = ds_cls.__getitem__
+    calls: list[int] = []
+
+    def counting_getitem(self, idx):
+        calls.append(idx)
+        return original_getitem(self, idx)
+
+    monkeypatch.setattr(ds_cls, "__getitem__", counting_getitem)
+
+    lit.setup(stage="fit")
+
+    assert calls == [0]
+
+
+def test_setup_does_not_perturb_global_random_state(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """Regression: TrainDataset.__getitem__'s random.randint crop draws must
+    not leak into the global random sequence the real training loop consumes
+    — this is a paper-reproduction repo, so an unguarded probe call would
+    silently shift every seeded crop drawn after setup()."""
+    import random
+
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    random.seed(12345)
+    state_before = random.getstate()
+    lit.setup(stage="fit")
+    assert random.getstate() == state_before
+
+
+def test_setup_skips_when_datamodule_lacks_dataset_accessors():
+    """A foreign datamodule (not an SRDataModule — exposes none of
+    train_dataset/val_dataset/test_datasets) must degrade to 'nothing to
+    probe' instead of raising AttributeError."""
+    lit = _srcnn_lit()
+    lit.trainer = SimpleNamespace(datamodule=SimpleNamespace())
+
+    lit.setup(stage="fit")  # must not raise
+
+
+def test_check_input_contract_raises_on_unrecognised_contract(srcnn_rgb_lit: SRLightning):
+    """A future/typo'd input_contract value must raise clearly, instead of
+    silently falling into the native_lr branch (the old bare if/else)."""
+    srcnn_rgb_lit.model.input_contract = "not_a_real_contract"
+    lr = torch.rand(1, 3, 8, 8)
+    hr = torch.rand(1, 3, 8, 8)
+
+    with pytest.raises(ValueError, match="not_a_real_contract"):
+        srcnn_rgb_lit._check_input_contract(lr, hr, "train_dataset", object())
+
+
+# ---------------------------------------------------------------------------
+# Real-world regression: the probe must not poison the live LMDB-backed train
+# dataset for pickling (num_workers > 0 DataLoaders spawn, unconditionally on
+# Windows, and must pickle the dataset to send it to worker processes).
+# ---------------------------------------------------------------------------
+
+
+def test_setup_leaves_train_dataset_picklable_for_spawned_workers(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: setup()'s probe must not call __getitem__(0) on the live
+    dm.train_dataset. Doing so lazily opens LMDBCache._env (an
+    lmdb.Environment, not picklable) on that exact instance — the same
+    instance a num_workers > 0 DataLoader later hands to spawned worker
+    processes via pickle. Before the fix, pickle.dumps(dm.train_dataset)
+    raised TypeError: cannot pickle 'Environment' object after setup() ran.
+    """
+    import pickle
+
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+
+    pickle.dumps(dm.train_dataset)  # must not raise
+
+
+def test_setup_gracefully_reprobes_dataset_already_opened_by_real_training(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: a second setup() call (e.g. `test` after `fit` in the same
+    process — trainer.fit() then trainer.test() on the same datamodule, a
+    real scenario test_integration.py already exercises) against a
+    train_dataset whose LMDB env real training already opened for real
+    (harmless on its own for num_workers=0 -- nothing pickles a num_workers=0
+    dataset) must not raise. The picklability guarantee _sample_zero
+    provides is "this probe never opens a still-pristine dataset first", not
+    "the dataset stays picklable forever no matter what real training does
+    to it afterwards" -- a naive implementation that hard-raises whenever
+    the pickle round trip fails would reject this legitimate re-probe."""
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+    dm.train_dataset[0]  # simulate a real in-process (num_workers=0) training read
+
+    lit.setup(stage="fit")  # must not raise on the re-probe
