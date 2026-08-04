@@ -455,16 +455,18 @@ def test_cuda_graph_recaptures_on_a_second_fit():
     module = _graph_srcnn_module()
     loader = DataLoader(_FixedPairs(16), batch_size=4, num_workers=0, shuffle=False)
 
-    graph_ids = []
+    # The objects, not their id()s: on_fit_start drops the first CUDAGraphStep, so
+    # comparing id()s of a freed object could pass or fail on allocator reuse.
+    graphs = []
     for _ in range(2):
         trace = _LossTrace()
         _graph_trainer([trace], max_steps=8).fit(module, train_dataloaders=loader)
         assert module._cuda_graph is not None and module._cuda_graph.captured
-        graph_ids.append(id(module._cuda_graph))
+        graphs.append(module._cuda_graph)
         assert all(loss == loss for loss in trace.losses)  # no NaN from freed memory
         assert len(trace.losses) == 8
 
-    assert graph_ids[0] != graph_ids[1], "second fit reused the first fit's dead graph"
+    assert graphs[0] is not graphs[1], "second fit reused the first fit's dead graph"
 
 
 @requires_cuda

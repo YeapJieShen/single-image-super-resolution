@@ -1,5 +1,6 @@
 import functools
 import inspect
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -1725,6 +1726,7 @@ def test_cuda_graph_zero_grad_on_fallback_step_keeps_grad_buffers_allocated(rgb_
     optimizer = lit.configure_optimizers()
     lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
     lit._graphed_step = False
+    lit._cuda_graph = SimpleNamespace(captured=True)  # a live graph owns the buffers
 
     lit.optimizer_zero_grad(0, 0, optimizer)
 
@@ -1871,3 +1873,147 @@ def test_cuda_graph_step_never_calls_optimizer_step():
     source = inspect.getsource(CUDAGraphStep)
     assert "_optimizer.zero_grad" in source
     assert "_optimizer.step" not in source
+
+
+def _capture_step(module, **kwargs) -> CUDAGraphStep:
+    return CUDAGraphStep(
+        lambda b: module._step(b, need_sr_rgb=False)[0], module, MagicMock(), **kwargs
+    )
+
+
+def test_cuda_graph_fallback_warns_once_after_repeated_shape_rejections():
+    """A run whose captured shape never recurs pays eager cost with the flag on and
+    reports no speedup, with nothing in the log to say why."""
+    step = _capture_step(_graph_lit(), fallback_warn_after=3)
+    step._static_batch = (torch.zeros(4, 3, 8, 8), torch.zeros(4, 3, 8, 8))
+    rejected = (torch.zeros(2, 3, 8, 8), torch.zeros(2, 3, 8, 8))
+
+    with pytest.warns(UserWarning, match="all fell back to an eager step"):
+        for _ in range(3):
+            step._note_fallback(rejected)
+
+    with warnings.catch_warnings():  # the warning is once per run, not per batch
+        warnings.simplefilter("error")
+        for _ in range(5):
+            step._note_fallback(rejected)
+
+
+def test_cuda_graph_fallback_counter_resets_on_a_matching_batch():
+    """Only a *run* of rejections means the graph is buying nothing — one per epoch
+    is the normal partial last batch and must never warn."""
+    step = _capture_step(_graph_lit(), fallback_warn_after=3)
+    step._static_batch = (torch.zeros(4, 3, 8, 8),)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for _ in range(10):
+            step._note_fallback((torch.zeros(2, 3, 8, 8),))
+            step._consecutive_fallbacks = 0  # what a successful replay does
+    assert step._fallback_warned is False
+
+
+def test_cuda_graph_capture_failure_falls_back_instead_of_raising():
+    """A capture-time failure must never kill the run: a crashed 10M-step run at
+    minute one is far worse than an eager one that says so. Retries are exhausted,
+    one warning names the error, and run() reports 'no graph' from then on."""
+    step = _capture_step(_graph_lit(), retry_delays=(0.0, 0.0))
+    calls = []
+
+    def boom(_batch):
+        calls.append(1)
+        raise RuntimeError("CUDA error: operation failed due to a previous error")
+
+    step.capture = boom
+    step._drain_error_state = lambda: None
+    batch = (torch.zeros(2, 3, 8, 8), torch.zeros(2, 3, 8, 8))
+
+    with pytest.warns(UserWarning, match="capture failed 3 times and is now disabled"):
+        assert step.run(batch) is None
+
+    assert len(calls) == 3, "should retry, then give up"
+    assert step.disabled and not step.captured
+
+    with warnings.catch_warnings():  # subsequent steps are silent and stop retrying
+        warnings.simplefilter("error")
+        for _ in range(5):
+            assert step.run(batch) is None
+    assert len(calls) == 3
+
+
+def test_cuda_graph_zero_grad_uses_set_to_none_once_capture_is_disabled(rgb_lr_hr_batch):
+    """With no live graph there are no static .grad buffers to protect, so the
+    fallback path should not keep paying for the graph-safe zeroing."""
+    lit = _graph_lit()
+    optimizer = lit.configure_optimizers()
+    lit._cuda_graph = _capture_step(lit)
+    lit._cuda_graph._disabled = True
+    lit._graphed_step = False
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+
+    lit.optimizer_zero_grad(0, 0, optimizer)
+
+    assert lit.model.recon.weight.grad is None
+
+
+def test_cuda_graph_capture_retry_succeeds_without_warning():
+    """Capture is invalidated by concurrent implicit device syncs, which cluster in
+    a startup burst, so a retry a moment later is expected to work — and must not
+    leave the run permanently degraded or emit a scary warning."""
+    step = _capture_step(_graph_lit(), retry_delays=(0.0, 0.0))
+    attempts = []
+
+    def flaky(batch):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("CUDA error: operation failed due to a previous error")
+        step._graph = MagicMock()
+        step._static_loss = torch.zeros(())
+        step._static_batch = tuple(t.detach().clone() for t in batch)
+
+    step.capture = flaky
+    step._drain_error_state = lambda: None
+    batch = (torch.zeros(2, 3, 8, 8), torch.zeros(2, 3, 8, 8))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        loss = step.run(batch)
+
+    assert len(attempts) == 2
+    assert loss is not None
+    assert step.captured and not step.disabled
+
+
+@pytest.mark.parametrize(
+    ("workers", "pin", "unsafe"),
+    [(0, True, False), (0, False, False), (16, False, False), (16, True, True), (1, True, True)],
+)
+def test_cuda_graph_flags_worker_pin_memory_combination_as_unsafe(workers, pin, unsafe):
+    """num_workers>0 with pin_memory=True runs a pinning thread whose cudaHostAlloc
+    can invalidate an open capture; measured 1 crash in 6 fits at w16+pin vs 0 in 8
+    without pin. num_workers=0 pins inline, so it is safe and both templates use it."""
+    lit = _graph_lit()
+    lit.trainer = SimpleNamespace(
+        train_dataloader=SimpleNamespace(num_workers=workers, pin_memory=pin)
+    )
+    reason = lit._unsafe_capture_reason()
+    assert (reason is not None) == unsafe
+    if unsafe:
+        assert "pin_memory" in reason and "eagerly" in reason
+
+
+def test_unsafe_capture_reason_tolerates_a_missing_dataloader():
+    """on_fit_start runs before Lightning builds the train loader, so the probe has
+    to degrade to 'no reason to worry' rather than raise."""
+    lit = _graph_lit()
+    lit.trainer = SimpleNamespace()
+    assert lit._unsafe_capture_reason() is None
+
+
+def test_cuda_graph_disable_warns_once_and_sticks():
+    step = _capture_step(_graph_lit())
+    with pytest.warns(UserWarning, match="capture disabled: because"):
+        step.disable("because")
+    assert step.disabled
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert step.run((torch.zeros(1),)) is None

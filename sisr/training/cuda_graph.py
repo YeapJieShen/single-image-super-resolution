@@ -15,10 +15,17 @@ no-opping every LR scheduler: ``torch.optim.SGD`` has no ``capturable``
 parameter to opt out of that. 0.07 ms is not worth a silent-corruption class.
 """
 
+import time
 from collections.abc import Callable, Sequence
 
 import torch
 from lightning.pytorch.utilities import rank_zero_info, rank_zero_warn
+
+#: Pauses before each capture retry. Capture is invalidated by concurrent implicit
+#: device syncs (a DataLoader's pin-memory thread growing its host-block cache is
+#: the one that bit us), and that activity is a startup burst, so backing off
+#: past it is what makes the retry worth having. Only ever paid on a failure.
+_RETRY_DELAYS: tuple[float, ...] = (0.1, 0.5, 2.0)
 
 
 class CUDAGraphStep:
@@ -53,6 +60,9 @@ class CUDAGraphStep:
         fallback_warn_after: Warn once after this many consecutive shape
             rejections. A run that never matches would otherwise silently pay
             eager cost with the flag on and look like a 0% speedup.
+        retry_delays: Pauses before each capture retry; defaults to
+            :data:`_RETRY_DELAYS`. One more attempt is made than there are
+            entries, and only then is graphing disabled.
     """
 
     def __init__(
@@ -62,22 +72,45 @@ class CUDAGraphStep:
         optimizer: torch.optim.Optimizer,
         warmup_iters: int = 3,
         fallback_warn_after: int = 10,
+        retry_delays: tuple[float, ...] = _RETRY_DELAYS,
     ):
         self._loss_fn = loss_fn
         self._module = module
         self._optimizer = optimizer
         self._warmup_iters = warmup_iters
         self._fallback_warn_after = fallback_warn_after
+        self._retry_delays = retry_delays
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static_batch: tuple[torch.Tensor, ...] | None = None
         self._static_loss: torch.Tensor | None = None
         self._consecutive_fallbacks = 0
         self._fallback_warned = False
+        self._disabled = False
 
     @property
     def captured(self) -> bool:
         """Whether a graph has been captured yet."""
         return self._graph is not None
+
+    @property
+    def disabled(self) -> bool:
+        """Whether this run has given up on capture, by failure or up front."""
+        return self._disabled
+
+    def disable(self, reason: str) -> None:
+        """Give up on capture before ever attempting it, explaining why once.
+
+        For conditions known in advance to make capture unsafe rather than
+        merely slow — see
+        :meth:`~sisr.training.lightning_module.SRLightning._unsafe_capture_reason`.
+        Degrading to eager beats both crashing and refusing to start.
+
+        Args:
+            reason: Operator-facing explanation, including how to get the
+                speedup back.
+        """
+        self._disabled = True
+        rank_zero_warn(f"CUDA graph capture disabled: {reason}")
 
     def _buffer_snapshot(self) -> dict[str, torch.Tensor]:
         """Clone every module buffer, so the warm-up's forwards can be undone.
@@ -111,33 +144,96 @@ class CUDAGraphStep:
         self._static_batch = tuple(t.detach().clone() for t in batch)
         buffers = self._buffer_snapshot()
 
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(self._warmup_iters):
-                self._optimizer.zero_grad(set_to_none=False)
-                # Not kept: a live reference to a previous iteration's autograd
-                # graph keeps its AccumulateGrad nodes alive and breaks capture.
-                self._loss_fn(self._static_batch).backward()
-        torch.cuda.current_stream().wait_stream(stream)
+        try:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(self._warmup_iters):
+                    self._optimizer.zero_grad(set_to_none=False)
+                    # Not kept: a live reference to a previous iteration's autograd
+                    # graph keeps its AccumulateGrad nodes alive and breaks capture.
+                    self._loss_fn(self._static_batch).backward()
+            torch.cuda.current_stream().wait_stream(stream)
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            self._optimizer.zero_grad(set_to_none=False)
-            loss = self._loss_fn(self._static_batch)
-            loss.backward()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self._optimizer.zero_grad(set_to_none=False)
+                loss = self._loss_fn(self._static_batch)
+                loss.backward()
+        finally:
+            # Even a failed attempt ran the warm-up's forwards, so the buffers
+            # have moved either way.
+            self._restore_buffers(buffers)
         # Detached: keeping the graph-built loss itself alive keeps its whole
         # autograd graph alive, including AccumulateGrad nodes bound to the
         # capture stream. A later eager backward on the same parameters then
         # hits them on the default stream and warns about the mismatch. Replay
         # needs only the value buffer, which detach shares.
         self._graph, self._static_loss = graph, loss.detach()
-        self._restore_buffers(buffers)
         rank_zero_info(
             f"CUDA graph captured for batch shapes "
             f"{[tuple(t.shape) for t in self._static_batch]} — the training step now "
             f"replays as one graph launch."
         )
+
+    @staticmethod
+    def _drain_error_state() -> None:
+        """Spend the one CUDA call that re-raises an invalidated capture's error.
+
+        Measured, and reproducible for every injector tried: after
+        ``cudaErrorStreamCaptureInvalidated`` exactly one further CUDA operation
+        raises, and the context is fully usable from the next one on. Burning
+        that operation here is what makes the eager fallback survivable — the
+        caller's next real kernel launch would otherwise inherit the failure and
+        kill the run anyway, which is the whole thing this class is trying to
+        avoid. Three tries, so the accounting cannot be off by one.
+        """
+        for _ in range(3):
+            try:
+                torch.zeros(1, device="cuda").add_(1)
+                return
+            except Exception:  # noqa: S110 - draining a known-sticky error is the point
+                continue
+
+    def _try_capture(self, batch: Sequence[torch.Tensor]) -> bool:
+        """Capture, retrying a few times, and give up permanently rather than raise.
+
+        Capture is not reliably available: it is invalidated by any implicit
+        device synchronization anywhere in the process while it is open, and a
+        ``DataLoader`` with ``num_workers>0`` and ``pin_memory=True`` runs a
+        pin-memory thread that calls ``cudaHostAlloc`` — which synchronizes —
+        every time its host-block cache needs a new size. That cache is coldest
+        during the first batches, exactly when capture would otherwise happen,
+        which is why failures cluster on the first attempt and are
+        non-deterministic. Retrying after a pause is therefore likely to
+        succeed, since the window closes as the cache warms.
+
+        A crashed 10M-step run is far worse than a slower one, so exhausting the
+        retries disables graphing for the rest of the run instead of propagating.
+
+        Args:
+            batch: The batch to capture against.
+
+        Returns:
+            Whether a graph is now available.
+        """
+        for delay in (*self._retry_delays, None):
+            try:
+                self.capture(batch)
+                return True
+            except Exception as exc:
+                self._drain_error_state()
+                if delay is None:
+                    self._disabled = True
+                    rank_zero_warn(
+                        f"CUDA graph capture failed "
+                        f"{len(self._retry_delays) + 1} times and is now disabled for the "
+                        f"rest of this run; training continues eagerly, with identical "
+                        f"results and no speedup. Last error: {type(exc).__name__}: {exc}"
+                    )
+                    return False
+                time.sleep(delay)
+        return False
 
     def run(self, batch: Sequence[torch.Tensor]) -> torch.Tensor | None:
         """Replay the captured step for ``batch``, capturing on the first call.
@@ -150,11 +246,14 @@ class CUDAGraphStep:
             A clone of the loss — the static buffer itself is overwritten in
             place by the next replay, so anything retaining it (Lightning's
             progress-bar metric cache) would silently report a later step's
-            value. ``None`` if ``batch`` doesn't match the captured shapes,
-            meaning the caller must run an eager step instead.
+            value. ``None`` if ``batch`` doesn't match the captured shapes or if
+            capture is unavailable, meaning the caller must run an eager step
+            instead. Never raises on a capture failure — see :meth:`_try_capture`.
         """
-        if self._graph is None:
-            self.capture(batch)
+        if self._disabled:
+            return None
+        if self._graph is None and not self._try_capture(batch):
+            return None
         if not self._matches(batch):
             self._note_fallback(batch)
             return None

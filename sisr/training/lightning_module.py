@@ -710,9 +710,52 @@ class SRLightning(lightning.LightningModule):
                 self,
                 getattr(optimizer, "optimizer", optimizer),
             )
+            reason = self._unsafe_capture_reason()
+            if reason is not None:
+                self._cuda_graph.disable(reason)
         loss = self._cuda_graph.run(batch)
         self._graphed_step = loss is not None
         return loss
+
+    def _unsafe_capture_reason(self) -> str | None:
+        """Why capture must not even be attempted on this run, or ``None``.
+
+        A ``DataLoader`` with ``num_workers > 0`` **and** ``pin_memory=True``
+        runs its pinning in a separate thread of *this* process, and that thread
+        calls ``cudaHostAlloc`` whenever its host-block cache needs a new size.
+        ``cudaHostAlloc`` implicitly synchronizes the device, which invalidates
+        any capture open at that moment. Measured on this project: 1 crash in 6
+        fits at ``num_workers=16, pin_memory=True`` versus 0 in 8 with
+        ``pin_memory=False``, all else equal.
+
+        Retrying does not make this safe. The invalidation leaves a sticky CUDA
+        error that the *next* CUDA call in the process consumes, and when that
+        call belongs to the pin-memory thread the ``DataLoader`` dies
+        ("Caught AcceleratorError in pin memory thread") no matter what this
+        process's main thread does about its own capture. Prevention is the only
+        option, so this is a warn-and-run-eager condition rather than one of
+        :meth:`_check_cuda_graph_prerequisites`'s hard refusals: those catch
+        silent mistraining, this only costs speed.
+
+        ``num_workers=0`` — what both shipped templates use — pins inline on the
+        main thread, so there is no second thread to race and ``pin_memory``
+        stays worth having there.
+
+        Returns:
+            An operator-facing reason, or ``None`` when capture is safe to try.
+        """
+        loader = getattr(self.trainer, "train_dataloader", None)
+        workers = getattr(loader, "num_workers", 0) or 0
+        if workers > 0 and getattr(loader, "pin_memory", False):
+            return (
+                f"the train DataLoader combines num_workers={workers} with "
+                f"pin_memory=True, whose pin-memory thread calls cudaHostAlloc and can "
+                f"invalidate a capture mid-flight, killing the run. Training continues "
+                f"eagerly. Set pin_memory: false to graph at this worker count, or "
+                f"num_workers: 0 (both shipped templates do) to keep pin_memory — it "
+                f"pins on the main thread there, with nothing to race."
+            )
+        return None
 
     def backward(self, loss: torch.Tensor, *args: Any, **kwargs: Any) -> None:
         """Backpropagate ``loss``, unless the captured graph already did.
@@ -741,9 +784,11 @@ class SRLightning(lightning.LightningModule):
         so on a graphed step this must be a no-op: the replay has already
         zeroed, filled and finished with the gradients, and zeroing again here
         would hand the optimizer nothing but zeros. On an eager fallback step it
-        must run — but with ``set_to_none=False``, because the captured graph
-        writes into those exact ``.grad`` tensors and freeing them invalidates
-        every later replay.
+        must run — but with ``set_to_none=False`` whenever a graph is live,
+        because the graph writes into those exact ``.grad`` tensors and freeing
+        them invalidates every later replay. With no live graph (capture
+        disabled after repeated failures) the ordinary ``set_to_none=True`` is
+        both safe and marginally faster.
 
         Args:
             epoch: Current epoch index.
@@ -753,7 +798,8 @@ class SRLightning(lightning.LightningModule):
         if not self.training_config.cuda_graph:
             super().optimizer_zero_grad(epoch, batch_idx, optimizer)
         elif not self._graphed_step:
-            optimizer.zero_grad(set_to_none=False)
+            live = self._cuda_graph is not None and self._cuda_graph.captured
+            optimizer.zero_grad(set_to_none=not live)
 
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
