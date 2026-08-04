@@ -36,6 +36,11 @@ model:
       # than mistrain quietly -- re-checked every epoch, since a callback can
       # switch accumulation on after fit starts), and the win shrinks on
       # architectures whose GPU time is real compute rather than launch overhead.
+      # Also incompatible with num_workers > 0 AND pin_memory together: the
+      # pin-memory thread's cudaHostAlloc can invalidate a capture mid-flight and
+      # kill the run (measured 1 crash in 6 fits at w16+pin, 0 in 8 without pin),
+      # so that combination logs a warning and trains eagerly instead. The
+      # num_workers: 0 below pins on the main thread, so it captures fine.
       # cuda_graph: true
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
