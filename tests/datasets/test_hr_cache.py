@@ -209,3 +209,51 @@ def test_shared_cache_pixel_equivalence_across_architectures(varied_size_rgb_ima
         for left in range(0, w - 16 + 1)
     )
     assert found, "SRResNet crop read through the shared cache does not match its source image"
+
+
+def test_existing_cache_reopens_without_rebuild_via_either_architecture(
+    varied_size_rgb_image_dir: Path,
+):
+    """Regression guard for the HR-cache-wiring extraction itself: a cache
+    already on disk must reopen without a rebuild afterwards, via EITHER
+    architecture's TrainDataset -- independent of the cross-arch tests above,
+    which exercise the sharing design rather than a persisted directory
+    surviving the internal restructuring of how each dataset wires it up.
+    """
+    from sisr.datasets.srcnn import TrainDataset as SRCNNTrainDataset
+    from sisr.datasets.srresnet import TrainDataset as SRResNetTrainDataset
+
+    cache_dir = varied_size_rgb_image_dir / ".lmdb_cache"
+
+    built = SRResNetTrainDataset(
+        img_dir=varied_size_rgb_image_dir,
+        scale=2,
+        hr_crop_size=16,
+        cache_dir=cache_dir,
+        build_num_workers=1,
+    )
+    built._cache.get_env().close()  # release before reopening the same path
+
+    with (
+        patch("sisr.datasets.srresnet._process_hr_image") as mock_srresnet,
+        patch("sisr.datasets.srcnn._process_hr_image") as mock_srcnn,
+    ):
+        reopened_srresnet = SRResNetTrainDataset(
+            img_dir=varied_size_rgb_image_dir,
+            scale=2,
+            hr_crop_size=16,
+            cache_dir=cache_dir,
+            build_num_workers=1,
+        )
+        reopened_srresnet._cache.get_env().close()
+        reopened_srcnn = SRCNNTrainDataset(
+            img_dir=varied_size_rgb_image_dir,
+            subimg_size=16,
+            stride=8,
+            scale=2,
+            cache_dir=cache_dir,
+            build_num_workers=1,
+        )
+    mock_srresnet.assert_not_called()
+    mock_srcnn.assert_not_called()
+    assert built._cache.path == reopened_srresnet._cache.path == reopened_srcnn._cache.path
