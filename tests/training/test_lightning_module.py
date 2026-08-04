@@ -1512,3 +1512,56 @@ def test_check_input_contract_raises_on_unrecognised_contract(srcnn_rgb_lit: SRL
 
     with pytest.raises(ValueError, match="not_a_real_contract"):
         srcnn_rgb_lit._check_input_contract(lr, hr, "train_dataset", object())
+
+
+# ---------------------------------------------------------------------------
+# Real-world regression: the probe must not poison the live LMDB-backed train
+# dataset for pickling (num_workers > 0 DataLoaders spawn, unconditionally on
+# Windows, and must pickle the dataset to send it to worker processes).
+# ---------------------------------------------------------------------------
+
+
+def test_setup_leaves_train_dataset_picklable_for_spawned_workers(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: setup()'s probe must not call __getitem__(0) on the live
+    dm.train_dataset. Doing so lazily opens LMDBCache._env (an
+    lmdb.Environment, not picklable) on that exact instance — the same
+    instance a num_workers > 0 DataLoader later hands to spawned worker
+    processes via pickle. Before the fix, pickle.dumps(dm.train_dataset)
+    raised TypeError: cannot pickle 'Environment' object after setup() ran.
+    """
+    import pickle
+
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+
+    pickle.dumps(dm.train_dataset)  # must not raise
+
+
+def test_setup_gracefully_reprobes_dataset_already_opened_by_real_training(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Regression: a second setup() call (e.g. `test` after `fit` in the same
+    process — trainer.fit() then trainer.test() on the same datamodule, a
+    real scenario test_integration.py already exercises) against a
+    train_dataset whose LMDB env real training already opened for real
+    (harmless on its own for num_workers=0 -- nothing pickles a num_workers=0
+    dataset) must not raise. The picklability guarantee _sample_zero
+    provides is "this probe never opens a still-pristine dataset first", not
+    "the dataset stays picklable forever no matter what real training does
+    to it afterwards" -- a naive implementation that hard-raises whenever
+    the pickle round trip fails would reject this legitimate re-probe."""
+    lit = _srresnet_lit(scale=2)
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+    dm.train_dataset[0]  # simulate a real in-process (num_workers=0) training read
+
+    lit.setup(stage="fit")  # must not raise on the re-probe

@@ -9,6 +9,7 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 
 import dataclasses
+import pickle
 import random
 from typing import Any
 
@@ -182,6 +183,19 @@ class SRLightning(lightning.LightningModule):
         ``random.getstate()``/``setstate()`` around the whole probe make it
         transparent regardless of what a dataset's ``__getitem__`` consumes.
 
+        Every sample is read via :meth:`_sample_zero`, never
+        ``dataset[0]`` directly on the live object: the LMDB-backed train
+        datasets (SRCNN/SRResNet) open their ``lmdb.Environment`` lazily on
+        first read and cache it on the instance, and an open
+        ``lmdb.Environment`` cannot be pickled. Reading straight from
+        ``trainer.datamodule``'s own (still-pristine) dataset would poison
+        that exact instance for any later ``num_workers > 0`` ``DataLoader``
+        — ``spawn`` (the only start method on Windows) must pickle the
+        dataset to hand it to worker processes, and would then crash inside
+        torch/Lightning long after this probe ran. :meth:`_sample_zero`
+        samples a disposable pickle clone instead, leaving the original
+        untouched, so this probe can never be what first poisons it.
+
         Args:
             stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
                 ``'test'``, or ``'predict'``.
@@ -202,7 +216,7 @@ class SRLightning(lightning.LightningModule):
             train_lr = None
             if probe is not None:
                 source, dataset = probe
-                lr, hr = dataset[0]
+                lr, hr = self._sample_zero(dataset)
                 self._check_input_contract(lr, hr, source, dataset)
                 if source == "train_dataset":
                     train_lr = lr  # reuse below instead of re-sampling index 0
@@ -210,10 +224,56 @@ class SRLightning(lightning.LightningModule):
             train_ds = getattr(dm, "train_dataset", None)
             if train_ds is not None and self.training_config.example_input_shape is not None:
                 if train_lr is None:
-                    train_lr, _ = train_ds[0]
+                    train_lr, _ = self._sample_zero(train_ds)
                 self._check_example_input_shape(train_lr, train_ds)
         finally:
             random.setstate(rng_state)
+
+    @staticmethod
+    def _sample_zero(dataset: Any) -> Any:
+        """Reads index 0 from a disposable pickle clone of ``dataset`` when possible.
+
+        LMDB-backed datasets (:class:`~sisr.datasets.srcnn.TrainDataset` /
+        :class:`~sisr.datasets.srresnet.TrainDataset`) open their
+        ``lmdb.Environment`` lazily on first read and cache it on the
+        instance (``LMDBCache._env``); an open ``lmdb.Environment`` is not
+        picklable. Sampling the live dataset object handed to the
+        ``DataLoader`` would open its environment and poison that exact,
+        still-pristine instance for any later ``num_workers > 0`` loader,
+        since ``spawn`` (unconditional on Windows) must pickle every dataset
+        to send it to worker processes. Cloning first means the
+        eventually-opened environment belongs to the throwaway clone, which
+        is discarded right after — the original ``dataset`` is never touched
+        by this call and stays exactly as picklable as it was before.
+
+        Falls back to reading ``dataset`` directly if it can't currently be
+        pickled — e.g. a prior ``num_workers=0`` in-process read (real
+        training, not this probe) already opened its environment for real,
+        which is harmless on its own (a ``num_workers=0`` loader never
+        pickles anything) but would make *this* call's own pickle attempt
+        fail on a re-probe (e.g. ``fit`` followed by ``test`` in the same
+        process). Reading the live object further at that point adds no new
+        harm: something other than this probe already made it what it is.
+        This method only *prevents* being the first thing to open a
+        pristine dataset's environment — it does not guarantee a dataset
+        stays picklable forever regardless of what real training does to it
+        afterwards.
+
+        Args:
+            dataset: The live dataset instance to sample from. Mutated only
+                in the fallback case, and only exactly as a real
+                ``num_workers=0`` read already would.
+
+        Returns:
+            ``dataset[0]`` (via the clone when picklable) — an ``(lr, hr)``
+            tuple for every paired dataset, or a bare LR tensor for
+            :class:`~sisr.datasets.predict.PredictDataset`.
+        """
+        try:
+            clone = pickle.loads(pickle.dumps(dataset))
+        except (pickle.PickleError, TypeError, AttributeError):
+            return dataset[0]
+        return clone[0]
 
     @staticmethod
     def _first_probe_dataset(dm: Any) -> tuple[str, Any] | None:
