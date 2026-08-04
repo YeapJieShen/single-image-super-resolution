@@ -32,9 +32,10 @@ model:
       # this template's batch 64 / 33x33 geometry, losses bit-identical to eager --
       # SRCNN's step is launch-bound, so removing the launches is nearly all of it.
       # Off by default: it requires precision 32-true, one device, no gradient
-      # accumulation and no compile_backend (SRLightning.on_fit_start refuses the
-      # rest rather than mistrain quietly), and the win shrinks on architectures
-      # whose GPU time is real compute rather than launch overhead.
+      # accumulation and no compile_backend (SRLightning refuses the rest rather
+      # than mistrain quietly -- re-checked every epoch, since a callback can
+      # switch accumulation on after fit starts), and the win shrinks on
+      # architectures whose GPU time is real compute rather than launch overhead.
       # cuda_graph: true
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
