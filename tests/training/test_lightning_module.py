@@ -1639,3 +1639,142 @@ def test_setup_gracefully_reprobes_dataset_already_opened_by_real_training(
     dm.train_dataset[0]  # simulate a real in-process (num_workers=0) training read
 
     lit.setup(stage="fit")  # must not raise on the re-probe
+
+
+# ---------------------------------------------------------------------------
+# cuda_graph — full-step CUDA-graph capture of the training step
+# ---------------------------------------------------------------------------
+
+
+def _graph_lit(cuda_graph: bool = True) -> SRLightning:
+    """Small SRCNN wired for graphed training. The gating logic these tests
+    exercise is device-independent, so they run on CPU CI."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(cuda_graph=cuda_graph),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def _fake_trainer(**overrides) -> SimpleNamespace:
+    """Minimal trainer stand-in exposing what the prerequisite checks read."""
+    return SimpleNamespace(
+        **{"precision": "32-true", "world_size": 1, "accumulate_grad_batches": 1, **overrides}
+    )
+
+
+def test_cuda_graph_defaults_off_and_leaves_step_state_clean():
+    lit = _graph_lit(cuda_graph=False)
+    assert lit._cuda_graph is None
+    assert lit._graphed_step is False
+
+
+def test_cuda_graph_backward_runs_when_step_was_not_graphed(rgb_lr_hr_batch):
+    """The eager fallback path must still backpropagate. A per-run gate (skip
+    backward whenever a graph exists) leaves .grad holding whatever the last
+    replay produced, so the epoch's partial last batch contributes a duplicated
+    update instead of its own."""
+    lit = _graph_lit()
+    lit._graphed_step = False
+    loss, *_ = lit._step(rgb_lr_hr_batch, need_sr_rgb=False)
+
+    lit.backward(loss)
+
+    assert lit.model.recon.weight.grad is not None
+    assert lit.model.recon.weight.grad.abs().sum() > 0
+
+
+def test_cuda_graph_backward_skipped_when_step_was_graphed(rgb_lr_hr_batch):
+    """On a graphed step the replay already ran backward; running it again here
+    would double the gradients."""
+    lit = _graph_lit()
+    loss, *_ = lit._step(rgb_lr_hr_batch, need_sr_rgb=False)
+    lit._graphed_step = True
+
+    lit.backward(loss)
+
+    assert lit.model.recon.weight.grad is None
+
+
+def test_cuda_graph_zero_grad_is_noop_on_graphed_step(rgb_lr_hr_batch):
+    """Lightning's closure order is training_step -> zero_grad -> backward, so
+    zeroing here on a graphed step would hand the optimizer nothing but zeros —
+    training would silently stop converging."""
+    lit = _graph_lit()
+    optimizer = lit.configure_optimizers()
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+    before = lit.model.recon.weight.grad.clone()
+    lit._graphed_step = True
+
+    lit.optimizer_zero_grad(0, 0, optimizer)
+
+    assert torch.equal(lit.model.recon.weight.grad, before)
+
+
+def test_cuda_graph_zero_grad_on_fallback_step_keeps_grad_buffers_allocated(rgb_lr_hr_batch):
+    """set_to_none=True would free the exact .grad tensors the captured graph
+    writes into, invalidating every later replay — so the fallback path zeroes
+    in place instead."""
+    lit = _graph_lit()
+    optimizer = lit.configure_optimizers()
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+    lit._graphed_step = False
+
+    lit.optimizer_zero_grad(0, 0, optimizer)
+
+    grad = lit.model.recon.weight.grad
+    assert grad is not None
+    assert torch.count_nonzero(grad) == 0
+
+
+def test_zero_grad_unchanged_when_cuda_graph_off(rgb_lr_hr_batch):
+    """Flag off must leave Lightning's own set_to_none=True behaviour intact."""
+    lit = _graph_lit(cuda_graph=False)
+    optimizer = lit.configure_optimizers()
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+
+    lit.optimizer_zero_grad(0, 0, optimizer)
+
+    assert lit.model.recon.weight.grad is None
+
+
+def test_cuda_graph_refuses_mixed_precision():
+    """A GradScaler scales the loss in the precision plugin's pre_backward hook,
+    which a captured backward never runs — gradients would be silently unscaled."""
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer(precision="16-mixed")
+    with pytest.raises(RuntimeError, match="requires trainer.precision='32-true'"):
+        lit.on_fit_start()
+
+
+def test_cuda_graph_refuses_distributed_run():
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer(world_size=2)
+    with pytest.raises(RuntimeError, match="does not support distributed training"):
+        lit.on_fit_start()
+
+
+def test_cuda_graph_refuses_gradient_accumulation():
+    """Every replay zeroes the gradients, so nothing accumulates across
+    micro-batches."""
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer(accumulate_grad_batches=2)
+    with pytest.raises(RuntimeError, match="does not support gradient accumulation"):
+        lit.on_fit_start()
+
+
+def test_cuda_graph_refuses_non_cuda_device():
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer()
+    with pytest.raises(RuntimeError, match="requires a CUDA device"):
+        lit.on_fit_start()
+
+
+def test_cuda_graph_off_skips_prerequisite_checks():
+    """The refusals are scoped to the flag — an ordinary bf16 CPU run is untouched."""
+    lit = _graph_lit(cuda_graph=False)
+    lit.trainer = _fake_trainer(precision="bf16-mixed", world_size=4)
+    lit.on_fit_start()

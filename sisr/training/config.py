@@ -122,6 +122,24 @@ class SRTrainingConfig:
             captured. ``'inductor'`` fails outright there (no upstream
             Windows Triton wheel). Defaults to ``None`` so this mostly-
             unproven-on-this-project path never ships on by default.
+
+        cuda_graph: Capture the training step's
+            ``{zero_grad, forward, loss, backward}`` into a CUDA graph and
+            replay it per step, instead of relaunching every kernel
+            (:class:`~sisr.training.cuda_graph.CUDAGraphStep`).
+            ``optimizer.step()`` stays eager, so LR schedulers, gradient
+            clipping and ``global_step`` accounting are unaffected. Requires a
+            CUDA device, ``precision='32-true'``, a single process, and
+            ``accumulate_grad_batches=1``; ``SRLightning.on_fit_start`` refuses
+            the rest rather than silently mistraining. Mutually exclusive with
+            ``compile_backend`` (see :meth:`__post_init__`). Validation, test
+            and predict always stay eager — their image sizes vary, and graphs
+            need static shapes. Measured on one RTX 5060 Laptop (SRCNN, batch
+            64, 33x33 Y patches, 60 W cap): **2.81x steps/s**, 6.21 -> 2.21
+            ms/step, bit-identical losses. The win is proportional to how
+            launch-bound the architecture is, so it is far smaller for
+            SRResNet, whose GPU floor is real compute — hence opt-in, per
+            config, defaulting off.
     """
 
     layer_lrs: list[float] | None = None
@@ -131,6 +149,23 @@ class SRTrainingConfig:
     init_std: float = 0.01
     scale: int | None = None
     compile_backend: str | None = None
+    cuda_graph: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject field combinations that cannot both be honoured.
+
+        Raises:
+            ValueError: If ``cuda_graph`` and ``compile_backend`` are both set.
+        """
+        if self.cuda_graph and self.compile_backend is not None:
+            raise ValueError(
+                f"training_config.cuda_graph=True is incompatible with "
+                f"compile_backend={self.compile_backend!r}: both take over the "
+                f"training-mode forward, and each needs its own warm-up before it is "
+                f"usable, so layering them means capturing a graph around a partially "
+                f"warmed compiled callable. Pick one — set compile_backend=null to keep "
+                f"cuda_graph, or cuda_graph=false to keep compile_backend."
+            )
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Validate this config against the model/processor it will pair with.

@@ -24,6 +24,7 @@ from ..colorspace import rgb_to_ycbcr_studio
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
+from .cuda_graph import CUDAGraphStep
 from .metadata import build_metadata
 
 
@@ -113,6 +114,13 @@ class SRLightning(lightning.LightningModule):
         # set of weights and it still moves with .to() through self.model's
         # normal registration.
         object.__setattr__(self, "_compiled", compiled)
+
+        self._cuda_graph: CUDAGraphStep | None = None
+        # Per-step, not per-run: on an eager fallback step Lightning must still
+        # run backward and zero_grad. Gating those on "a graph exists" instead
+        # makes the epoch's partial last batch step on the previous replay's
+        # gradients — a silent duplicated update, not a crash.
+        self._graphed_step = False
 
         # Save exactly this plain dict — bypasses save_hyperparameters' frame/given_hparams
         # introspection, so the checkpoint's `hyper_parameters` is identical whether this
@@ -678,9 +686,67 @@ class SRLightning(lightning.LightningModule):
         Returns:
             Scalar loss tensor for the optimizer.
         """
-        loss, *_ = self._step(batch, need_sr_rgb=False)
+        loss = self._graph_step(batch) if self.training_config.cuda_graph else None
+        if loss is None:
+            loss, *_ = self._step(batch, need_sr_rgb=False)
         self.log("loss/train", loss, prog_bar=True, on_step=True)
         return loss
+
+    def _graph_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor | None:
+        """Run the captured training step, building the graph on first use.
+
+        Args:
+            batch: ``(lr_img, hr_img)`` tuple, already on the device.
+
+        Returns:
+            The replayed step's loss, or ``None`` when the batch's shapes don't
+            match the captured ones (the epoch's partial last batch) and the
+            caller must run an eager step instead.
+        """
+        if self._cuda_graph is None:
+            optimizer = self.optimizers()
+            self._cuda_graph = CUDAGraphStep(
+                lambda b: self._step(b, need_sr_rgb=False)[0],
+                getattr(optimizer, "optimizer", optimizer),
+            )
+        loss = self._cuda_graph.run(batch)
+        self._graphed_step = loss is not None
+        return loss
+
+    def backward(self, loss: torch.Tensor, *args: Any, **kwargs: Any) -> None:
+        """Backpropagate ``loss``, unless the captured graph already did.
+
+        Args:
+            loss: Scalar loss returned by :meth:`training_step`.
+            *args: Forwarded to Lightning's implementation.
+            **kwargs: Forwarded to Lightning's implementation.
+        """
+        if self._graphed_step:
+            return
+        super().backward(loss, *args, **kwargs)
+
+    def optimizer_zero_grad(
+        self, epoch: int, batch_idx: int, optimizer: torch.optim.Optimizer
+    ) -> None:
+        """Zero gradients, unless the captured graph owns them.
+
+        Lightning's closure order is ``training_step -> zero_grad -> backward``,
+        so on a graphed step this must be a no-op: the replay has already
+        zeroed, filled and finished with the gradients, and zeroing again here
+        would hand the optimizer nothing but zeros. On an eager fallback step it
+        must run — but with ``set_to_none=False``, because the captured graph
+        writes into those exact ``.grad`` tensors and freeing them invalidates
+        every later replay.
+
+        Args:
+            epoch: Current epoch index.
+            batch_idx: Current batch index.
+            optimizer: The optimizer whose gradients to zero.
+        """
+        if not self.training_config.cuda_graph:
+            super().optimizer_zero_grad(epoch, batch_idx, optimizer)
+        elif not self._graphed_step:
+            optimizer.zero_grad(set_to_none=False)
 
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
@@ -736,7 +802,7 @@ class SRLightning(lightning.LightningModule):
             )
 
     def on_fit_start(self) -> None:
-        """Warm up the compiled training path before the training loop starts.
+        """Check the CUDA-graph prerequisites, then warm up the compiled training path.
 
         A backend name ``torch._dynamo.list_backends()`` recognizes can
         still lack its toolchain (e.g. ``'inductor'`` without Triton), which
@@ -747,15 +813,74 @@ class SRLightning(lightning.LightningModule):
         running first would not catch it, since validation always runs the
         eager path (see :meth:`_forward_lr`).
 
-        No-op when compilation is off, or when
+        The warm-up is a no-op when compilation is off, or when
         ``training_config.example_input_shape`` is unset — there is then no
         input shape to probe with (both shipped templates set it).
+
+        Raises:
+            RuntimeError: Via :meth:`_check_cuda_graph_prerequisites` when
+                ``training_config.cuda_graph`` is set on a run that cannot
+                honour it.
         """
+        if self.training_config.cuda_graph:
+            self._check_cuda_graph_prerequisites()
         if self._compiled is None or self.training_config.example_input_shape is None:
             return
         dummy = torch.zeros(1, *self.training_config.example_input_shape, device=self.device)
         with torch.no_grad():
             self._compiled(dummy)
+
+    def _check_cuda_graph_prerequisites(self) -> None:
+        """Refuse ``cuda_graph=True`` on a run whose semantics it would change.
+
+        Each of these would otherwise mistrain silently rather than crash, so
+        they are hard refusals at the start of ``fit``, not warnings. Checked in
+        config-then-environment order so a misconfiguration is reported even on
+        a machine with no GPU to run on.
+
+        Raises:
+            RuntimeError: If precision is not ``'32-true'`` (a ``GradScaler``
+                scales the loss in ``pre_backward``, which a captured backward
+                never sees, and autocast's cast churn is a measured regression
+                on this project besides); if the run is distributed (capture and
+                DDP's gradient hooks conflict — DDP stashes ``AccumulateGrad``
+                references); if ``accumulate_grad_batches > 1`` (Lightning zeroes
+                gradients only on the first micro-batch and expects the rest to
+                accumulate, but every replay zeroes them, and the loss is not
+                scaled by the accumulation factor); or if the accelerator is not
+                CUDA.
+        """
+        trainer = self.trainer
+        if trainer.precision != "32-true":
+            raise RuntimeError(
+                f"training_config.cuda_graph=True requires trainer.precision='32-true', "
+                f"got {trainer.precision!r}. Mixed precision scales the loss in the "
+                f"precision plugin's pre_backward hook, which a captured backward pass "
+                f"never runs, so gradients would be silently unscaled. Set "
+                f"trainer.precision to 32-true, or cuda_graph to false."
+            )
+        if trainer.world_size > 1:
+            raise RuntimeError(
+                f"training_config.cuda_graph=True does not support distributed training "
+                f"(trainer.world_size={trainer.world_size}). DDP stashes references to "
+                f"the autograd graph's AccumulateGrad nodes and inserts gradient "
+                f"all-reduce hooks, neither of which survives capture. Train on one "
+                f"device, or set cuda_graph to false."
+            )
+        if trainer.accumulate_grad_batches > 1:
+            raise RuntimeError(
+                f"training_config.cuda_graph=True does not support gradient accumulation "
+                f"(trainer.accumulate_grad_batches={trainer.accumulate_grad_batches}). "
+                f"Every replay zeroes the gradients, so nothing would accumulate across "
+                f"micro-batches. Raise the loader's batch_size instead, or set cuda_graph "
+                f"to false."
+            )
+        if self.device.type != "cuda":
+            raise RuntimeError(
+                f"training_config.cuda_graph=True requires a CUDA device, but this module "
+                f"is on {self.device!r}. Set trainer.accelerator='cuda', or cuda_graph to "
+                f"false."
+            )
 
     def on_train_start(self) -> None:
         """Register val metric tags with TensorBoard's HParams tab.

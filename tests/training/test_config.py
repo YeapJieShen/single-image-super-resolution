@@ -17,6 +17,7 @@ def test_sr_training_config_defaults():
     assert cfg.init_std == 0.01
     assert cfg.scale is None
     assert cfg.compile_backend is None
+    assert cfg.cuda_graph is False
 
 
 def test_sr_eval_config_defaults():
@@ -56,7 +57,22 @@ def test_sr_training_config_field_names():
         "init_std",
         "scale",
         "compile_backend",
+        "cuda_graph",
     }
+
+
+def test_training_config_rejects_cuda_graph_with_compile_backend():
+    """Both take over the training-mode forward and each needs its own warm-up,
+    so the combination would capture a graph around a half-warmed compiled
+    callable. Fails at config construction, not at the first training step."""
+    with pytest.raises(ValueError, match="incompatible with compile_backend"):
+        SRTrainingConfig(cuda_graph=True, compile_backend="eager")
+
+
+def test_training_config_allows_cuda_graph_without_compile_backend():
+    cfg = SRTrainingConfig(cuda_graph=True)
+    assert cfg.cuda_graph is True
+    assert cfg.compile_backend is None
 
 
 def test_sr_eval_config_field_names():
