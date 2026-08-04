@@ -691,10 +691,14 @@ def test_live_builder_past_lock_timeout_is_never_preempted(tmp_path: Path):
         "the timeout-while-holder-alive path at all"
     )
 
-    # B: loses the race, and its own lock_timeout (0.2s) elapses long before
-    # A's build_fn returns.
+    # B: loses the race, and its own lock_timeout elapses long before A's
+    # build_fn returns. 1.0s (not e.g. 0.2s) keeps its 3x-lock_timeout hard
+    # cap at 3.0s -- 0.2s left only ~0.6s of margin for B to observe A's
+    # publish, which cold-vs-warm interpreter start asymmetry (A pays a
+    # cold import, B's is warmer) plus tens of ms of Windows publish time
+    # could burn through, flaking B into a TimeoutError on a loaded CI box.
     proc_b = subprocess.Popen(
-        [sys.executable, str(script), str(tmp_path), str(result_b), str(build_log), "0", "0.2"]
+        [sys.executable, str(script), str(tmp_path), str(result_b), str(build_log), "0", "1.0"]
     )
 
     assert proc_a.wait(timeout=15) == 0, "A's build must complete without a crash from B"
@@ -944,6 +948,34 @@ def test_heartbeat_survives_transient_os_error_and_keeps_refreshing(tmp_path: Pa
         cache._stop_heartbeat()
 
     assert len(calls) >= 3, "the heartbeat must keep retrying past the first transient failure"
+
+
+def test_construction_releases_lock_when_heartbeat_thread_fails_to_start(tmp_path: Path):
+    """If Thread.start() itself raises (e.g. the OS refuses a new thread),
+    _stop_heartbeat's join() must not blow up on a thread that was
+    constructed but never started -- that would mask the original start()
+    error and skip _release_lock on the next line (both run inside the same
+    finally), leaving a live-pid sentinel that stalls every other waiter for
+    up to 3x lock_timeout. The original error must still surface, and the
+    sentinel must still be released."""
+    with patch(
+        "sisr.cache.threading.Thread.start",
+        side_effect=RuntimeError("can't start new thread"),
+    ):
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            LMDBCache(
+                cache_dir=tmp_path,
+                name="hbfail",
+                checksum="hf1",
+                length=1,
+                map_size=_MAP_SIZE,
+                build_fn=_make_build_fn(1),
+            )
+
+    lock_path = tmp_path / "hbfail_hf1.build.lock"
+    assert not lock_path.exists(), (
+        "the sentinel must be released even though the heartbeat thread never started"
+    )
 
 
 # ---------------------------------------------------------------------------

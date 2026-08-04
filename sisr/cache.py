@@ -626,11 +626,24 @@ class LMDBCache:
         self._heartbeat_thread.start()
 
     def _stop_heartbeat(self) -> None:
-        """Stops the heartbeat thread started by :meth:`_start_heartbeat`, if any."""
+        """Stops the heartbeat thread started by :meth:`_start_heartbeat`, if any.
+
+        Guards ``join()`` against a thread object that was constructed but
+        never actually started -- if ``Thread.start()`` itself raised (e.g.
+        the OS refused a new thread), ``_heartbeat_thread`` is still set, and
+        an unguarded ``join()`` would raise "cannot join thread before it is
+        started". That would mask the original ``start()`` error *and* skip
+        :meth:`_release_lock` on the next line (this runs inside a
+        ``finally``), leaving a live-pid sentinel that stalls every other
+        waiter for up to ``_LIVE_HOLDER_WAIT_MULTIPLE * lock_timeout``.
+        """
         if self._heartbeat_stop is None:
             return
         self._heartbeat_stop.set()
-        self._heartbeat_thread.join(timeout=1.0)
+        try:
+            self._heartbeat_thread.join(timeout=1.0)
+        except RuntimeError:
+            pass  # Thread.start() itself never succeeded -- nothing to join
         self._heartbeat_stop = None
         self._heartbeat_thread = None
 
