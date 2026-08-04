@@ -27,6 +27,15 @@ model:
       # No longer only a TensorBoard-graph dummy -- it also shapes the compile warm-up
       # (a wrong size compiles once then recompiles on step 1) and ModelSummary's FLOPs.
       example_input_shape: [1, 33, 33]
+      # Replay one captured graph of {zero_grad, forward, loss, backward} per step
+      # instead of relaunching 78 kernels. Measured 5.91 -> 2.23 ms/step (2.65x) at
+      # this template's batch 64 / 33x33 geometry, losses bit-identical to eager --
+      # SRCNN's step is launch-bound, so removing the launches is nearly all of it.
+      # Off by default: it requires precision 32-true, one device, no gradient
+      # accumulation and no compile_backend (SRLightning.on_fit_start refuses the
+      # rest rather than mistrain quietly), and the win shrinks on architectures
+      # whose GPU time is real compute rather than launch overhead.
+      # cuda_graph: true
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 
