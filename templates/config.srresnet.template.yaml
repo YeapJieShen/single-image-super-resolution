@@ -68,14 +68,13 @@ data:
         scale: *scale
   train_dataloader_kwargs:
     batch_size: 16
-    # num_workers: 0 measured equal to 16 workers in steady-state per-step time
-    # (31.25 vs 31.95 ms/step on this dev machine) while dropping the ~2-minute
-    # one-time cost of spawning 16 processes that each cold-import torch --
-    # workers buy nothing here once that spawn cost is excluded. persistent_workers
-    # dropped (errors at num_workers=0); pin_memory stays, still real work at w0.
-    # Windows-measured -- revisit if you're on Linux/fork or a much weaker CPU.
-    num_workers: 0
+    # Workers are load-bearing on real data: per-sample LR derivation is a real
+    # cost, and num_workers=0 hits a hard serial floor (real DIV2K steady-state:
+    # 56.0 ms/step at w0 vs 40.1 ms/step at w16 -- 0.72x). The ~2-minute one-time
+    # spawn cost amortizes to nothing over a full run.
+    num_workers: 16
     pin_memory: true
+    persistent_workers: true
   val_dataloader_kwargs:
     batch_size: 1
     num_workers: 2
