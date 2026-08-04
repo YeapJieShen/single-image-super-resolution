@@ -130,16 +130,17 @@ class SRTrainingConfig:
             ``optimizer.step()`` stays eager, so LR schedulers, gradient
             clipping and ``global_step`` accounting are unaffected. Requires a
             CUDA device, ``precision='32-true'``, a single process, and
-            ``accumulate_grad_batches=1``; ``SRLightning.on_fit_start`` refuses
-            the rest rather than silently mistraining. Mutually exclusive with
-            ``compile_backend`` (see :meth:`__post_init__`). Validation, test
-            and predict always stay eager — their image sizes vary, and graphs
-            need static shapes. Measured on one RTX 5060 Laptop (SRCNN, batch
-            64, 33x33 Y patches, 60 W cap): **2.81x steps/s**, 6.21 -> 2.21
-            ms/step, bit-identical losses. The win is proportional to how
-            launch-bound the architecture is, so it is far smaller for
-            SRResNet, whose GPU floor is real compute — hence opt-in, per
-            config, defaulting off.
+            ``accumulate_grad_batches=1``; ``SRLightning.on_fit_start`` and
+            ``on_train_epoch_start`` refuse the rest rather than silently
+            mistraining. Mutually exclusive with ``compile_backend`` (see
+            :meth:`__post_init__`). Validation, test and predict always stay
+            eager — their image sizes vary, and graphs need static shapes.
+            Measured ~2.6x steps/s on one RTX 5060 Laptop with bit-identical
+            losses; the figures live in
+            ``templates/config.srcnn.template.yaml`` so there is one place to
+            keep current. The win is proportional to how launch-bound the
+            architecture is, so it is far smaller for SRResNet, whose GPU floor
+            is real compute — hence opt-in, per config, defaulting off.
     """
 
     layer_lrs: list[float] | None = None

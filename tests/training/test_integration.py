@@ -18,6 +18,7 @@ from pathlib import Path
 import lightning
 import pytest
 import torch
+from lightning.pytorch.callbacks import GradientAccumulationScheduler
 from torch.utils.data import DataLoader, Dataset
 
 from sisr.models.srcnn import SRCNN
@@ -32,6 +33,7 @@ from sisr.training import (
     SRPredictionWriter,
     SRTrainingConfig,
 )
+from sisr.training.cuda_graph import CUDAGraphStep
 
 
 def _make_srcnn_module() -> SRLightning:
@@ -392,3 +394,102 @@ def test_cuda_graph_leaves_lr_scheduler_effective():
 
     assert graphed == eager
     assert module.optimizers().param_groups[0]["lr"] < 1e-3
+
+
+def _graph_srcnn_module() -> SRLightning:
+    """The module `_run_graph_fit` builds, for tests that need to reuse one."""
+    return SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(cuda_graph=True),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-3, momentum=0.9),
+    )
+
+
+def _graph_trainer(callbacks: list, **overrides) -> lightning.Trainer:
+    return lightning.Trainer(
+        accelerator="cuda",
+        devices=1,
+        limit_val_batches=0,
+        num_sanity_val_steps=0,
+        benchmark=True,
+        logger=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
+        callbacks=callbacks,
+        **overrides,
+    )
+
+
+@requires_cuda
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+@pytest.mark.filterwarnings("ignore:When using:UserWarning")
+def test_cuda_graph_refuses_accumulation_scheduled_mid_run():
+    """GradientAccumulationScheduler only raises accumulate_grad_batches from its
+    own on_train_epoch_start, so a refusal checked once at fit start is
+    guaranteed to miss it and training would silently degrade from the scheduled
+    epoch — every replay re-zeroes, leaving only the last micro-batch's
+    gradient, unscaled. Lightning merely warns about our optimizer_zero_grad
+    override here; it does not stop the run."""
+    lightning.seed_everything(7, verbose=False)
+    module = _graph_srcnn_module()
+    trainer = _graph_trainer(
+        [GradientAccumulationScheduler(scheduling={2: 2})], max_epochs=3, max_steps=-1
+    )
+    loader = DataLoader(_FixedPairs(16), batch_size=4, num_workers=0, shuffle=False)
+
+    with pytest.raises(RuntimeError, match="does not support gradient accumulation"):
+        trainer.fit(module, train_dataloaders=loader)
+
+
+@requires_cuda
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_cuda_graph_recaptures_on_a_second_fit():
+    """Strategy.teardown moves the module and its .grad tensors back to CPU at the
+    end of a fit, freeing the blocks the graph baked addresses for. A second fit
+    must capture afresh; replaying the first fit's graph writes into freed
+    memory."""
+    lightning.seed_everything(7, verbose=False)
+    module = _graph_srcnn_module()
+    loader = DataLoader(_FixedPairs(16), batch_size=4, num_workers=0, shuffle=False)
+
+    graph_ids = []
+    for _ in range(2):
+        trace = _LossTrace()
+        _graph_trainer([trace], max_steps=8).fit(module, train_dataloaders=loader)
+        assert module._cuda_graph is not None and module._cuda_graph.captured
+        graph_ids.append(id(module._cuda_graph))
+        assert all(loss == loss for loss in trace.losses)  # no NaN from freed memory
+        assert len(trace.losses) == 8
+
+    assert graph_ids[0] != graph_ids[1], "second fit reused the first fit's dead graph"
+
+
+@requires_cuda
+def test_cuda_graph_capture_leaves_batchnorm_buffers_untouched():
+    """The warm-up's forwards advance BatchNorm running stats, and SRResNet's
+    residual blocks have BatchNorm — so capture would silently perturb them
+    (decaying as 0.9^n) without the snapshot/restore. SRCNN has no buffers, so
+    no SRCNN parity test can catch this."""
+    lightning.seed_everything(7, verbose=False)
+    module = SRLightning(
+        model=SRResNet(scale=2, num_residual_blocks=1),
+        processor=RGBProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2, cuda_graph=True),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-3),
+    ).to("cuda")
+    module.train()
+    before = {name: buf.detach().clone() for name, buf in module.named_buffers()}
+    assert any("running_mean" in name for name in before)
+
+    step = CUDAGraphStep(
+        lambda b: module._step(b, need_sr_rgb=False)[0], module, module.configure_optimizers()
+    )
+    step.capture((torch.rand(2, 3, 8, 8, device="cuda"), torch.rand(2, 3, 16, 16, device="cuda")))
+
+    assert step.captured
+    for name, buf in module.named_buffers():
+        assert torch.equal(buf, before[name]), name

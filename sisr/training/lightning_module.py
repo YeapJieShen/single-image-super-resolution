@@ -707,6 +707,7 @@ class SRLightning(lightning.LightningModule):
             optimizer = self.optimizers()
             self._cuda_graph = CUDAGraphStep(
                 lambda b: self._step(b, need_sr_rgb=False)[0],
+                self,
                 getattr(optimizer, "optimizer", optimizer),
             )
         loss = self._cuda_graph.run(batch)
@@ -715,6 +716,12 @@ class SRLightning(lightning.LightningModule):
 
     def backward(self, loss: torch.Tensor, *args: Any, **kwargs: Any) -> None:
         """Backpropagate ``loss``, unless the captured graph already did.
+
+        On an eager fallback step this writes into the same ``.grad`` tensors the
+        captured graph holds addresses for, which is only safe while
+        ``create_graph`` stays ``False`` — a double-backward pass makes ``.grad``
+        a graph-tracked tensor and can rebind it, invalidating every later replay.
+        Nothing in this project passes ``create_graph``.
 
         Args:
             loss: Scalar loss returned by :meth:`training_step`.
@@ -817,11 +824,20 @@ class SRLightning(lightning.LightningModule):
         ``training_config.example_input_shape`` is unset — there is then no
         input shape to probe with (both shipped templates set it).
 
+        Any graph captured by a previous ``fit`` on this module is dropped here,
+        unconditionally. ``Strategy.teardown`` moves the module — and its
+        ``.grad`` tensors — back to CPU at the end of a fit, which frees the
+        device blocks the graph baked addresses for; replaying it in a second
+        ``fit`` would write into freed memory. Re-capturing is cheap (three
+        warm-up iterations) and happens on the next graphed step.
+
         Raises:
             RuntimeError: Via :meth:`_check_cuda_graph_prerequisites` when
                 ``training_config.cuda_graph`` is set on a run that cannot
                 honour it.
         """
+        self._cuda_graph = None
+        self._graphed_step = False
         if self.training_config.cuda_graph:
             self._check_cuda_graph_prerequisites()
         if self._compiled is None or self.training_config.example_input_shape is None:
@@ -830,34 +846,60 @@ class SRLightning(lightning.LightningModule):
         with torch.no_grad():
             self._compiled(dummy)
 
+    def on_train_epoch_start(self) -> None:
+        """Re-assert the CUDA-graph prerequisites at the top of every epoch.
+
+        ``on_fit_start`` alone is not enough:
+        :class:`~lightning.pytorch.callbacks.GradientAccumulationScheduler`
+        *requires* ``trainer.accumulate_grad_batches`` to still be 1 when
+        training starts and only raises it from its own
+        ``on_train_epoch_start``, so a once-at-fit-start check is guaranteed to
+        read 1 and pass, and accumulation would then silently take effect from
+        the scheduled epoch. Lightning runs callback hooks before this module
+        hook, so by here the scheduler's value for this epoch is already in
+        place.
+
+        Raises:
+            RuntimeError: Via :meth:`_check_cuda_graph_prerequisites` when a
+                prerequisite stopped holding since ``fit`` began.
+        """
+        if self.training_config.cuda_graph:
+            self._check_cuda_graph_prerequisites()
+
     def _check_cuda_graph_prerequisites(self) -> None:
         """Refuse ``cuda_graph=True`` on a run whose semantics it would change.
 
         Each of these would otherwise mistrain silently rather than crash, so
-        they are hard refusals at the start of ``fit``, not warnings. Checked in
+        they are hard refusals, not warnings. Checked in
         config-then-environment order so a misconfiguration is reported even on
-        a machine with no GPU to run on.
+        a machine with no GPU to run on. Called from ``on_fit_start`` and again
+        from :meth:`on_train_epoch_start`, since a callback can move
+        ``accumulate_grad_batches`` after ``fit`` has begun.
 
         Raises:
-            RuntimeError: If precision is not ``'32-true'`` (a ``GradScaler``
-                scales the loss in ``pre_backward``, which a captured backward
-                never sees, and autocast's cast churn is a measured regression
-                on this project besides); if the run is distributed (capture and
-                DDP's gradient hooks conflict — DDP stashes ``AccumulateGrad``
-                references); if ``accumulate_grad_batches > 1`` (Lightning zeroes
-                gradients only on the first micro-batch and expects the rest to
-                accumulate, but every replay zeroes them, and the loss is not
-                scaled by the accumulation factor); or if the accelerator is not
-                CUDA.
+            RuntimeError: If precision is not ``'32-true'``; if the run is
+                distributed (capture and DDP's gradient hooks conflict — DDP
+                stashes ``AccumulateGrad`` references); if
+                ``accumulate_grad_batches > 1`` (Lightning zeroes gradients only
+                on the first micro-batch and expects the rest to accumulate, but
+                every replay zeroes them, and the loss is not scaled by the
+                accumulation factor); or if the accelerator is not CUDA.
         """
         trainer = self.trainer
         if trainer.precision != "32-true":
+            reason = (
+                "its GradScaler scales the loss in the precision plugin's pre_backward "
+                "hook, which a captured backward pass never runs, so gradients would be "
+                "silently unscaled"
+                if trainer.precision == "16-mixed"
+                else "the captured region's dtypes and autocast state are fixed at capture "
+                "time and this path is only validated for full fp32 (bf16 is a measured "
+                "regression on this project's architectures besides)"
+            )
             raise RuntimeError(
                 f"training_config.cuda_graph=True requires trainer.precision='32-true', "
-                f"got {trainer.precision!r}. Mixed precision scales the loss in the "
-                f"precision plugin's pre_backward hook, which a captured backward pass "
-                f"never runs, so gradients would be silently unscaled. Set "
-                f"trainer.precision to 32-true, or cuda_graph to false."
+                f"got {trainer.precision!r}: {reason}. Set trainer.precision to 32-true, "
+                f"or cuda_graph to false."
             )
         if trainer.world_size > 1:
             raise RuntimeError(

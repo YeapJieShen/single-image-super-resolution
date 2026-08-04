@@ -1,4 +1,5 @@
 import functools
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -8,6 +9,7 @@ import pytest
 import torch
 import torch._dynamo
 import torchmetrics
+from lightning.pytorch.callbacks import GradientAccumulationScheduler
 
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetTrainingConfig
@@ -20,6 +22,7 @@ from sisr.processors import (
     YChannelProcessor,
 )
 from sisr.training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
+from sisr.training.cuda_graph import CUDAGraphStep
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -1778,3 +1781,93 @@ def test_cuda_graph_off_skips_prerequisite_checks():
     lit = _graph_lit(cuda_graph=False)
     lit.trainer = _fake_trainer(precision="bf16-mixed", world_size=4)
     lit.on_fit_start()
+
+
+def test_gradient_accumulation_scheduler_raises_accumulation_only_at_epoch_start():
+    """Pins the Lightning behaviour that makes a once-at-fit-start refusal
+    useless: GradientAccumulationScheduler requires accumulate_grad_batches to
+    still be 1 when training starts, and only raises it from its own
+    on_train_epoch_start. Breaks loudly if a future Lightning moves that."""
+    cb = GradientAccumulationScheduler(scheduling={2: 2})
+    trainer = SimpleNamespace(accumulate_grad_batches=1, current_epoch=0)
+
+    cb.on_train_epoch_start(trainer)
+    assert trainer.accumulate_grad_batches == 1
+
+    trainer.current_epoch = 2
+    cb.on_train_epoch_start(trainer)
+    assert trainer.accumulate_grad_batches == 2
+
+
+def test_cuda_graph_refuses_accumulation_turned_on_after_fit_start():
+    """The refusal has to be re-asserted per epoch: accumulation switched on by a
+    callback after on_fit_start would otherwise let every replay re-zero the
+    gradients, leaving only the last micro-batch's, unscaled."""
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer(accumulate_grad_batches=2)
+    with pytest.raises(RuntimeError, match="does not support gradient accumulation"):
+        lit.on_train_epoch_start()
+
+
+def test_cuda_graph_epoch_check_silent_while_prerequisites_hold():
+    lit = _graph_lit()
+    lit.trainer = _fake_trainer(accumulate_grad_batches=1)
+    with pytest.raises(RuntimeError, match="requires a CUDA device"):
+        lit.on_train_epoch_start()  # only the device check fires on a CPU box
+
+
+def test_cuda_graph_epoch_check_skipped_when_flag_off():
+    lit = _graph_lit(cuda_graph=False)
+    lit.trainer = _fake_trainer(accumulate_grad_batches=8, precision="bf16-mixed")
+    lit.on_train_epoch_start()
+
+
+def test_new_fit_drops_a_graph_captured_by_a_previous_fit():
+    """Strategy.teardown moves the module and its .grad tensors back to CPU at
+    the end of a fit, freeing the device blocks the graph baked addresses for.
+    Replaying it in a second fit would write into freed memory."""
+    lit = _graph_lit(cuda_graph=False)
+    lit._cuda_graph = object()
+    lit._graphed_step = True
+    lit.trainer = _fake_trainer()
+
+    lit.on_fit_start()
+
+    assert lit._cuda_graph is None
+    assert lit._graphed_step is False
+
+
+def test_cuda_graph_buffer_snapshot_restores_batchnorm_running_stats():
+    """The capture warm-up runs forwards, which advance BatchNorm's running
+    stats and num_batches_tracked. SRResNet's residual blocks have BatchNorm, so
+    without the snapshot/restore capture would silently perturb them — invisible
+    to any SRCNN-only parity test, since SRCNN has no buffers at all."""
+    lit = _srresnet_lit(scale=2)
+    step = CUDAGraphStep(lambda b: lit._step(b, need_sr_rgb=False)[0], lit, MagicMock())
+    lit.train()
+    names = [n for n, _ in lit.named_buffers()]
+    assert any("running_mean" in n for n in names) and any(
+        "num_batches_tracked" in n for n in names
+    )
+
+    snapshot = step._buffer_snapshot()
+    lr = torch.rand(2, 3, 8, 8)
+    for _ in range(3):
+        lit._step((lr, torch.rand(2, 3, 16, 16)), need_sr_rgb=False)
+    assert not all(torch.equal(buf, snapshot[name]) for name, buf in lit.named_buffers()), (
+        "forwards must move the buffers, or this test proves nothing"
+    )
+
+    step._restore_buffers(snapshot)
+
+    for name, buf in lit.named_buffers():
+        assert torch.equal(buf, snapshot[name]), name
+
+
+def test_cuda_graph_step_never_calls_optimizer_step():
+    """Guards the deliberate design choice that optimizer.step() stays eager and
+    stays Lightning's: capturing it would bake the learning rate in as a graph
+    constant and silently no-op every LR scheduler."""
+    source = inspect.getsource(CUDAGraphStep)
+    assert "_optimizer.zero_grad" in source
+    assert "_optimizer.step" not in source
