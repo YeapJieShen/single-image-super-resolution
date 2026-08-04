@@ -35,8 +35,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch>=2.4",
-    "torchvision>=0.19",
+    # 2.6 excludes the torch.load(weights_only=True) unpickler bypass fixed in
+    # 2.6.0 (GHSA-53q9-r3pm-6pq6 / CVE-2025-32434) — that flag is this project's
+    # entire load-time safety contract for third-party .ckpt/.pt files.
+    "torch>=2.6",
+    "torchvision>=0.21",
     "lightning>=2.4",
     "torchmetrics>=1.4",
     "jsonargparse[signatures]>=4.27",
