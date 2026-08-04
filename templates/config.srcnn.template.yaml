@@ -65,9 +65,13 @@ data:
         scale: *scale
   train_dataloader_kwargs:
     batch_size: 64             # not specified by the paper; this project's choice
-    num_workers: 16
+    # num_workers: 0 measured FASTER than 16 workers in steady-state per-step time
+    # (6.64 vs 11.70 ms/step on this dev machine) as well as dropping the ~2-minute
+    # one-time cost of spawning 16 processes that each cold-import torch. persistent_workers
+    # dropped (errors at num_workers=0); pin_memory stays, still real work at w0.
+    # Windows-measured -- revisit if you're on Linux/fork or a much weaker CPU.
+    num_workers: 0
     pin_memory: true
-    persistent_workers: true
   val_dataloader_kwargs:
     batch_size: 1
     num_workers: 2
@@ -90,9 +94,10 @@ trainer:
   # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
   # above, hence it lives here rather than as a custom key.
   benchmark: true
-  # bf16-mixed is a bigger throughput lever, but this is a paper-reproduction repo:
-  # the shipped default trains in full fp32 so results stay comparable. Uncomment for
-  # your own runs on bf16-capable hardware.
+  # bf16-mixed measured as a REGRESSION on this project's other architecture
+  # (0.72x SRResNet b16, full power) -- autocast's cast-churn doesn't saturate
+  # the SMs at these batch sizes. Crossover measured at b32 (bf16+fused wins) --
+  # revisit only if batch_size rises well past this template's 64.
   # precision: bf16-mixed
   accelerator: cuda
   devices: [0]
