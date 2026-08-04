@@ -70,9 +70,11 @@ def to_onnx(
     Traces the wrapped model alone — see the module docstring for why the
     processor is excluded and what that means for SRCNN consumers. The
     exported graph accepts arbitrary spatial dimensions (``dynamic_axes`` on
-    height/width): a fixed-shape export would be useless on real images,
-    since ``training_config.example_input_shape`` is only a TensorBoard-graph
-    dummy size, not a training or inference constraint.
+    height/width) because real images vary in H/W independently of
+    ``training_config.example_input_shape``: that field is a representative
+    dummy shared by several fixed-shape uses (TensorBoard graph, ModelSummary
+    FLOPs, the compile warm-up, and this function's own default
+    ``input_sample``), none of which constrain inference spatial dims.
 
     Args:
         module: An :class:`~sisr.training.SRLightning` instance (e.g. built

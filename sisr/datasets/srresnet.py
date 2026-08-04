@@ -42,7 +42,7 @@ class TrainDataset(HRCachedTrainDataset):
     never the crop), and bicubic-downsamples it by ``scale`` (via
     :func:`sisr.imresize.resize`) to form the LR input. Unlike
     :class:`sisr.datasets.srcnn.TrainDataset` there is **no
-    blur+downsample+upsample round-trip** and the LR is *not* upsampled back —
+    downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is
     ``hr_crop_size // scale`` on a side.
 
