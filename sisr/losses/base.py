@@ -21,9 +21,10 @@ class SRLoss(torch.nn.Module, abc.ABC):
     than ``isinstance``, so any criterion holding one participates in
     per-term logging as ``loss/<stage>/<name>``
     (:class:`~sisr.losses.composite.WeightedSumLoss` is the one that does).
-    The tensors must be stable buffers written in place on every
-    :meth:`forward`, never rebound, since a CUDA-graph replay can only
-    update a tensor that already existed at capture time.
+    The tensors are written in place across ordinary steps and only replaced
+    when the existing buffer cannot be reused (first use, a device/dtype
+    change, or leaving :func:`torch.inference_mode`), so a CUDA-graph replay
+    keeps updating the entry it captured.
     """
 
     @abc.abstractmethod
@@ -38,7 +39,7 @@ class SRLoss(torch.nn.Module, abc.ABC):
 
         Args:
             processor: The processor wired alongside the model, supplying
-                ``output_range`` and ``model_channels``.
+                ``output_range``, ``model_channels``, and ``output_colorspace``.
 
         Raises:
             ValueError: If this loss cannot operate on the processor's

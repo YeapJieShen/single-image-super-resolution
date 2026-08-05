@@ -118,6 +118,27 @@ def test_last_terms_are_stable_buffers_written_in_place():
     assert first.item() == pytest.approx(7.0), "buffer was not updated"
 
 
+def test_validate_then_fit_on_one_instance_does_not_raise():
+    """trainer.validate()/test() run under torch.inference_mode() by default,
+    so a prior last_terms buffer can be an inference tensor. Lightning
+    hard-codes inference_mode=False for the fit loop's own validation, so
+    only a validate()-then-fit() sequence on one instance hits this: writing
+    to that stale buffer outside inference mode would otherwise raise
+    RuntimeError: Inplace update to inference tensor outside InferenceMode
+    is not allowed. The buffer is deliberately replaced across this
+    transition, so unlike test_last_terms_are_stable_buffers_written_in_place
+    this does not assert identity."""
+    loss = WeightedSumLoss(terms={"a": _BindSpy(2.0)}, weights={"a": 1.0})
+
+    with torch.inference_mode():
+        loss(torch.zeros(1), torch.zeros(1))
+
+    loss.terms["a"].value = 7.0
+    loss(torch.zeros(1), torch.zeros(1))
+
+    assert loss.last_terms["a"].item() == pytest.approx(7.0)
+
+
 def test_describe_renders_the_recipe():
     loss = WeightedSumLoss(
         terms={"vgg22": _BindSpy(1.0), "tv": TotalVariationLoss()},

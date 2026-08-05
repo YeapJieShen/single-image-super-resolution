@@ -108,6 +108,7 @@ def build_metadata(
             "input": model.input_contract,
             "input_channels": processor.model_channels,
             "output_range": list(processor.output_range),
+            "output_colorspace": processor.output_colorspace,
         },
         "eval_config": _to_plain(dataclasses.asdict(module.eval_config)),
         "training": {

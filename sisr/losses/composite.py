@@ -79,8 +79,19 @@ class WeightedSumLoss(SRLoss):
             # In place, not a fresh clone: a CUDA-graph replay re-runs only the
             # recorded copy kernel, so the only tensor it can update is the one
             # that existed at capture. Rebinding here would strand the tag on
-            # the last eager step's value for the rest of the run.
-            if prior is None or prior.device != value.device or prior.dtype != value.dtype:
+            # the last eager step's value for the rest of the run. A buffer
+            # captured under torch.inference_mode() (trainer.validate()/test())
+            # can never be written to again once outside it, so it must be
+            # replaced rather than reused.
+            stale_inference = (
+                prior is not None and prior.is_inference() and not torch.is_inference_mode_enabled()
+            )
+            if (
+                prior is None
+                or stale_inference
+                or prior.device != value.device
+                or prior.dtype != value.dtype
+            ):
                 self.last_terms[name] = value.clone()
             else:
                 prior.copy_(value)

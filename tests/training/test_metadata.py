@@ -88,11 +88,13 @@ def test_build_metadata_io_reflects_model_input_contract_and_processor():
     assert srcnn_meta["io"]["input"] == "pre_upsampled"
     assert srcnn_meta["io"]["input_channels"] == 1  # YChannelProcessor.model_channels
     assert srcnn_meta["io"]["output_range"] == [0.0, 1.0]
+    assert srcnn_meta["io"]["output_colorspace"] == "Y"
 
     srresnet_meta = build_metadata(_make_srresnet_lit())
     assert srresnet_meta["io"]["input"] == "native_lr"
     assert srresnet_meta["io"]["input_channels"] == 3  # RGBSignedOutputProcessor.model_channels
     assert srresnet_meta["io"]["output_range"] == [-1.0, 1.0]  # the asymmetric paper range
+    assert srresnet_meta["io"]["output_colorspace"] == "RGB"
 
 
 def test_build_metadata_scale_prefers_training_config_scale():

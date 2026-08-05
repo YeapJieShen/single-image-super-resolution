@@ -590,4 +590,5 @@ def test_cuda_graph_replay_keeps_per_term_losses_live():
     graphed, module = _run_composite_graph_fit(cuda_graph=True, n_samples=14, max_steps=12)
 
     assert module._cuda_graph is not None and module._cuda_graph.captured
+    assert len(graphed) == 12
     assert graphed == eager
