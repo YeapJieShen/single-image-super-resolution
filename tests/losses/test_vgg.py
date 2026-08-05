@@ -1,6 +1,13 @@
-import pytest
+import functools
 
+import pytest
+import torch
+
+from sisr.losses import VGG16FeatureLoss, VGG19FeatureLoss
 from sisr.losses.vgg import _parse_layer, _resolve_slice_end
+from sisr.models.srcnn import SRCNN
+from sisr.processors import RGBProcessor, RGBSignedOutputProcessor, YChannelProcessor
+from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
 
 VGG19_WIDTHS = (2, 2, 4, 4, 4)
 VGG16_WIDTHS = (2, 2, 3, 3, 3)
@@ -65,3 +72,208 @@ def test_resolve_slice_end_rejects_vgg54_on_vgg16_naming_the_deepest_valid_layer
 def test_resolve_slice_end_rejects_an_out_of_range_block():
     with pytest.raises(ValueError, match="block index"):
         _resolve_slice_end(VGG19_WIDTHS, 6, 1, before_activation=False)
+
+
+# ---------------------------------------------------------------------------
+# VGG*FeatureLoss — every construction passes weights=None to stay offline
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def vgg22() -> VGG19FeatureLoss:
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        return VGG19FeatureLoss(layer="vgg22", weights=None)
+
+
+def test_weights_none_warns_that_the_loss_is_meaningless():
+    """A random-init VGG computes a perceptual loss over noise. It is the only
+    way to keep CI offline, so it must be loud rather than convenient."""
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        VGG19FeatureLoss(weights=None)
+
+
+def test_truncates_to_only_the_layers_it_evaluates():
+    """vgg22 needs 0.26M of vgg19's 20.02M feature params. Carrying the rest
+    would be 80MB of unused weights resident for the whole run."""
+    with pytest.warns(UserWarning):
+        shallow = VGG19FeatureLoss(layer="vgg22", weights=None)
+    with pytest.warns(UserWarning):
+        deep = VGG19FeatureLoss(layer="vgg54", weights=None)
+
+    n_shallow = sum(p.numel() for p in shallow._vgg.parameters())
+    n_deep = sum(p.numel() for p in deep._vgg.parameters())
+    assert n_shallow == pytest.approx(260_000, rel=0.05)
+    assert n_deep == pytest.approx(20_024_000, rel=0.05)
+
+
+def test_vgg16_rejects_vgg54_but_vgg19_accepts_it():
+    with pytest.warns(UserWarning):
+        VGG19FeatureLoss(layer="vgg54", weights=None)
+    with pytest.raises(ValueError, match="vgg53"):
+        VGG16FeatureLoss(layer="vgg54", weights=None)
+
+
+def test_default_layer_constructs_at_both_depths():
+    """Guards the one cross-depth footgun in the default arguments."""
+    with pytest.warns(UserWarning):
+        assert VGG19FeatureLoss(weights=None).layer == "vgg22"
+    with pytest.warns(UserWarning):
+        assert VGG16FeatureLoss(weights=None).layer == "vgg22"
+
+
+def test_bind_makes_the_two_rgb_ranges_produce_identical_features(vgg22):
+    """THE test for the whole bind design: a [0, 1] tensor under RGBProcessor
+    and the same image as 2x-1 under RGBSignedOutputProcessor are the same
+    picture, so they must score identically. Without bind reading
+    output_range, the signed path feeds [-1, 1] to VGG and is silently wrong."""
+    x = torch.rand(1, 3, 32, 32)
+    target = torch.rand(1, 3, 32, 32)
+
+    vgg22.bind(RGBProcessor())
+    unsigned = vgg22(x, target)
+
+    vgg22.bind(RGBSignedOutputProcessor())
+    signed = vgg22(x * 2 - 1, target * 2 - 1)
+
+    assert signed.item() == pytest.approx(unsigned.item(), rel=1e-5)
+
+
+def test_bind_rejects_a_one_channel_processor_and_names_the_opt_in(vgg22):
+    with pytest.raises(ValueError, match="grayscale_to_rgb"):
+        vgg22.bind(YChannelProcessor())
+
+
+def test_grayscale_to_rgb_opts_in_to_the_one_channel_case():
+    with pytest.warns(UserWarning):
+        loss = VGG19FeatureLoss(layer="vgg22", grayscale_to_rgb=True, weights=None)
+    loss.bind(YChannelProcessor())
+
+    got = loss(torch.rand(1, 1, 32, 32), torch.rand(1, 1, 32, 32))
+
+    assert got.ndim == 0 and torch.isfinite(got)
+
+
+def test_error_message_names_the_concrete_subclass(vgg22):
+    with pytest.raises(ValueError, match="VGG19FeatureLoss"):
+        vgg22.bind(YChannelProcessor())
+
+
+def test_feature_scale_squares_into_an_mse_and_is_linear_in_an_l1():
+    """feature_scale multiplies the feature maps (the paper's wording), so an
+    MSE of them carries its square. Switching distance changes the magnitude
+    by 12.75x, which is why the docstring has to say so."""
+    x, target = torch.rand(1, 3, 32, 32), torch.rand(1, 3, 32, 32)
+    for distance, power in (("mse", 2), ("l1", 1)):
+        with pytest.warns(UserWarning):
+            unscaled = VGG19FeatureLoss(
+                layer="vgg22", feature_scale=1.0, distance=distance, weights=None
+            )
+        with pytest.warns(UserWarning):
+            scaled = VGG19FeatureLoss(
+                layer="vgg22", feature_scale=0.5, distance=distance, weights=None
+            )
+        scaled._vgg.load_state_dict(unscaled._vgg.state_dict())
+
+        ratio = scaled(x, target).item() / unscaled(x, target).item()
+
+        assert ratio == pytest.approx(0.5**power, rel=1e-4), distance
+
+
+def test_before_activation_changes_the_features(vgg22):
+    """ESRGAN's variant is a real behaviour change, not a documentation note."""
+    with pytest.warns(UserWarning):
+        pre = VGG19FeatureLoss(layer="vgg22", before_activation=True, weights=None)
+    pre._vgg.load_state_dict(vgg22._vgg.state_dict(), strict=False)
+    x, target = torch.rand(1, 3, 32, 32), torch.rand(1, 3, 32, 32)
+
+    assert pre(x, target).item() != pytest.approx(vgg22(x, target).item())
+
+
+def test_rejects_an_unknown_distance():
+    with pytest.raises(ValueError, match="distance"):
+        VGG19FeatureLoss(distance="huber", weights=None)
+
+
+# --- the grad contract: three independent facts ---
+
+
+def test_frozen_vgg_takes_no_gradient_but_still_passes_one_through(vgg22):
+    """Frozen weights and a grad-carrying forward are independent. Wrapping the
+    SR branch in no_grad would kill all learning while the loss still moved."""
+    vgg22.bind(RGBProcessor())
+    model = torch.nn.Conv2d(3, 3, 3, padding=1)
+    pred = model(torch.rand(1, 3, 32, 32))
+
+    vgg22(pred, torch.rand(1, 3, 32, 32)).backward()
+
+    assert model.weight.grad is not None, "gradient must reach the generator"
+    assert all(p.grad is None for p in vgg22._vgg.parameters()), "VGG must not accumulate"
+    assert not any(p.requires_grad for p in vgg22._vgg.parameters())
+
+
+def test_target_branch_is_not_differentiated(vgg22):
+    """The target is a constant; building its graph is wasted memory."""
+    vgg22.bind(RGBProcessor())
+    target = torch.rand(1, 3, 32, 32, requires_grad=True)
+
+    vgg22(torch.rand(1, 3, 32, 32, requires_grad=True), target).backward()
+
+    assert target.grad is None
+
+
+def test_vgg_params_are_invisible_to_the_optimizer(vgg22):
+    """A frozen 20M-param VGG inside .parameters() is an accident waiting for
+    someone to call requires_grad_(True) on the module."""
+    lit = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=vgg22,
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+    assert not any(p.numel() > 100_000 for p in lit.parameters())
+
+
+# --- checkpoint hygiene ---
+
+
+def test_vgg_is_absent_from_the_modules_state_dict(vgg22):
+    """20M frozen params would be ~80MB in every .ckpt, and the template writes
+    two monitors at top-k 3. It would also break strict-mode loading of a
+    checkpoint trained under a different criterion."""
+    lit = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=vgg22,
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+    keys = list(lit.state_dict())
+
+    assert not any("criterion" in k for k in keys), keys
+    assert all(k.startswith("model.") for k in keys), keys
+
+
+def test_an_mse_checkpoint_loads_strictly_into_a_vgg_configured_module(vgg22):
+    """The practical payoff of keeping VGG out of state_dict: recipes stay
+    interchangeable across a resume."""
+    args = dict(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    mse_state = SRLightning(**args).state_dict()
+
+    SRLightning(**args, criterion=vgg22).load_state_dict(mse_state, strict=True)
+
+
+def test_to_moves_the_unregistered_vgg_with_the_module(vgg22):
+    """VGG lives outside the module tree, so .to() reaches it only through the
+    _apply override. Without it, the first real step dies on a device mismatch."""
+    vgg22.to(torch.float64)
+
+    assert next(vgg22._vgg.parameters()).dtype is torch.float64
