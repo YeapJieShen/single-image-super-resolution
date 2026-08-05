@@ -56,7 +56,7 @@ class CharbonnierLoss(torch.nn.Module):
 
 
 class TotalVariationLoss(torch.nn.Module):
-    """Total-variation regularisation, ``mean(sqrt(dx^2 + dy^2 + eps^2))``.
+    """Total-variation loss: isotropic ``sqrt(dx^2 + dy^2 + eps^2)``, reduced per ``reduction``.
 
     Ledig et al. §3.4 add this to the VGG22 content loss at weight
     ``2e-8`` when training SRResNet-VGG22 — the one VGG variant reproducible

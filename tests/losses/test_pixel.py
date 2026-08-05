@@ -23,12 +23,15 @@ def test_charbonnier_matches_the_closed_form():
 
 def test_charbonnier_eps_is_squared_so_1e_6_reproduces_basicsr():
     """BasicSR computes sqrt(diff**2 + 1e-12). One formula, both conventions —
-    if eps stopped being squared, this silently becomes a different loss."""
-    pred, target = torch.tensor([[[[2.0]]]]), torch.tensor([[[[0.0]]]])
+    if eps stopped being squared, this must fail. float64 and a tolerance below
+    the 1.25e-7 relative effect size are both required: in float32 the two
+    variants differ by less than the dtype's own epsilon."""
+    pred = torch.tensor([[[[2.0]]]], dtype=torch.float64)
+    target = torch.zeros_like(pred)
 
     got = CharbonnierLoss(eps=1e-6)(pred, target)
 
-    assert got.item() == pytest.approx(math.sqrt(4.0 + 1e-12))
+    assert got.item() == pytest.approx(math.sqrt(4.0 + 1e-12), rel=1e-9)
 
 
 def test_charbonnier_gradient_is_finite_where_l1_is_not():
