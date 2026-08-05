@@ -101,6 +101,23 @@ def test_last_terms_holds_detached_weighted_contributions_that_sum_to_the_total(
     assert not any(v.requires_grad for v in loss.last_terms.values())
 
 
+def test_last_terms_are_stable_buffers_written_in_place():
+    """A CUDA-graph replay re-runs only recorded kernels, never the Python line
+    that creates a tensor — so the entry a replay updates is the one present at
+    capture. Rebinding it on an eager forward (mid-training validation, or an
+    epoch's partial last batch) would strand every per-term tag on that eager
+    value for the rest of the run, silently, while loss/train kept moving."""
+    loss = WeightedSumLoss(terms={"a": _BindSpy(2.0)}, weights={"a": 1.0})
+
+    loss(torch.zeros(1), torch.zeros(1))
+    first = loss.last_terms["a"]
+    loss.terms["a"].value = 7.0
+    loss(torch.zeros(1), torch.zeros(1))
+
+    assert loss.last_terms["a"] is first, "rebound instead of writing in place"
+    assert first.item() == pytest.approx(7.0), "buffer was not updated"
+
+
 def test_describe_renders_the_recipe():
     loss = WeightedSumLoss(
         terms={"vgg22": _BindSpy(1.0), "tv": TotalVariationLoss()},

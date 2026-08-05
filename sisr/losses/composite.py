@@ -57,7 +57,10 @@ class WeightedSumLoss(SRLoss):
 
         self.terms = torch.nn.ModuleDict(terms)
         self.weights = {name: float(weights.get(name, 1.0)) for name in terms}
-        #: Per-term weighted contributions from the most recent forward.
+        #: Per-term weighted contributions from the most recent forward, as
+        #: stable buffers written in place (see :meth:`forward`) rather than
+        #: rebound each call — a CUDA-graph replay can only update a tensor
+        #: that already existed at capture time.
         self.last_terms: dict[str, torch.Tensor] = {}
 
     def bind(self, processor: SRProcessor) -> None:
@@ -71,10 +74,16 @@ class WeightedSumLoss(SRLoss):
         total = None
         for name, term in self.terms.items():
             contribution = term(pred, target) * self.weights[name]
-            # detach().clone(): a bare detach would alias a CUDA graph's own
-            # memory and keep the whole graph alive; the clone is a scalar, and
-            # inside a capture it becomes a static buffer each replay rewrites.
-            self.last_terms[name] = contribution.detach().clone()
+            value = contribution.detach()
+            prior = self.last_terms.get(name)
+            # In place, not a fresh clone: a CUDA-graph replay re-runs only the
+            # recorded copy kernel, so the only tensor it can update is the one
+            # that existed at capture. Rebinding here would strand the tag on
+            # the last eager step's value for the rest of the run.
+            if prior is None or prior.device != value.device or prior.dtype != value.dtype:
+                self.last_terms[name] = value.clone()
+            else:
+                prior.copy_(value)
             total = contribution if total is None else total + contribution
         return total
 
