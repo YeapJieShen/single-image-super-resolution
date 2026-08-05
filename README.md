@@ -75,6 +75,65 @@ means writing a network and a config dataclass, not a new Lightning module. See
 | SRCNN | [Dong et al. 2015](https://arxiv.org/pdf/1501.00092) | pre-upsampled to HR size | none, same-resolution refinement |
 | SRResNet | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | true low-resolution | ×scale sub-pixel convolution |
 
+## Losses
+
+The criterion is wired from YAML like everything else, and defaults to
+`torch.nn.MSELoss`. Any `nn.Module` taking `(pred, target)` works, so L1 needs no
+class of ours:
+
+```yaml
+model:
+  criterion:
+    class_path: torch.nn.L1Loss
+```
+
+| Class | What it is |
+|---|---|
+| `torch.nn.MSELoss` | the default; both papers' baseline |
+| `torch.nn.L1Loss` | plain L1 |
+| `sisr.losses.CharbonnierLoss` | `sqrt(diff² + eps²)` — L1 with a finite gradient at zero |
+| `sisr.losses.TotalVariationLoss` | isotropic TV regulariser; ignores its target |
+| `sisr.losses.VGG19FeatureLoss` | VGG19 feature-space perceptual loss, any `φ_{i,j}` |
+| `sisr.losses.VGG16FeatureLoss` | the same on VGG16 (deepest layer is `vgg53`) |
+| `sisr.losses.WeightedSumLoss` | named weighted sum of any of the above |
+
+Combining them logs each term separately as `loss/train/{name}` and
+`loss/val/{name}`, so you can see which one dominates:
+
+```yaml
+model:
+  criterion:
+    class_path: sisr.losses.WeightedSumLoss
+    init_args:
+      terms:
+        vgg22:
+          class_path: sisr.losses.VGG19FeatureLoss
+          init_args:
+            layer: vgg22
+        tv:
+          class_path: sisr.losses.TotalVariationLoss
+      weights: {vgg22: 1.0, tv: 2.0e-8}
+```
+
+That is Ledig et al.'s SRResNet-VGG22 recipe: a VGG22 content loss plus total
+variation at `2e-8`, no pixel term, trained from scratch. Three things to know
+before running it:
+
+- **The first use downloads ~548 MB** of VGG19 weights into the torch hub cache.
+  Pass `weights: null` to skip the download, but only for tests — it builds a
+  random VGG and warns, because the loss it then computes is meaningless.
+- **TV's `2e-8` presumes a `[-1, 1]` model output range**, i.e.
+  `RGBSignedOutputProcessor`. Under a `[0, 1]` processor the same image has half
+  the total variation, so the effective weight differs by 2×.
+- **A perceptual run scores worse PSNR by design.** The shipped templates monitor
+  `psnr/val/RGB`, which then no longer tracks the training objective — re-point
+  `SRCheckpoint.monitor_metric` at an SSIM key, or accept it knowingly.
+
+A VGG loss needs 3-channel RGB, so it refuses a 1-channel processor (SRCNN's
+`YChannelProcessor`) unless you set `grayscale_to_rgb: true`. The frozen VGG is
+deliberately excluded from checkpoints, so a `.ckpt` trained under one criterion
+loads into a module configured with another.
+
 ## Comparability
 
 Benchmark numbers only mean something if the inputs and the metrics match the papers', so
