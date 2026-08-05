@@ -93,8 +93,8 @@ model:
 | `torch.nn.L1Loss` | plain L1 |
 | `sisr.losses.CharbonnierLoss` | `sqrt(diff² + eps²)` — L1 with a finite gradient at zero |
 | `sisr.losses.TotalVariationLoss` | isotropic TV regulariser; ignores its target |
-| `sisr.losses.VGG19FeatureLoss` | VGG19 feature-space perceptual loss, any `φ_{i,j}` |
-| `sisr.losses.VGG16FeatureLoss` | the same on VGG16 (deepest layer is `vgg53`) |
+| `sisr.losses.VGG19FeatureLoss` | VGG19 feature-space perceptual loss, any `φ_{i,j}` — blocks 1-2 have 2 convolutions, blocks 3-5 have 4 (up to `vgg54`) |
+| `sisr.losses.VGG16FeatureLoss` | the same on VGG16, but blocks 3-5 have 3 convolutions instead of 4 (deepest is `vgg53`) — experimentation only, no published SR recipe uses this depth |
 | `sisr.losses.WeightedSumLoss` | named weighted sum of any of the above |
 
 Combining them logs each term separately as `loss/train/{name}` and
@@ -125,14 +125,18 @@ before running it:
 - **TV's `2e-8` presumes a `[-1, 1]` model output range**, i.e.
   `RGBSignedOutputProcessor`. Under a `[0, 1]` processor the same image has half
   the total variation, so the effective weight differs by 2×.
-- **A perceptual run scores worse PSNR by design.** The shipped templates monitor
-  `psnr/val/RGB`, which then no longer tracks the training objective — re-point
-  `SRCheckpoint.monitor_metric` at an SSIM key, or accept it knowingly.
+- **A perceptual run scores worse PSNR by design.** The shipped templates already
+  checkpoint on both `psnr/val/RGB` and `ssim/val/RGB` — under a perceptual
+  criterion the PSNR-monitored "best" no longer tracks the training objective, so
+  decide which monitored checkpoint you actually want.
 
-A VGG loss needs 3-channel RGB, so it refuses a 1-channel processor (SRCNN's
-`YChannelProcessor`) unless you set `grayscale_to_rgb: true`. The frozen VGG is
-deliberately excluded from checkpoints, so a `.ckpt` trained under one criterion
-loads into a module configured with another.
+A VGG loss normalises with RGB ImageNet statistics, so it refuses a 1-channel
+processor (SRCNN's `YChannelProcessor`) unless you set `grayscale_to_rgb: true`,
+and it refuses a 3-channel non-RGB processor (`YCbCrProcessor`) unless you set
+`allow_non_rgb: true` — feeding Y/Cb/Cr planes to VGG as though they were R/G/B
+trains on features that mean nothing. The frozen VGG is deliberately excluded
+from checkpoints, so a `.ckpt` trained under one criterion loads into a module
+configured with another.
 
 ## Comparability
 

@@ -47,10 +47,12 @@ model:
   #         class_path: sisr.losses.TotalVariationLoss
   #     weights: {vgg22: 1.0, tv: 2.0e-8}
   #
-  # Any phi_{i,j} works (vgg11..vgg54 on VGG19, vgg11..vgg53 on VGG16), and
-  # before_activation: true selects ESRGAN's pre-ReLU features. A perceptual run
-  # scores WORSE PSNR by design, so the psnr/val/RGB monitors below no longer
-  # track the training objective -- re-point them at ssim/val/RGB or accept it.
+  # phi_{i,j}: blocks 1-2 have 2 convs on both depths (vgg11-vgg22); blocks 3-5
+  # have 4 on VGG19 (up to vgg54) or 3 on VGG16 (up to vgg53). before_activation:
+  # true selects ESRGAN's pre-ReLU features. A perceptual run scores WORSE PSNR
+  # by design; the callbacks below already checkpoint on ssim/val/RGB too, so
+  # the PSNR-monitored "best" no longer tracks the training objective -- decide
+  # which monitored checkpoint you actually want.
   training_config:
     class_path: sisr.models.srresnet.SRResNetTrainingConfig
     init_args:
