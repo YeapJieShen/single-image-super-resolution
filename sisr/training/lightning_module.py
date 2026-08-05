@@ -693,7 +693,8 @@ class SRLightning(lightning.LightningModule):
         """Compute training loss for one batch and log it.
 
         Delegates the forward + colorspace + loss pipeline to :meth:`_step`
-        and logs ``loss/train`` on every step for the progress bar.
+        and logs ``loss/train`` on every step for the progress bar, plus
+        ``loss/train/{term}`` for each term of a composite criterion.
         ``need_sr_rgb=False``: this method never looks at ``sr_rgb``, so
         skips ``processor.reconstruct`` — real per-step time (see
         :meth:`_forward_lr`) for a value that would only be discarded.
@@ -711,7 +712,31 @@ class SRLightning(lightning.LightningModule):
         if loss is None:
             loss, *_ = self._step(batch, need_sr_rgb=False)
         self.log("loss/train", loss, prog_bar=True, on_step=True)
+        self._log_loss_terms("train")
         return loss
+
+    def _log_loss_terms(self, stage: str) -> None:
+        """Log a composite criterion's per-term contributions, if it has any.
+
+        Reads ``last_terms`` structurally rather than by type, so any
+        criterion exposing that mapping participates. Empty (and so a no-op)
+        for every scalar loss.
+
+        Args:
+            stage: ``"train"`` or ``"val"`` — the middle tag segment.
+        """
+        terms = getattr(self.criterion, "last_terms", None)
+        if not terms:
+            return
+        on_step = stage == "train"
+        for name, value in terms.items():
+            self.log(
+                f"loss/{stage}/{name}",
+                value,
+                on_step=on_step,
+                on_epoch=not on_step,
+                add_dataloader_idx=False,
+            )
 
     def _graph_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor | None:
         """Run the captured training step, building the graph on first use.
@@ -870,6 +895,7 @@ class SRLightning(lightning.LightningModule):
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
         self.log("loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
+        self._log_loss_terms("val")
         primary_psnr = self.eval_config.psnr_channels[0]
         for key in self.eval_config.psnr_keys:
             sr_t, hr_t = metric_tensors[key]

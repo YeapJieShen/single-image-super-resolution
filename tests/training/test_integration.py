@@ -21,6 +21,7 @@ import torch
 from lightning.pytorch.callbacks import GradientAccumulationScheduler
 from torch.utils.data import DataLoader, Dataset
 
+from sisr.losses import TotalVariationLoss, VGG19FeatureLoss, WeightedSumLoss
 from sisr.models.srcnn import SRCNN
 from sisr.models.srresnet import SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
@@ -495,3 +496,80 @@ def test_cuda_graph_capture_leaves_batchnorm_buffers_untouched():
     assert step.captured
     for name, buf in module.named_buffers():
         assert torch.equal(buf, before[name]), name
+
+
+# ---------------------------------------------------------------------------
+# composite criterion — per-term tags must appear through a real loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_fast_dev_run_logs_per_term_loss_tags_for_a_composite_criterion(
+    tiny_rgb_image_dir: Path,
+):
+    """Only a real fit proves training_step/validation_step actually read
+    last_terms — a direct _step() call populates the dict but logs nothing."""
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        vgg = VGG19FeatureLoss(layer="vgg22", weights=None)
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=WeightedSumLoss(
+            terms={"vgg22": vgg, "tv": TotalVariationLoss()},
+            weights={"vgg22": 1.0, "tv": 2.0e-8},
+        ),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    trainer = lightning.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    trainer.fit(module, datamodule=_make_datamodule(tiny_rgb_image_dir))
+
+    metrics = set(trainer.callback_metrics)
+    assert {"loss/train", "loss/train/vgg22", "loss/train/tv"} <= metrics
+    assert {"loss/val", "loss/val/vgg22", "loss/val/tv"} <= metrics
+
+
+@requires_cuda
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_cuda_graph_replay_keeps_per_term_losses_live():
+    """last_terms holds clones captured inside the graph. If a replay stopped
+    rewriting them the tags would freeze at their capture-time values while
+    loss/train kept moving — the same silent-staleness class as a severed
+    gradient."""
+    lightning.seed_everything(7, verbose=False)
+    criterion = WeightedSumLoss(
+        terms={"mse": torch.nn.MSELoss(), "tv": TotalVariationLoss()},
+        weights={"mse": 1.0, "tv": 1e-3},
+    )
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(cuda_graph=True),
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=criterion,
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-2, momentum=0.9),
+    )
+
+    class _TermTrace(lightning.Callback):
+        def __init__(self):
+            self.mse: list[float] = []
+
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            self.mse.append(float(pl_module.criterion.last_terms["mse"]))
+
+    trace = _TermTrace()
+    loader = DataLoader(_FixedPairs(16), batch_size=4, num_workers=0, shuffle=False)
+    _graph_trainer([trace], max_steps=8).fit(module, train_dataloaders=loader)
+
+    assert module._cuda_graph is not None and module._cuda_graph.captured
+    assert len(set(trace.mse)) > 1, "per-term losses froze across graph replays"
