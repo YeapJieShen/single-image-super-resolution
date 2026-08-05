@@ -539,13 +539,21 @@ def test_fast_dev_run_logs_per_term_loss_tags_for_a_composite_criterion(
     assert {"loss/val", "loss/val/vgg22", "loss/val/tv"} <= metrics
 
 
-@requires_cuda
-@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
-def test_cuda_graph_replay_keeps_per_term_losses_live():
-    """last_terms holds clones captured inside the graph. If a replay stopped
-    rewriting them the tags would freeze at their capture-time values while
-    loss/train kept moving — the same silent-staleness class as a severed
-    gradient."""
+class _TermTrace(lightning.Callback):
+    """Records the per-step ``last_terms`` values, for exact cross-run comparison."""
+
+    def __init__(self):
+        self.terms: list[dict[str, float]] = []
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.terms.append({name: float(v) for name, v in pl_module.criterion.last_terms.items()})
+
+
+def _run_composite_graph_fit(
+    cuda_graph: bool, n_samples: int, max_steps: int
+) -> tuple[list[dict[str, float]], SRLightning]:
+    """Fit a graphed-or-eager SRCNN under a named composite criterion and
+    return its per-step ``last_terms`` trace."""
     lightning.seed_everything(7, verbose=False)
     criterion = WeightedSumLoss(
         terms={"mse": torch.nn.MSELoss(), "tv": TotalVariationLoss()},
@@ -554,22 +562,32 @@ def test_cuda_graph_replay_keeps_per_term_losses_live():
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(cuda_graph=True),
+        training_config=SRTrainingConfig(cuda_graph=cuda_graph),
         eval_config=SREvalConfig(crop_border=0),
         criterion=criterion,
         optimizer=functools.partial(torch.optim.SGD, lr=1e-2, momentum=0.9),
     )
-
-    class _TermTrace(lightning.Callback):
-        def __init__(self):
-            self.mse: list[float] = []
-
-        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            self.mse.append(float(pl_module.criterion.last_terms["mse"]))
-
     trace = _TermTrace()
-    loader = DataLoader(_FixedPairs(16), batch_size=4, num_workers=0, shuffle=False)
-    _graph_trainer([trace], max_steps=8).fit(module, train_dataloaders=loader)
+    loader = DataLoader(_FixedPairs(n_samples), batch_size=4, num_workers=0, shuffle=False)
+    _graph_trainer([trace], max_steps=max_steps).fit(module, train_dataloaders=loader)
+    return trace.terms, module
+
+
+@requires_cuda
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_cuda_graph_replay_keeps_per_term_losses_live():
+    """last_terms must be written in place, not rebound. 14 samples at batch 4
+    ends every epoch on a 2-sample batch the graph cannot replay, and
+    max_steps=12 spans more than one such epoch boundary, so an eager
+    fallback genuinely interleaves with graph replays — mirrors
+    test_cuda_graph_partial_last_batch_falls_back_without_stale_gradients's
+    idiom, but on the per-term breakdown instead of the summed total.
+    Rebinding last_terms on that fallback (the bug this guards) would strand
+    every later replay's per-term tag on the fallback's eager value,
+    diverging silently from the un-graphed trace while loss/train kept moving.
+    """
+    eager, _ = _run_composite_graph_fit(cuda_graph=False, n_samples=14, max_steps=12)
+    graphed, module = _run_composite_graph_fit(cuda_graph=True, n_samples=14, max_steps=12)
 
     assert module._cuda_graph is not None and module._cuda_graph.captured
-    assert len(set(trace.mse)) > 1, "per-term losses froze across graph replays"
+    assert graphed == eager

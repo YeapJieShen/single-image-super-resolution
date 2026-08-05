@@ -183,10 +183,24 @@ def test_before_activation_changes_the_features(vgg22):
     """ESRGAN's variant is a real behaviour change, not a documentation note."""
     with pytest.warns(UserWarning):
         pre = VGG19FeatureLoss(layer="vgg22", before_activation=True, weights=None)
-    pre._vgg.load_state_dict(vgg22._vgg.state_dict(), strict=False)
+    pre._vgg.load_state_dict(vgg22._vgg.state_dict(), strict=True)
     x, target = torch.rand(1, 3, 32, 32), torch.rand(1, 3, 32, 32)
 
     assert pre(x, target).item() != pytest.approx(vgg22(x, target).item())
+
+
+def test_describe_omits_default_knobs(vgg22):
+    assert vgg22.describe() == "VGG19FeatureLoss(vgg22)"
+
+
+def test_describe_appends_non_default_knobs():
+    """before_activation and distance both change the loss materially, so a
+    non-default value must survive into the only recipe string that lands in
+    checkpoint metadata and HParams."""
+    with pytest.warns(UserWarning):
+        loss = VGG19FeatureLoss(layer="vgg22", before_activation=True, distance="l1", weights=None)
+
+    assert loss.describe() == "VGG19FeatureLoss(vgg22, before_activation=True, distance=l1)"
 
 
 def test_rejects_an_unknown_distance():
@@ -277,3 +291,18 @@ def test_to_moves_the_unregistered_vgg_with_the_module(vgg22):
     vgg22.to(torch.float64)
 
     assert next(vgg22._vgg.parameters()).dtype is torch.float64
+
+
+def test_to_empty_with_recurse_false_leaves_the_vgg_weights_untouched(vgg22):
+    """_apply must forward recurse rather than always recursing: to_empty's
+    recurse=False call is meant to touch only this module's own tensors (there
+    are none outside _vgg), and ignoring it would silently replace every VGG
+    weight with torch.empty_like's uninitialised memory."""
+    before = [p.clone() for p in vgg22._vgg.parameters()]
+
+    vgg22.to_empty(device="cpu", recurse=False)
+
+    after = list(vgg22._vgg.parameters())
+    assert len(after) == len(before)
+    for b, a in zip(before, after, strict=True):
+        assert torch.equal(b, a)

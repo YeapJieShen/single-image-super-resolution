@@ -15,6 +15,15 @@ class SRLoss(torch.nn.Module, abc.ABC):
     model. Plain :class:`torch.nn.Module` criteria (``MSELoss``, ``L1Loss``,
     :class:`~sisr.losses.pixel.CharbonnierLoss`) need no such adaptation and
     are used directly — this base exists only for the losses that do.
+
+    A loss may optionally expose ``last_terms: dict[str, torch.Tensor]``, a
+    structural protocol :class:`SRLightning` checks via ``getattr`` rather
+    than ``isinstance``, so any criterion holding one participates in
+    per-term logging as ``loss/<stage>/<name>``
+    (:class:`~sisr.losses.composite.WeightedSumLoss` is the one that does).
+    The tensors must be stable buffers written in place on every
+    :meth:`forward`, never rebound, since a CUDA-graph replay can only
+    update a tensor that already existed at capture time.
     """
 
     @abc.abstractmethod

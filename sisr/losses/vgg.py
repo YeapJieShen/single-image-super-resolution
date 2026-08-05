@@ -1,8 +1,9 @@
 """VGG feature-space perceptual losses (Ledig et al. §3.2)."""
 
+import math
 import warnings
-from collections.abc import Sequence
-from typing import ClassVar
+from collections.abc import Callable, Sequence
+from typing import ClassVar, Self
 
 import torch
 import torchvision
@@ -164,10 +165,11 @@ class _VGGFeatureLoss(SRLoss):
         )
         self.register_buffer("_std", torch.tensor(_IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
 
-    def _apply(self, fn, recurse: bool = True):
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True) -> Self:
         """Carry ``.to()`` / dtype changes to the unregistered VGG."""
         applied = super()._apply(fn, recurse)
-        self._vgg._apply(fn)
+        if recurse:
+            self._vgg._apply(fn)
         return applied
 
     def bind(self, processor: SRProcessor) -> None:
@@ -208,8 +210,26 @@ class _VGGFeatureLoss(SRLoss):
         return _DISTANCES[self.distance](pred_features, target_features)
 
     def describe(self) -> str:
-        """e.g. ``"VGG19FeatureLoss(vgg22)"``."""
-        return f"{type(self).__name__}({self.layer})"
+        """e.g. ``"VGG19FeatureLoss(vgg22)"``, or with non-default knobs appended.
+
+        ``before_activation``, ``distance``, ``feature_scale`` and
+        ``input_norm`` all change the loss materially (see the class
+        docstring), yet this string is the only record of the criterion in
+        checkpoint metadata, HParams and provenance — so any of them that
+        differs from its default is appended, e.g.
+        ``"VGG19FeatureLoss(vgg22, before_activation=True, distance=l1)"``.
+        """
+        extras = []
+        if self.before_activation:
+            extras.append(f"before_activation={self.before_activation}")
+        if self.distance != "mse":
+            extras.append(f"distance={self.distance}")
+        if not math.isclose(self.feature_scale, 1 / 12.75, rel_tol=1e-9):
+            extras.append(f"feature_scale={self.feature_scale:g}")
+        if not self.input_norm:
+            extras.append(f"input_norm={self.input_norm}")
+        suffix = "".join(f", {extra}" for extra in extras)
+        return f"{type(self).__name__}({self.layer}{suffix})"
 
 
 class VGG19FeatureLoss(_VGGFeatureLoss):
