@@ -6,7 +6,12 @@ import torch
 from sisr.losses import VGG16FeatureLoss, VGG19FeatureLoss
 from sisr.losses.vgg import _parse_layer, _resolve_slice_end
 from sisr.models.srcnn import SRCNN
-from sisr.processors import RGBProcessor, RGBSignedOutputProcessor, YChannelProcessor
+from sisr.processors import (
+    RGBProcessor,
+    RGBSignedOutputProcessor,
+    YCbCrProcessor,
+    YChannelProcessor,
+)
 from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig
 
 VGG19_WIDTHS = (2, 2, 4, 4, 4)
@@ -149,6 +154,24 @@ def test_grayscale_to_rgb_opts_in_to_the_one_channel_case():
     loss.bind(YChannelProcessor())
 
     got = loss(torch.rand(1, 1, 32, 32), torch.rand(1, 1, 32, 32))
+
+    assert got.ndim == 0 and torch.isfinite(got)
+
+
+def test_bind_rejects_a_non_rgb_three_channel_processor_and_names_the_opt_in(vgg22):
+    """YCbCrProcessor emits 3 channels — the shape check alone would accept it, but
+    its planes are not R/G/B, so ImageNet normalisation and every downstream VGG
+    feature are meaningless. Must name allow_non_rgb, the escape hatch."""
+    with pytest.raises(ValueError, match="allow_non_rgb"):
+        vgg22.bind(YCbCrProcessor())
+
+
+def test_allow_non_rgb_opts_in_to_the_ycbcr_case():
+    with pytest.warns(UserWarning):
+        loss = VGG19FeatureLoss(layer="vgg22", allow_non_rgb=True, weights=None)
+    loss.bind(YCbCrProcessor())
+
+    got = loss(torch.rand(1, 3, 32, 32), torch.rand(1, 3, 32, 32))
 
     assert got.ndim == 0 and torch.isfinite(got)
 

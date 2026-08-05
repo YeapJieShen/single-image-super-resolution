@@ -1,6 +1,7 @@
 """Abstract base class for per-batch colorspace adapters."""
 
 import abc
+from typing import Literal
 
 import torch
 
@@ -70,4 +71,17 @@ class SRProcessor(abc.ABC):
         README documents for ONNX consumers of that processor. Recorded in
         checkpoint/export provenance metadata precisely so a downstream
         consumer never has to guess it.
+        """
+
+    @property
+    @abc.abstractmethod
+    def output_colorspace(self) -> Literal["RGB", "YCbCr", "Y"]:
+        """Colorspace of the model's output planes.
+
+        A fact only the processor knows (mirrors :attr:`output_range`) —
+        abstract rather than defaulted, because a consumer cannot tell Y/Cb/Cr
+        planes from R/G/B ones by shape, and one that matters
+        (:class:`~sisr.losses.vgg.VGG19FeatureLoss`, which normalises with RGB
+        ImageNet statistics) would otherwise silently compute a meaningless
+        quantity.
         """

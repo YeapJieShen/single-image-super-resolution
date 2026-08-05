@@ -1,5 +1,7 @@
 """RGB processors — model trains and emits RGB, in one of two output ranges."""
 
+from typing import Literal
+
 import torch
 
 from .base import SRProcessor
@@ -25,6 +27,11 @@ class RGBProcessor(SRProcessor):
     def output_range(self) -> tuple[float, float]:
         """Model output range — ``(0.0, 1.0)``, unscaled RGB."""
         return (0.0, 1.0)
+
+    @property
+    def output_colorspace(self) -> Literal["RGB", "YCbCr", "Y"]:
+        """Model output colorspace — RGB."""
+        return "RGB"
 
 
 class RGBSignedOutputProcessor(SRProcessor):
@@ -68,3 +75,8 @@ class RGBSignedOutputProcessor(SRProcessor):
     def output_range(self) -> tuple[float, float]:
         """Model output range — ``(-1.0, 1.0)``, the paper's HR range. See class docstring."""
         return (-1.0, 1.0)
+
+    @property
+    def output_colorspace(self) -> Literal["RGB", "YCbCr", "Y"]:
+        """Model output colorspace — RGB; only the range differs from RGBProcessor."""
+        return "RGB"

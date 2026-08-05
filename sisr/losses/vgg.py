@@ -101,6 +101,11 @@ class _VGGFeatureLoss(SRLoss):
         grayscale_to_rgb: Replicate a 1-channel model output across RGB
             instead of refusing it. Off by default because a Y-channel VGG
             loss is nobody's published recipe. Defaults to ``False``.
+        allow_non_rgb: Skip the RGB-colorspace check for a 3-channel
+            processor, so e.g. :class:`~sisr.processors.ycbcr.YCbCrProcessor`
+            can be paired with this loss anyway. Off by default because
+            feeding Y/Cb/Cr to VGG as though it were R/G/B is not a published
+            recipe. Defaults to ``False``.
         weights: A torchvision weights-enum name, or ``None`` for a random
             initialisation — which makes the loss meaningless and warns, and
             exists so tests can stay offline. Defaults to
@@ -124,6 +129,7 @@ class _VGGFeatureLoss(SRLoss):
         input_norm: bool = True,
         distance: str = "mse",
         grayscale_to_rgb: bool = False,
+        allow_non_rgb: bool = False,
         weights: str | None = "IMAGENET1K_V1",
     ):
         super().__init__()
@@ -156,6 +162,7 @@ class _VGGFeatureLoss(SRLoss):
         self.input_norm = input_norm
         self.distance = distance
         self.grayscale_to_rgb = grayscale_to_rgb
+        self.allow_non_rgb = allow_non_rgb
         # Identity until bind(); a [0, 1] processor needs no mapping anyway.
         self._gain, self._offset = 1.0, 0.0
         # persistent=False: constants, and a distributable checkpoint should not
@@ -182,6 +189,14 @@ class _VGGFeatureLoss(SRLoss):
                 f"perceptual loss is not a published Y-channel recipe. Set "
                 f"grayscale_to_rgb: true to replicate the single channel across "
                 f"RGB anyway, or pair the model with an RGB processor."
+            )
+        if channels == 3 and processor.output_colorspace != "RGB" and not self.allow_non_rgb:
+            raise ValueError(
+                f"{type(self).__name__} normalises with RGB ImageNet statistics, but "
+                f"{type(processor).__name__} emits {processor.output_colorspace} planes. "
+                f"Feeding Y/Cb/Cr to VGG as though they were R/G/B is not a published "
+                f"recipe and trains on features that mean nothing. Pair the model with "
+                f"an RGB processor, or set allow_non_rgb: true to experiment anyway."
             )
         low, high = processor.output_range
         if high <= low:
