@@ -21,6 +21,7 @@ from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..colorspace import rgb_to_ycbcr_studio
+from ..losses import SRLoss
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
@@ -50,7 +51,9 @@ class SRLightning(lightning.LightningModule):
         eval_config: Per-architecture evaluation settings (crop_border,
             psnr_channels, separate_psnr, ssim_channels). Defaults to base
             :class:`SREvalConfig`.
-        criterion: Loss instance. Defaults to :class:`torch.nn.MSELoss`.
+        criterion: Loss instance. Defaults to :class:`torch.nn.MSELoss`. An
+            :class:`~sisr.losses.SRLoss` additionally gets ``bind(processor)``
+            called once here, so it can adapt to the model's output space.
         optimizer: ``OptimizerCallable`` populated from top-level YAML
             ``optimizer:``. Defaults to :class:`torch.optim.Adam`.
         lr_scheduler: ``LRSchedulerCallable`` or ``None``. Defaults to ``None``.
@@ -94,6 +97,9 @@ class SRLightning(lightning.LightningModule):
         self.lr_scheduler = lr_scheduler
 
         self.training_config.validate_against(self.model, self.processor)
+
+        if isinstance(self.criterion, SRLoss):
+            self.criterion.bind(self.processor)
 
         if self.training_config.init_strategy == "paper":
             model.reset_parameters(
@@ -145,12 +151,27 @@ class SRLightning(lightning.LightningModule):
                 **self.hparams,
                 "model": model.hparams,
                 "processor": type(processor).__name__,
-                "criterion": type(self.criterion).__name__,
+                "criterion": self.criterion_description,
             }
         )
 
         if self.training_config.example_input_shape is not None:
             self.example_input_array = torch.zeros(1, *self.training_config.example_input_shape)
+
+    @property
+    def criterion_description(self) -> str:
+        """One-line human-readable identity of the criterion.
+
+        The single derivation point for the TensorBoard HParams column and
+        for checkpoint/export provenance metadata, so the two cannot drift —
+        mirroring how ``SREvalConfig.psnr_keys`` is the one derivation for
+        its consumers.
+        """
+        return (
+            self.criterion.describe()
+            if isinstance(self.criterion, SRLoss)
+            else type(self.criterion).__name__
+        )
 
     def setup(self, stage: str | None = None) -> None:
         """Probe one real sample against ``model.input_contract`` / ``example_input_shape``.
