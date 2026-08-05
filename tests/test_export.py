@@ -175,6 +175,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
         "versions",
         "model",
         "processor",
+        "criterion",
         "io",
         "eval_config",
         "training",

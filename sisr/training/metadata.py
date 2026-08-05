@@ -6,6 +6,9 @@ distributable ``.pt``), and :func:`sisr.export.to_onnx` (the ``.onnx``'s ``metad
 call :func:`build_metadata` so the three payloads cannot drift apart — mirrors how
 ``SREvalConfig.psnr_keys`` is the single derivation point for its three consumers.
 
+Carries ``format``, ``created``, ``versions``, ``model``, ``processor``, ``criterion``, ``io``,
+``eval_config``, and ``training``.
+
 Deliberately omits dataset paths: Ultralytics' ``train_args`` leaks local filesystem layout into
 distributed files; this stays leak-free by construction. If dataset provenance is ever added,
 it must be names only, never paths.
@@ -65,9 +68,11 @@ def build_metadata(
         monitor_value: Value of ``monitor`` at save time (``None`` otherwise).
 
     Returns:
-        A dict tree containing only ``dict``/``list``/``str``/``int``/``float``/``bool``/
-        ``None`` values — safe for ``torch.save``/``torch.load(weights_only=True)`` and,
-        per top-level field, for JSON-encoding into ONNX ``metadata_props``.
+        A dict tree carrying ``format``, ``created``, ``versions``, ``model``, ``processor``,
+        ``criterion``, ``io``, ``eval_config``, and ``training``. Contains only ``dict``/
+        ``list``/``str``/``int``/``float``/``bool``/``None`` values — safe for ``torch.save``/
+        ``torch.load(weights_only=True)`` and, per top-level field, for JSON-encoding into
+        ONNX ``metadata_props``.
     """
     model = module.model
     processor = module.processor
@@ -93,6 +98,10 @@ def build_metadata(
         },
         "processor": {
             "class_path": _class_path(processor),
+        },
+        "criterion": {
+            "class_path": _class_path(module.criterion),
+            "description": module.criterion_description,
         },
         "io": {
             "scale": scale,
