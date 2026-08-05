@@ -1746,6 +1746,34 @@ def test_zero_grad_unchanged_when_cuda_graph_off(rgb_lr_hr_batch):
     assert lit.model.recon.weight.grad is None
 
 
+def test_cuda_graph_val_boundary_grad_release_skipped_while_graph_live(rgb_lr_hr_batch):
+    """Before every mid-training validation Lightning releases gradient memory
+    via on_validation_model_zero_grad -> zero_grad(set_to_none=True). With a live
+    graph, optimizer.step() reads the static .grad tensors the replay fills, and
+    the replay never re-binds the parameters' .grad attributes — so one such
+    release detaches every parameter permanently: step() skips them all and the
+    weights freeze at the first validation while the logged loss keeps moving.
+    Caught on a real run: parameters bit-identical from step 50k to step 400k."""
+    lit = _graph_lit()
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+    lit._cuda_graph = SimpleNamespace(captured=True)  # a live graph owns the buffers
+
+    lit.on_validation_model_zero_grad()
+
+    assert lit.model.recon.weight.grad is not None
+
+
+def test_val_boundary_grad_release_intact_without_live_graph(rgb_lr_hr_batch):
+    """Eager runs (flag off, capture disabled, or not yet captured) must keep
+    Lightning's pre-validation memory release."""
+    lit = _graph_lit(cuda_graph=False)
+    lit._step(rgb_lr_hr_batch, need_sr_rgb=False)[0].backward()
+
+    lit.on_validation_model_zero_grad()
+
+    assert lit.model.recon.weight.grad is None
+
+
 def test_cuda_graph_refuses_mixed_precision():
     """A GradScaler scales the loss in the precision plugin's pre_backward hook,
     which a captured backward never runs — gradients would be silently unscaled."""

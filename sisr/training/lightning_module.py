@@ -801,6 +801,24 @@ class SRLightning(lightning.LightningModule):
             live = self._cuda_graph is not None and self._cuda_graph.captured
             optimizer.zero_grad(set_to_none=not live)
 
+    def on_validation_model_zero_grad(self) -> None:
+        """Skip Lightning's pre-validation gradient release while a graph is live.
+
+        Before each mid-training validation run Lightning frees gradient memory
+        with ``zero_grad(set_to_none=True)``. The replay fills the exact
+        ``.grad`` tensors allocated at capture and never re-binds the
+        parameters' ``.grad`` attributes, so one release severs the link
+        permanently: every later ``optimizer.step()`` sees ``None`` grads and
+        skips every parameter — training silently freezes at the first
+        validation while the logged loss keeps moving with the incoming
+        batches. There is also nothing to free: the tensors live in the
+        graph's private memory pool for the rest of the run either way. Eager
+        runs keep Lightning's release.
+        """
+        live = self._cuda_graph is not None and self._cuda_graph.captured
+        if not live:
+            super().on_validation_model_zero_grad()
+
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> None:
