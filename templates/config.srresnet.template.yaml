@@ -23,6 +23,38 @@ model:
     # Paper's range (Ledig et al. §3.2): LR [0,1] in, HR/target [-1,1].
     # Use RGBProcessor instead to reproduce pre-2026-08-02 runs.
     class_path: sisr.processors.RGBSignedOutputProcessor
+  # Loss. Unset means torch.nn.MSELoss, which is what both papers' baselines use.
+  # Any nn.Module taking (pred, target) works, so L1 needs no sisr class:
+  #   criterion: {class_path: torch.nn.L1Loss}
+  #   criterion: {class_path: sisr.losses.CharbonnierLoss}
+  #
+  # Ledig et al.'s SRResNet-VGG22, faithfully: a VGG22 content loss plus total
+  # variation at 2e-8, with NO pixel term, trained from scratch on the schedule
+  # already configured below (1e6 steps at lr 1e-4). The MSE-initialisation trick
+  # in the paper applies to the SRGAN variants, not to this one.
+  # Two caveats before running it: the first use downloads ~548 MB of VGG19
+  # weights to the torch hub cache, and TV's 2e-8 presumes the [-1, 1] output
+  # range that RGBSignedOutputProcessor above provides.
+  # cuda_graph: true is compatible with a VGG term -- capture engages with the
+  # VGG inside the captured region.
+  # criterion:
+  #   class_path: sisr.losses.WeightedSumLoss
+  #   init_args:
+  #     terms:
+  #       vgg22:
+  #         class_path: sisr.losses.VGG19FeatureLoss
+  #         init_args:
+  #           layer: vgg22
+  #       tv:
+  #         class_path: sisr.losses.TotalVariationLoss
+  #     weights: {vgg22: 1.0, tv: 2.0e-8}
+  #
+  # phi_{i,j}: blocks 1-2 have 2 convs on both depths (vgg11-vgg22); blocks 3-5
+  # have 4 on VGG19 (up to vgg54) or 3 on VGG16 (up to vgg53). before_activation:
+  # true selects ESRGAN's pre-ReLU features. A perceptual run scores WORSE PSNR
+  # by design; the callbacks below already checkpoint on ssim/val/RGB too, so
+  # the PSNR-monitored "best" no longer tracks the training objective -- decide
+  # which monitored checkpoint you actually want.
   training_config:
     class_path: sisr.models.srresnet.SRResNetTrainingConfig
     init_args:
