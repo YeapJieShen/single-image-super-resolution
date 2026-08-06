@@ -175,6 +175,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
         "versions",
         "model",
         "processor",
+        "criterion",
         "io",
         "eval_config",
         "training",
@@ -194,6 +195,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
     assert io_field["input"] == "pre_upsampled"
     assert io_field["input_channels"] == 1
     assert io_field["output_range"] == [0.0, 1.0]
+    assert io_field["output_colorspace"] == "Y"
 
     training_field = json.loads(props["training"])
     assert training_field == {

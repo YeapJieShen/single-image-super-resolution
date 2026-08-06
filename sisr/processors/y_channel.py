@@ -1,5 +1,7 @@
 """Y-channel processor: extract Y from LR, stitch SR-Y with bicubic LR Cb/Cr."""
 
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 
@@ -41,3 +43,8 @@ class YChannelProcessor(SRProcessor):
     def output_range(self) -> tuple[float, float]:
         """Model output range — ``(0.0, 1.0)``, unscaled Y."""
         return (0.0, 1.0)
+
+    @property
+    def output_colorspace(self) -> Literal["RGB", "YCbCr", "Y"]:
+        """Model output colorspace — Y."""
+        return "Y"

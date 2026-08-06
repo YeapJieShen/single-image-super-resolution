@@ -1,5 +1,7 @@
 """Full YCbCr processor: convert LR to YCbCr in, convert SR back to RGB out."""
 
+from typing import Literal
+
 import torch
 
 from sisr.colorspace import rgb_to_ycbcr, ycbcr_to_rgb
@@ -27,3 +29,8 @@ class YCbCrProcessor(SRProcessor):
     def output_range(self) -> tuple[float, float]:
         """Model output range — ``(0.0, 1.0)``, unscaled YCbCr."""
         return (0.0, 1.0)
+
+    @property
+    def output_colorspace(self) -> Literal["RGB", "YCbCr", "Y"]:
+        """Model output colorspace — YCbCr."""
+        return "YCbCr"

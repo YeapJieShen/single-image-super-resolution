@@ -35,6 +35,10 @@ def test_rgb_output_range_is_unit():
     assert RGBProcessor().output_range == (0.0, 1.0)
 
 
+def test_rgb_output_colorspace_is_rgb():
+    assert RGBProcessor().output_colorspace == "RGB"
+
+
 def test_rgb_extract_target_defaults_to_extract():
     """RGBProcessor doesn't override extract_target, so LR and HR share one transform."""
     p = RGBProcessor()
@@ -76,3 +80,8 @@ def test_signed_output_is_srprocessor():
 def test_signed_output_output_range_is_signed():
     """The whole reason this processor exists: output_range is [-1, 1], not [0, 1]."""
     assert RGBSignedOutputProcessor().output_range == (-1.0, 1.0)
+
+
+def test_signed_output_output_colorspace_is_rgb():
+    """Only the range differs from RGBProcessor — the colorspace is still RGB."""
+    assert RGBSignedOutputProcessor().output_colorspace == "RGB"

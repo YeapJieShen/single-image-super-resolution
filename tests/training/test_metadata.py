@@ -1,11 +1,13 @@
 import functools
 import json
 
+import pytest
 import torch
 
+from sisr.losses import TotalVariationLoss, VGG19FeatureLoss, WeightedSumLoss
 from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNet, SRResNetEvalConfig, SRResNetTrainingConfig
-from sisr.processors import RGBSignedOutputProcessor, YChannelProcessor
+from sisr.processors import RGBProcessor, RGBSignedOutputProcessor, YChannelProcessor
 from sisr.training import SRLightning, SRTrainingConfig
 from sisr.training.metadata import build_metadata
 
@@ -41,6 +43,7 @@ def test_build_metadata_top_level_shape():
         "versions",
         "model",
         "processor",
+        "criterion",
         "io",
         "eval_config",
         "training",
@@ -85,11 +88,13 @@ def test_build_metadata_io_reflects_model_input_contract_and_processor():
     assert srcnn_meta["io"]["input"] == "pre_upsampled"
     assert srcnn_meta["io"]["input_channels"] == 1  # YChannelProcessor.model_channels
     assert srcnn_meta["io"]["output_range"] == [0.0, 1.0]
+    assert srcnn_meta["io"]["output_colorspace"] == "Y"
 
     srresnet_meta = build_metadata(_make_srresnet_lit())
     assert srresnet_meta["io"]["input"] == "native_lr"
     assert srresnet_meta["io"]["input_channels"] == 3  # RGBSignedOutputProcessor.model_channels
     assert srresnet_meta["io"]["output_range"] == [-1.0, 1.0]  # the asymmetric paper range
+    assert srresnet_meta["io"]["output_colorspace"] == "RGB"
 
 
 def test_build_metadata_scale_prefers_training_config_scale():
@@ -191,3 +196,51 @@ def test_build_metadata_every_field_json_encodable_individually():
         assert isinstance(encoded, str)
         if not isinstance(value, str):
             assert json.loads(encoded) == value
+
+
+def test_metadata_records_the_criterion_identity():
+    """Provenance for 'which loss produced these weights'. A VGG-trained model
+    and an MSE-trained one are indistinguishable from the tensors alone."""
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        vgg = VGG19FeatureLoss(layer="vgg22", weights=None)
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBSignedOutputProcessor(),
+        criterion=WeightedSumLoss(
+            terms={"vgg22": vgg, "tv": TotalVariationLoss()},
+            weights={"vgg22": 1.0, "tv": 2.0e-8},
+        ),
+    )
+
+    meta = build_metadata(module)
+
+    assert meta["criterion"]["class_path"] == "sisr.losses.composite.WeightedSumLoss"
+    assert meta["criterion"]["description"] == "1*vgg22 + 2e-08*tv"
+
+
+def test_metadata_criterion_defaults_to_the_class_name_for_a_plain_loss():
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+    )
+
+    meta = build_metadata(module)
+
+    assert meta["criterion"] == {
+        "class_path": "torch.nn.modules.loss.MSELoss",
+        "description": "MSELoss",
+    }
+
+
+def test_metadata_stays_weights_only_loadable_with_a_criterion_block(tmp_path):
+    """Every metadata value must remain a plain type — the checkpoint contract."""
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+    )
+    path = tmp_path / "meta.pt"
+    torch.save({"meta": build_metadata(module)}, path)
+
+    loaded = torch.load(path, weights_only=True)
+
+    assert loaded["meta"]["criterion"]["description"] == "MSELoss"

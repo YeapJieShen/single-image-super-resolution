@@ -18,6 +18,10 @@ def test_ycbcr_output_range_is_unit():
     assert YCbCrProcessor().output_range == (0.0, 1.0)
 
 
+def test_ycbcr_output_colorspace_is_ycbcr():
+    assert YCbCrProcessor().output_colorspace == "YCbCr"
+
+
 def test_ycbcr_extract_returns_full_ycbcr():
     """extract returns full YCbCr (shape [B,3,H,W]) matching rgb_to_ycbcr."""
     p = YCbCrProcessor()

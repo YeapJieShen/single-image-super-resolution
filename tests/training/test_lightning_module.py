@@ -12,6 +12,7 @@ import torch._dynamo
 import torchmetrics
 from lightning.pytorch.callbacks import GradientAccumulationScheduler
 
+from sisr.losses import SRLoss
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
@@ -2045,3 +2046,67 @@ def test_cuda_graph_disable_warns_once_and_sticks():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert step.run((torch.zeros(1),)) is None
+
+
+# ---------------------------------------------------------------------------
+# criterion binding
+# ---------------------------------------------------------------------------
+
+
+class _SpyLoss(SRLoss):
+    """Records every bind() call so wiring can be asserted, not assumed."""
+
+    def __init__(self):
+        super().__init__()
+        self.bound: list[SRProcessor] = []
+
+    def bind(self, processor: SRProcessor) -> None:
+        self.bound.append(processor)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return (pred - target).pow(2).mean()
+
+
+def _lit_with_criterion(criterion, processor):
+    return SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=processor,
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=criterion,
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_srloss_criterion_is_bound_once_to_the_modules_own_processor():
+    """The bind seam is the only way a loss learns output_range/model_channels.
+    Binding twice would let a stateful loss double-apply its range mapping."""
+    spy, processor = _SpyLoss(), RGBSignedOutputProcessor()
+
+    _lit_with_criterion(spy, processor)
+
+    assert spy.bound == [processor], "bind must run exactly once, with this module's processor"
+
+
+def test_plain_nn_module_criterion_is_never_bound_and_still_trains():
+    """Regression guard for the isinstance branch: torch.nn losses have no bind()
+    and must keep working untouched, including the MSELoss default."""
+    lit = _lit_with_criterion(torch.nn.L1Loss(), RGBProcessor())
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss, *_ = lit._step((lr, hr))
+
+    assert torch.isfinite(loss)
+    assert lit.criterion_description == "L1Loss"
+
+
+def test_criterion_description_prefers_describe_for_srloss():
+    """One derivation point feeds both the HParams column and checkpoint metadata."""
+
+    class _Described(_SpyLoss):
+        def describe(self) -> str:
+            return "spy(recipe)"
+
+    lit = _lit_with_criterion(_Described(), RGBProcessor())
+
+    assert lit.criterion_description == "spy(recipe)"
+    assert lit._tb_hparams["criterion"] == "spy(recipe)"

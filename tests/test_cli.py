@@ -114,6 +114,56 @@ def test_srresnet_config_resolves_in_process():
     assert not hasattr(m.eval_config, "model_colorspace")
 
 
+def test_composite_criterion_resolves_through_the_real_cli(tmp_path: Path):
+    """The paper's SRResNet-VGG22 recipe (Ledig et al. §3.4: a VGG22 content
+    term plus total variation at 2e-8, no pixel term) resolved from YAML through
+    the real CLI, not constructed in Python.
+
+    WeightedSumLoss(terms: dict[str, torch.nn.Module]) with per-term nested
+    class_path/init_args relies on one specific jsonargparse capability that
+    every other composite test bypasses by building objects directly. This is
+    the one test that would catch a jsonargparse regression, a typo'd
+    class_path in the README/templates, or a terms/weights rename.
+
+    weights: null on the VGG term keeps this offline (random-init VGG) and
+    fires the "randomly initialised" UserWarning at instantiation time, which
+    the strict filterwarnings=error config would otherwise turn into a failure.
+    """
+    from sisr.losses import TotalVariationLoss, VGG19FeatureLoss, WeightedSumLoss
+
+    overlay = {
+        "model": {
+            "criterion": {
+                "class_path": "sisr.losses.WeightedSumLoss",
+                "init_args": {
+                    "terms": {
+                        "vgg22": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg22", "weights": None},
+                        },
+                        "tv": {"class_path": "sisr.losses.TotalVariationLoss"},
+                    },
+                    "weights": {"vgg22": 1.0, "tv": 2.0e-8},
+                },
+            }
+        }
+    }
+    overlay_path = tmp_path / "criterion_overlay.yaml"
+    # sort_keys=False: yaml.safe_dump's default alphabetical sort would reorder
+    # "terms" (tv before vgg22), and describe()'s order follows insertion order.
+    overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False))
+
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        cli = _resolve("--config", str(SRRESNET_TEMPLATE), "--config", str(overlay_path))
+
+    criterion = cli.model.criterion
+    assert isinstance(criterion, WeightedSumLoss)
+    assert isinstance(criterion.terms["vgg22"], VGG19FeatureLoss)
+    assert isinstance(criterion.terms["tv"], TotalVariationLoss)
+    assert criterion.weights == {"vgg22": pytest.approx(1.0), "tv": pytest.approx(2.0e-8)}
+    assert criterion.describe() == "1*vgg22 + 2e-08*tv"
+
+
 def test_test_subcommand_help_exposes_ckpt_path_in_process(capsys, monkeypatch):
     """`test --help` documents --ckpt_path and --data.test_datasets.
 

@@ -66,6 +66,28 @@ def test_srprocessor_subclass_missing_output_range_raises():
         _MissingOutputRange()
 
 
+def test_srprocessor_subclass_missing_output_colorspace_raises():
+    """output_colorspace is abstract too — model_channels/output_range alone isn't enough."""
+
+    class _MissingOutputColorspace(SRProcessor):
+        def extract(self, lr_rgb):
+            return lr_rgb
+
+        def reconstruct(self, sr_model_out, lr_rgb):
+            return sr_model_out
+
+        @property
+        def model_channels(self):
+            return 3
+
+        @property
+        def output_range(self):
+            return (0.0, 1.0)
+
+    with pytest.raises(TypeError, match="abstract"):
+        _MissingOutputColorspace()
+
+
 def test_srprocessor_complete_subclass_instantiates():
     """Subclass implementing all abstract members can be instantiated."""
 
@@ -84,6 +106,10 @@ def test_srprocessor_complete_subclass_instantiates():
         def output_range(self):
             return (0.0, 1.0)
 
+        @property
+        def output_colorspace(self):
+            return "RGB"
+
     p = _Complete()
     assert isinstance(p, SRProcessor)
     x = torch.zeros(1, 3, 4, 4)
@@ -91,6 +117,7 @@ def test_srprocessor_complete_subclass_instantiates():
     assert torch.equal(p.reconstruct(x, x), x)
     assert p.model_channels == 3
     assert p.output_range == (0.0, 1.0)
+    assert p.output_colorspace == "RGB"
 
 
 def test_extract_target_is_concrete_and_delegates_to_extract():
@@ -110,6 +137,10 @@ def test_extract_target_is_concrete_and_delegates_to_extract():
         @property
         def output_range(self):
             return (0.0, 1.0)
+
+        @property
+        def output_colorspace(self):
+            return "RGB"
 
     p = _Doubling()  # instantiates without defining extract_target
     x = torch.rand(1, 3, 4, 4)
