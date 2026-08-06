@@ -3,8 +3,10 @@
 Developer-only: needs a C compiler in the ``sisr`` env (see the plan). The test
 suite and CI read the committed JSON and never run this.
 
-Usage (from the repo root):
-    PYTHONPATH="$PWD" python tests/reference/gen_daala_ssim_expected.py
+Usage (from the repo root, PowerShell, with the ``sisr`` conda env activated --
+activation puts the env's ``Library\\bin``, hence the compiler, on PATH):
+    $env:PYTHONPATH = $PWD.Path
+    python tests/reference/gen_daala_ssim_expected.py
 """
 
 import json
@@ -27,7 +29,10 @@ def build(workdir: Path) -> Path:
     cc = shutil.which("gcc") or shutil.which("clang") or shutil.which("x86_64-w64-mingw32-gcc")
     if cc is None:
         sys.exit(
-            "No C compiler found. See the plan: conda install -n sisr -c conda-forge m2w64-gcc"
+            "No C compiler on PATH. If m2w64-gcc is already installed in the sisr env, "
+            "activate that env (or add its Library\\bin to PATH) so "
+            "x86_64-w64-mingw32-gcc.exe resolves. Otherwise install it: "
+            "conda install -n sisr -c conda-forge m2w64-gcc"
         )
     exe = workdir / ("daala_ssim.exe" if sys.platform == "win32" else "daala_ssim")
     subprocess.run(
