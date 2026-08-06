@@ -13,9 +13,11 @@ Two layers of evidence, mirroring ``tests/test_imresize.py``:
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 
-from sisr.ssim import _gaussian_kernel_int
+from sisr.ssim import _gaussian_kernel_int, daala_ssim, quantize_u8
 from tests.reference.daala_ssim_cases import CASES, make_planes
 
 EXPECTED_PATH = Path(__file__).resolve().parent / "reference" / "daala_ssim_expected.json"
@@ -89,3 +91,77 @@ def test_kernel_max_len_cap():
 def test_kernel_degenerates_to_single_tap():
     """A tiny sigma drives `len` to 0: one tap carrying the whole weight."""
     assert _gaussian_kernel_int(8 * (1.5 / 256), 8) == [256]
+
+
+def _as_batch(plane: np.ndarray) -> torch.Tensor:
+    """uint8 (H, W) -> (1, 1, H, W) float32 in [0, 1], the metric path's shape."""
+    return torch.from_numpy(plane.astype(np.float32) / 255.0)[None, None]
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
+def test_matches_daala_c_reference(case):
+    """Parity with the real daala C at rel=1e-12.
+
+    Not bit-equality: only the final pooling summation order differs (the C
+    accumulates sequentially row-major, torch reduces as a tree). 1e-12 is far
+    above that noise and far below any real transcription error.
+    """
+    a, b = make_planes(case)
+    got = daala_ssim(_as_batch(a), _as_batch(b)).item()
+    assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-12)
+
+
+def test_identical_inputs_score_one():
+    x = _as_batch(make_planes(CASES[0])[0])
+    assert daala_ssim(x, x).item() == pytest.approx(1.0, abs=1e-12)
+
+
+def test_multichannel_is_mean_over_planes():
+    a, b = make_planes(CASES[0])
+    c, d = make_planes(CASES[1])
+    # Same H so the kernel matches; stack two independent plane pairs as channels.
+    c, d = c[:256, :256], d[:256, :256]
+    per_plane = [
+        daala_ssim(_as_batch(a), _as_batch(b)).item(),
+        daala_ssim(_as_batch(c), _as_batch(d)).item(),
+    ]
+    stacked_sr = torch.cat([_as_batch(a), _as_batch(c)], dim=1)
+    stacked_hr = torch.cat([_as_batch(b), _as_batch(d)], dim=1)
+    got = daala_ssim(stacked_sr, stacked_hr).item()
+    assert got == pytest.approx(sum(per_plane) / 2, rel=1e-12)
+
+
+def test_quantize_roundtrips_every_8bit_level():
+    """Every 8-bit level must survive the round trip exactly.
+
+    This is the property the pipeline depends on: studio-range Y derives from
+    uint8 sources, and an off-by-one or a wrong scale here would shift every
+    daala score. Robust to float representation, unlike a tie test.
+    """
+    levels = torch.arange(256, dtype=torch.float64) / 255.0
+    got = quantize_u8(levels.view(1, 1, 1, 256))
+    assert got.flatten().tolist() == list(range(256))
+
+
+def test_quantize_rounds_half_away_from_zero():
+    """Ties go away from zero, not to even — sisr.imresize's convention.
+
+    The precondition assert matters: k/255 is never exactly representable
+    (255 = 3*5*17 has no power-of-two factor), so the test verifies that the
+    scaled value really does land on a tie before asserting how it breaks.
+    Without it, a representation change would silently make this test vacuous.
+    """
+    x = torch.tensor([[[[2.5 / 255]]]], dtype=torch.float64)
+    assert (x * 255.0).item() == 2.5, "precondition: scaled value must be exactly a tie"
+    # half-away-from-zero -> 3; torch.round's ties-to-even would give 2.
+    assert quantize_u8(x).item() == 3.0
+
+
+def test_quantize_clamps_out_of_range():
+    t = torch.tensor([[[[-0.5, 1.5]]]])
+    assert quantize_u8(t).flatten().tolist() == [0.0, 255.0]
+
+
+def test_rejects_mismatched_shapes():
+    with pytest.raises(ValueError, match="same shape"):
+        daala_ssim(torch.zeros(1, 1, 8, 8), torch.zeros(1, 1, 8, 9))

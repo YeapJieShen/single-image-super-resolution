@@ -64,6 +64,9 @@ from __future__ import annotations
 
 import math
 
+import torch
+import torch.nn.functional as F
+
 _KERNEL_WEIGHT = 1 << 8  # daala's KERNEL_SHIFT is 8; the kernel sums to this.
 _SSIM_K1 = 0.01 * 0.01
 _SSIM_K2 = 0.03 * 0.03
@@ -106,3 +109,97 @@ def _gaussian_kernel_int(sigma: float, max_len: int) -> list[int]:
     # Never renormalise this kernel.
     kernel[kernel_len] = _KERNEL_WEIGHT - 2 * side_sum
     return kernel
+
+
+def quantize_u8(t: torch.Tensor) -> torch.Tensor:
+    """Clamp to ``[0, 1]`` and quantise to integer 8-bit levels, in float64.
+
+    daala reads 8-bit planes, so the daala path scores what an 8-bit image
+    would hold. Rounds half away from zero, matching
+    :mod:`sisr.imresize`'s convention rather than ``torch.round``'s
+    ties-to-even. The Wang path is deliberately *not* quantised — changing it
+    would renumber every SSIM this project has ever logged.
+
+    Args:
+        t: Float tensor in ``[0, 1]`` (values outside are clamped).
+
+    Returns:
+        ``float64`` tensor of integer values in ``[0, 255]``.
+    """
+    return torch.floor(t.to(torch.float64).clamp(0.0, 1.0) * 255.0 + 0.5)
+
+
+def _blur(t: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Zero-padded separable correlation of ``(N, 1, H, W)`` with *kernel*.
+
+    Vertical then horizontal; the pass order is irrelevant because every
+    accumulation is an exact integer in float64. ``conv2d`` is a correlation,
+    not a convolution, but the kernel is symmetric so it makes no difference.
+    """
+    n = kernel.numel() // 2
+    t = F.conv2d(F.pad(t, (0, 0, n, n)), kernel.view(1, 1, -1, 1))
+    return F.conv2d(F.pad(t, (n, n, 0, 0)), kernel.view(1, 1, 1, -1))
+
+
+def daala_ssim(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
+    """SSIM computed by daala's methodology.
+
+    Sigma is ``height * 1.5/256`` on **both** axes — daala derives the
+    horizontal sigma from the height too, dividing by the pixel aspect ratio,
+    which is 1 for the square-pixel images this project scores. The height used
+    is that of the tensor passed in, i.e. already border-cropped by the caller.
+
+    Multi-channel inputs are scored per plane and averaged, matching how the
+    Wang path reduces channels; daala's own luma/chroma ``cweight`` is not used,
+    since it weights chroma against luma for a full-colour score rather than
+    the per-colourspace aggregate an ``ssim/.../RGB`` tag means here.
+
+    Args:
+        sr: Reconstruction, ``(B, C, H, W)`` float in ``[0, 1]``.
+        hr: Reference, same shape.
+
+    Returns:
+        0-dim tensor: per-sample SSIM (itself a mean over planes), meaned over
+        the batch — the same reduction the Wang path applies.
+
+    Raises:
+        ValueError: If the two tensors differ in shape.
+    """
+    if sr.shape != hr.shape:
+        raise ValueError(
+            f"sr and hr must have the same shape; got {tuple(sr.shape)} vs {tuple(hr.shape)}"
+        )
+
+    b, c, h, w = sr.shape
+    x = quantize_u8(sr).reshape(b * c, 1, h, w)
+    y = quantize_u8(hr).reshape(b * c, 1, h, w)
+
+    kernel = torch.tensor(
+        _gaussian_kernel_int(h * _SIGMA_PER_ROW, min(w, h)),
+        dtype=torch.float64,
+        device=sr.device,
+    )
+
+    mux = _blur(x, kernel)
+    muy = _blur(y, kernel)
+    x2 = _blur(x * x, kernel)
+    xy = _blur(x * y, kernel)
+    y2 = _blur(y * y, kernel)
+    # The ones-mask convolution reproduces daala's m.w exactly: near a border it
+    # is the sum of the kernel taps that actually landed inside the image.
+    mw = _blur(torch.ones_like(x), kernel)
+
+    # Operand grouping mirrors the C expression by expression. float64
+    # multiply/add rounding is order-dependent and these products exceed 2**53,
+    # so regrouping would drift from the reference.
+    smax2 = _SAMPLEMAX * _SAMPLEMAX
+    c1 = ((smax2 * _SSIM_K1) * mw) * mw
+    c2 = ((smax2 * _SSIM_K2) * mw) * mw
+    mx2 = mux * mux
+    mxy = mux * muy
+    my2 = muy * muy
+    numerator = (mw * (2 * mxy + c1)) * (c2 + 2 * (xy * mw - mxy))
+    denominator = (mx2 + my2 + c1) * ((((x2 * mw - mx2) + y2 * mw) - my2) + c2)
+
+    per_plane = (numerator / denominator).sum(dim=(1, 2, 3)) / mw.sum(dim=(1, 2, 3))
+    return per_plane.view(b, c).mean(dim=1).mean()
