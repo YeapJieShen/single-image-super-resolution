@@ -130,6 +130,26 @@ before running it:
   criterion the PSNR-monitored "best" no longer tracks the training objective, so
   decide which monitored checkpoint you actually want.
 
+### What a perceptual run costs
+
+Measured on an RTX 5060 Laptop (8 GB) at SRResNet's paper geometry — batch 16,
+96×96 HR crops, ×4, real DIV2K — as steady-state medians with warmup discarded.
+`cuda_graph: true` throughout; peak memory is `torch.cuda.max_memory_reserved`
+with the val loop excluded.
+
+| criterion | ms/step | vs MSE | peak reserved | 1e6 steps |
+|---|---|---|---|---|
+| `MSELoss` | 28.5 | 1.00× | 618 MiB | ~7.9 h |
+| `vgg22` + `tv` | 40.8 | 1.43× | 1352 MiB | ~11.3 h |
+| `vgg54` | 59.3 | 2.08× | 1490 MiB | ~16.5 h |
+
+Two things worth knowing before you plan a run: **CUDA-graph capture works with a
+VGG in the captured region** at every depth (graphs are still worth 1.22–1.37×
+under a perceptual loss, versus 1.52× under MSE — the VGG forward is real GPU work
+that graphs cannot remove), and **memory is not the constraint at this geometry**.
+Your own numbers will differ with hardware, crop size and batch size; the ratios
+travel better than the absolute times.
+
 A VGG loss normalises with RGB ImageNet statistics, so it refuses a 1-channel
 processor (SRCNN's `YChannelProcessor`) unless you set `grayscale_to_rgb: true`,
 and it refuses a 3-channel non-RGB processor (`YCbCrProcessor`) unless you set

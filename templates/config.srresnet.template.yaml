@@ -35,6 +35,10 @@ model:
   # Two caveats before running it: the first use downloads ~548 MB of VGG19
   # weights to the torch hub cache, and TV's 2e-8 presumes the [-1, 1] output
   # range that RGBSignedOutputProcessor above provides.
+  # Cost at this geometry (RTX 5060 Laptop, graphed, steady-state medians): MSE
+  # 28.5 ms/step, this vgg22+tv recipe 40.8 (1.43x, ~11.3 h for 1e6 steps), bare
+  # vgg54 59.3 (2.08x). Graph capture DOES engage with a VGG in the captured
+  # region, and peak memory stays ~1.4 GB -- neither is the constraint here.
   # criterion:
   #   class_path: sisr.losses.WeightedSumLoss
   #   init_args:
