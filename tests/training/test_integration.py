@@ -540,7 +540,7 @@ def test_fast_dev_run_logs_per_term_loss_tags_for_a_composite_criterion(
 
 
 class _TermTrace(lightning.Callback):
-    """Records the per-step ``last_terms`` values, for exact cross-run comparison."""
+    """Records the per-step ``last_terms`` values, for cross-run comparison."""
 
     def __init__(self):
         self.terms: list[dict[str, float]] = []
@@ -585,10 +585,22 @@ def test_cuda_graph_replay_keeps_per_term_losses_live():
     Rebinding last_terms on that fallback (the bug this guards) would strand
     every later replay's per-term tag on the fallback's eager value,
     diverging silently from the un-graphed trace while loss/train kept moving.
+
+    Compared to a tight relative tolerance rather than exactly. The sibling
+    loss-trace tests can demand bit-equality because they compare one MSE
+    total; the tv term reaches float32 through a sqrt, so with cuDNN
+    autotuning (``benchmark=True``) picking algorithms per process, the two
+    runs can differ in the last ulp — observed 2.70410837e-05 vs
+    2.70410874e-05, i.e. ~1.3e-7 relative. ``rel=1e-5`` sits ~80x above that
+    float32 noise floor and orders of magnitude below the stranding this
+    guards, which freezes a tag at a whole earlier step's value.
     """
     eager, _ = _run_composite_graph_fit(cuda_graph=False, n_samples=14, max_steps=12)
     graphed, module = _run_composite_graph_fit(cuda_graph=True, n_samples=14, max_steps=12)
 
     assert module._cuda_graph is not None and module._cuda_graph.captured
     assert len(graphed) == 12
-    assert graphed == eager
+    for step, (got, want) in enumerate(zip(graphed, eager, strict=True)):
+        assert got.keys() == want.keys(), step
+        for name, value in want.items():
+            assert got[name] == pytest.approx(value, rel=1e-5), (step, name)
