@@ -64,9 +64,6 @@ from __future__ import annotations
 
 import math
 
-import torch  # noqa: F401 -- consumed by the daala_ssim metric added in a later task.
-import torch.nn.functional as F  # noqa: F401 -- ditto.
-
 _KERNEL_WEIGHT = 1 << 8  # daala's KERNEL_SHIFT is 8; the kernel sums to this.
 _SSIM_K1 = 0.01 * 0.01
 _SSIM_K2 = 0.03 * 0.03
@@ -78,8 +75,10 @@ def _gaussian_kernel_int(sigma: float, max_len: int) -> list[int]:
     """Build daala's integer gaussian kernel.
 
     Literal transcription of ``gaussian_filter_init``. The kernel length is
-    chosen so the first truncated coefficient errs by at most
-    ``0.5 * KERNEL_WEIGHT``, then capped at ``max_len - 1``.
+    chosen so the first truncated tap would quantise to zero -- its value is
+    at most ``0.5`` in the integer tap units where the whole kernel sums to
+    256 -- then capped at ``max_len - 1``. (daala's own C comment phrases this
+    bound more loosely, as an error of ``0.5 * KERNEL_WEIGHT``.)
 
     Args:
         sigma: Gaussian standard deviation, in samples.
