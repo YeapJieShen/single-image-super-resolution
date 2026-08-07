@@ -30,8 +30,12 @@ integer weights; the largest quantity involved is ~2.8e14, well under 2**53, so
 float64 reproduces its integer accumulation **exactly** and the per-position
 divide runs in the same double arithmetic as the C. Only the final pooling
 *summation order* differs (C: sequential row-major; torch: tree reduction), so
-parity against ``tests/reference/daala_ssim.c`` is asserted at ``rel=1e-12``
-rather than bit-equality.
+parity against ``tests/reference/daala_ssim.c`` is asserted at ``rel=1e-9``
+rather than bit-equality. That bound is measured, not conservative padding: the
+pooling divergence grows as ~``eps*n/4``, so a *correct* implementation already
+exceeds ``1e-12`` on flat content at 256x256, while the faintest real defect
+observed (a float32 leak) reads ``5e-8``. See the parity test's docstring for
+the full bracket before tightening it.
 
 ------------------------------------------------------------------------------
 Algorithm ported from daala's ``tools/dump_ssim.c``.

@@ -167,7 +167,8 @@ def test_batch_and_channel_reduce_consistently():
     is a nested arithmetic mean over a full, equal-sized (b, c) partition --
     that is *always* equal to the grand mean of all b*c planes, for *any*
     grouping of the same b*c elements (confirmed by swapping it to
-    ``view(c, b)`` directly: bit-identical result). So no test on the *output*
+    ``view(c, b)`` directly: differs only by float noise, ~1e-16 relative, not
+    by a meaningful amount). So no test on the *output*
     can catch a transposed final view. What a B>1,C>1 test *can* catch is
     ``sr`` and ``hr`` being flattened to mismatched (batch, channel) order
     before that point -- e.g. one of them transposed relative to the other --
