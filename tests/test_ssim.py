@@ -100,20 +100,47 @@ def _as_batch(plane: np.ndarray) -> torch.Tensor:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_matches_daala_c_reference(case):
-    """Parity with the real daala C at rel=1e-12.
+    """Parity with the real daala C at rel=1e-9.
 
     Not bit-equality: only the final pooling summation order differs (the C
-    accumulates sequentially row-major, torch reduces as a tree). 1e-12 is far
-    above that noise and far below any real transcription error.
+    accumulates sequentially row-major, torch reduces as a tree). That
+    divergence grows with plane size (~eps*n/4): a *correct* port already
+    exceeds 1e-12 on flat content at 256^2 (1.494e-12) and reaches 1.545e-11 at
+    1024^2, so 1e-12 is too tight to survive resolution growth. Real defects,
+    by measurement, are >= 4.96e-8 (the faintest, a float32 leak; every
+    structural error was >= 1e-1). 1e-9 sits mid-band: ~60x above the
+    summation-order noise ceiling, ~50x below the faintest real defect.
+    Thread count (1-16) only moves the last ulp, so this is deterministic
+    C-side summation-order error, not platform flakiness.
     """
     a, b = make_planes(case)
     got = daala_ssim(_as_batch(a), _as_batch(b)).item()
-    assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-12)
+    assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-9)
 
 
 def test_identical_inputs_score_one():
+    """x vs x scores exactly 1 -- but that assertion alone can never fail.
+
+    With x == y, every numerator factor is bit-identical to its denominator
+    counterpart except for one extra factor of `mw`, so the per-pixel ratio
+    (before pooling) reduces to `mw` itself for ANY kernel and ANY weight
+    field; pooling `mw` over `sum(mw)` is then 1 regardless. Empirically
+    confirmed unchanged with sigma pinned to 1.5, 0.1, or 40.0, the `max_len`
+    cap inverted, and `mw` pinned to 65536 or to the nonsense constant 1.0. So
+    this test also flips one pixel: only a perturbed pair exercises the kernel
+    and the pooling weights enough to be able to fail.
+    """
     x = _as_batch(make_planes(CASES[0])[0])
     assert daala_ssim(x, x).item() == pytest.approx(1.0, abs=1e-12)
+
+    y = x.clone()
+    cy, cx = y.shape[-2] // 2, y.shape[-1] // 2
+    y[0, 0, cy, cx] = 1.0 - y[0, 0, cy, cx]
+    got = daala_ssim(x, y).item()
+    assert got < 1.0
+    # One flipped pixel out of 65536, diluted by the 9-tap kernel and pooled
+    # over the whole plane -- a small, specific drop, not "some smaller number".
+    assert got == pytest.approx(0.9999930105825837, rel=1e-9)
 
 
 def test_multichannel_is_mean_over_planes():
@@ -129,6 +156,61 @@ def test_multichannel_is_mean_over_planes():
     stacked_hr = torch.cat([_as_batch(b), _as_batch(d)], dim=1)
     got = daala_ssim(stacked_sr, stacked_hr).item()
     assert got == pytest.approx(sum(per_plane) / 2, rel=1e-12)
+
+
+def test_batch_and_channel_reduce_consistently():
+    """B > 1 *together with* C > 1 is needed to guard the ``reshape`` ->
+    ``view(b, c)`` pipeline against a desync between ``sr``'s and ``hr``'s
+    plane order.
+
+    Note on scope: the final ``per_plane.view(b, c).mean(dim=1).mean()`` step
+    is a nested arithmetic mean over a full, equal-sized (b, c) partition --
+    that is *always* equal to the grand mean of all b*c planes, for *any*
+    grouping of the same b*c elements (confirmed by swapping it to
+    ``view(c, b)`` directly: bit-identical result). So no test on the *output*
+    can catch a transposed final view. What a B>1,C>1 test *can* catch is
+    ``sr`` and ``hr`` being flattened to mismatched (batch, channel) order
+    before that point -- e.g. one of them transposed relative to the other --
+    which silently compares the wrong plane pairs. With B=1 or C=1 (as in the
+    two tests above) that desync is a no-op, since there is only one row or
+    one column to begin with; confirmed by running the mismatch below through
+    both of them and finding it invisible there. Six independent
+    single-channel pairs are cropped to a common 64x64 and stacked as two
+    3-channel batch entries; the batched call must equal the mean of the two
+    per-entry (mean-over-channel) scores computed independently.
+    """
+    names = [
+        "noise_256x256",
+        "noise_512x512",
+        "landscape_200x320",
+        "portrait_320x200",
+        "blurred_320x480",
+        "constant_offset_64x64",
+    ]
+    crop = 64
+    planes = {}
+    for case in CASES:
+        if case["name"] in names:
+            a, b = make_planes(case)
+            planes[case["name"]] = (a[:crop, :crop], b[:crop, :crop])
+
+    def stack_channels(*case_names: str) -> tuple[torch.Tensor, torch.Tensor]:
+        srs, hrs = zip(*(planes[n] for n in case_names), strict=True)
+        sr = torch.cat([_as_batch(p) for p in srs], dim=1)
+        hr = torch.cat([_as_batch(p) for p in hrs], dim=1)
+        return sr, hr
+
+    sample0_sr, sample0_hr = stack_channels(*names[:3])
+    sample1_sr, sample1_hr = stack_channels(*names[3:])
+    per_sample = [
+        daala_ssim(sample0_sr, sample0_hr).item(),
+        daala_ssim(sample1_sr, sample1_hr).item(),
+    ]
+
+    batched_sr = torch.cat([sample0_sr, sample1_sr], dim=0)
+    batched_hr = torch.cat([sample0_hr, sample1_hr], dim=0)
+    got = daala_ssim(batched_sr, batched_hr).item()
+    assert got == pytest.approx(sum(per_sample) / 2, rel=1e-12)
 
 
 def test_quantize_roundtrips_every_8bit_level():
@@ -165,3 +247,40 @@ def test_quantize_clamps_out_of_range():
 def test_rejects_mismatched_shapes():
     with pytest.raises(ValueError, match="same shape"):
         daala_ssim(torch.zeros(1, 1, 8, 8), torch.zeros(1, 1, 8, 9))
+
+
+def test_rejects_non_4d_input():
+    """A 3-D input must name the rank problem, not leak the ``b, c, h, w =
+    sr.shape`` tuple-unpack's ``ValueError: not enough values to unpack``."""
+    with pytest.raises(ValueError, match="4-D"):
+        daala_ssim(torch.zeros(1, 8, 8), torch.zeros(1, 8, 8))
+
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+
+
+@requires_cuda
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
+def test_matches_cpu_on_cuda(case):
+    """float64 conv on CUDA must reproduce the CPU integer-accumulation result.
+
+    The kernel is placed on ``sr.device``, so in the real pipeline this runs
+    float64 convolution on CUDA. cuDNN accepts ``kDouble`` and its algorithm
+    search includes FFT-based convolution, which would not produce exact
+    integers -- the assumption the whole port rests on -- and every other test
+    in this file runs on CPU only, so this path was previously unexercised.
+
+    Measured on an RTX 5060: 9 of the 14 cases are bit-identical CPU vs CUDA;
+    the other 5 (``landscape_200x320``, ``odd_101x67``, ``tiny_8x8``,
+    ``constant_offset_64x64``, ``noise_snr_low_256x256``) differ by at most
+    3.16e-16 relative -- a single float64 ulp, consistent with cuDNN choosing a
+    different but still-exact summation order for the final convolution
+    reduction, not FFT-based lossy accumulation. Not asserted as exact
+    equality, since it measurably isn't; rel=1e-12 is ~3e5x above that noise.
+    """
+    a, b = make_planes(case)
+    x_cpu, y_cpu = _as_batch(a), _as_batch(b)
+    x_cuda, y_cuda = x_cpu.cuda(), y_cpu.cuda()
+    cpu = daala_ssim(x_cpu, y_cpu).item()
+    cuda = daala_ssim(x_cuda, y_cuda).item()
+    assert cuda == pytest.approx(cpu, rel=1e-12)

@@ -115,10 +115,13 @@ def quantize_u8(t: torch.Tensor) -> torch.Tensor:
     """Clamp to ``[0, 1]`` and quantise to integer 8-bit levels, in float64.
 
     daala reads 8-bit planes, so the daala path scores what an 8-bit image
-    would hold. Rounds half away from zero, matching
-    :mod:`sisr.imresize`'s convention rather than ``torch.round``'s
-    ties-to-even. The Wang path is deliberately *not* quantised — changing it
-    would renumber every SSIM this project has ever logged.
+    would hold. Rounds half up via ``floor(x + 0.5)`` — equivalent to
+    half-away-from-zero here only because the preceding clamp to ``[0, 1]``
+    means ``x`` is never negative; the two conventions disagree for negative
+    ties. Matches :mod:`sisr.imresize`'s convention rather than
+    ``torch.round``'s ties-to-even. The Wang path is deliberately *not*
+    quantised — changing it would renumber every SSIM this project has ever
+    logged.
 
     Args:
         t: Float tensor in ``[0, 1]`` (values outside are clamped).
@@ -163,8 +166,13 @@ def daala_ssim(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
         the batch — the same reduction the Wang path applies.
 
     Raises:
-        ValueError: If the two tensors differ in shape.
+        ValueError: If either tensor is not 4-D, or if the two differ in shape.
     """
+    if sr.dim() != 4 or hr.dim() != 4:
+        raise ValueError(
+            f"sr and hr must be 4-D (B, C, H, W); got shapes {tuple(sr.shape)} and "
+            f"{tuple(hr.shape)}"
+        )
     if sr.shape != hr.shape:
         raise ValueError(
             f"sr and hr must have the same shape; got {tuple(sr.shape)} vs {tuple(hr.shape)}"
@@ -186,12 +194,20 @@ def daala_ssim(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
     xy = _blur(x * y, kernel)
     y2 = _blur(y * y, kernel)
     # The ones-mask convolution reproduces daala's m.w exactly: near a border it
-    # is the sum of the kernel taps that actually landed inside the image.
-    mw = _blur(torch.ones_like(x), kernel)
+    # is the sum of the kernel taps that actually landed inside the image. `mw`
+    # depends only on (h, w, kernel), not on plane content, so compute it once
+    # on a single plane and let broadcasting apply it across all B*C planes —
+    # float64 conv is otherwise the same cost as the five moment sums above,
+    # paid B*C times for an identical result.
+    mw = _blur(torch.ones((1, 1, h, w), dtype=x.dtype, device=x.device), kernel)
 
     # Operand grouping mirrors the C expression by expression. float64
     # multiply/add rounding is order-dependent and these products exceed 2**53,
-    # so regrouping would drift from the reference.
+    # so a regrouping is not bit-identical to this one -- measured at ~1e-16
+    # relative after pooling, for each of four algebraically-equivalent
+    # regroupings tried. That's far below any tolerance this module asserts
+    # (all four still passed at rel=1e-12), so no test guards this grouping:
+    # it stays exactly as written below by discipline, not by a check.
     smax2 = _SAMPLEMAX * _SAMPLEMAX
     c1 = ((smax2 * _SSIM_K1) * mw) * mw
     c2 = ((smax2 * _SSIM_K2) * mw) * mw
