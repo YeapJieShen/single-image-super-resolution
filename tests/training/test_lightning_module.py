@@ -852,6 +852,7 @@ def test_tb_hparams_expand_nested_config_fields():
     )
     flat = dict(lit._tb_hparams)
     assert flat.get("eval_config/crop_border") == 7
+    assert flat.get("eval_config/ssim_impl") == "wang"
     assert flat.get("training_config/init_strategy") == "default"
     # regression guard: no stringified dataclass blob under the bare key
     assert "eval_config" not in flat

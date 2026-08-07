@@ -18,6 +18,14 @@ def test_pyyaml_declared_in_dev_extra():
     )
 
 
+def test_wheel_ships_only_the_package():
+    """tests/reference/daala_ssim.c is a vendored C oracle for the test suite.
+    The wheel must contain the package and nothing else, so test fixtures and
+    reference sources never ship to users."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["sisr"]
+
+
 def _floor(deps: list[str], name: str) -> tuple[int, ...]:
     for spec in deps:
         match = re.match(rf"{name}\s*>=\s*([0-9.]+)", spec.strip(), re.IGNORECASE)
