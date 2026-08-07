@@ -29,6 +29,7 @@ def test_sr_eval_config_defaults():
     # has no post-hoc PSNR-style dB correction, so the paper-comparable
     # Y-SSIM ships without waiting for an architecture subclass to add it.
     assert cfg.ssim_channels == ["RGB", "Y"]
+    assert cfg.ssim_impl == "wang"
 
 
 def test_sr_eval_config_psnr_channels_isolated_per_instance():
@@ -77,7 +78,13 @@ def test_training_config_allows_cuda_graph_without_compile_backend():
 
 def test_sr_eval_config_field_names():
     names = {f.name for f in fields(SREvalConfig)}
-    assert names == {"crop_border", "psnr_channels", "separate_psnr", "ssim_channels"}
+    assert names == {
+        "crop_border",
+        "psnr_channels",
+        "separate_psnr",
+        "ssim_channels",
+        "ssim_impl",
+    }
 
 
 def test_eval_config_rejects_unknown_psnr_channel():
@@ -113,6 +120,14 @@ def test_eval_config_rejects_unknown_channel_in_either_field_independently():
         SREvalConfig(psnr_channels=["HSV"], ssim_channels=["RGB"])
     with pytest.raises(ValueError, match="ssim_channels"):
         SREvalConfig(psnr_channels=["RGB"], ssim_channels=["HSV"])
+
+
+def test_eval_config_rejects_unknown_ssim_impl():
+    """An unknown implementation fails at construction with an actionable
+    message, not at the first validation batch hours into a run."""
+    SREvalConfig(ssim_impl="daala")  # valid -- must not raise
+    with pytest.raises(ValueError, match="ssim_impl"):
+        SREvalConfig(ssim_impl="wangg")
 
 
 # ---------------------------------------------------------------------------

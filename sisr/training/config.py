@@ -266,19 +266,33 @@ class SREvalConfig:
             RGB-SSIM cannot be corrected to Y-SSIM after the fact by a
             constant offset, so there is no reason to gate it behind an
             architecture-specific subclass.
+
+        ssim_impl: Which SSIM to compute. ``'wang'`` (default) is the
+            field-standard fixed 11x11 gaussian, sigma 1.5 — what
+            ``torchmetrics``, MATLAB and BasicSR compute, and therefore what
+            most SR papers report. ``'daala'`` is the daala package's
+            resolution-adaptive variant (sigma scales with image height), the
+            convention Ledig et al. actually used; see :mod:`sisr.ssim`.
+            Switching is **in place** — the ``ssim/...`` metric names do not
+            change, so a figure is comparable only to one computed under the
+            same setting. The value is recorded in ``hparams`` and in every
+            artifact's ``sisr_meta`` so any checkpoint can be traced back.
     """
 
     crop_border: int = 0
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB"])
     separate_psnr: bool = False
     ssim_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
+    ssim_impl: Literal["wang", "daala"] = "wang"
 
     def __post_init__(self) -> None:
-        """Validate ``psnr_channels`` and ``ssim_channels`` at construction.
+        """Validate ``psnr_channels``, ``ssim_channels`` and ``ssim_impl`` at construction.
 
         Raises:
-            ValueError: If any entry of either field is not a supported
-                colorspace or single-channel name (see ``_CHANNEL_SUBNAMES``).
+            ValueError: If any entry of either channel field is not a
+                supported colorspace or single-channel name (see
+                ``_CHANNEL_SUBNAMES``), or if ``ssim_impl`` is not ``'wang'``
+                or ``'daala'``.
         """
         valid = tuple(_CHANNEL_SUBNAMES)
         for field_name in ("psnr_channels", "ssim_channels"):
@@ -289,6 +303,12 @@ class SREvalConfig:
                     f"{list(valid)}; got unsupported {invalid}. Fix "
                     f"model.eval_config.init_args.{field_name} in your YAML."
                 )
+        if self.ssim_impl not in ("wang", "daala"):
+            raise ValueError(
+                f"SREvalConfig.ssim_impl must be 'wang' or 'daala'; got "
+                f"{self.ssim_impl!r}. Fix model.eval_config.init_args.ssim_impl "
+                f"in your YAML."
+            )
 
     @property
     def psnr_keys(self) -> list[str]:

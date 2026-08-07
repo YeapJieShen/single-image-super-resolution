@@ -878,6 +878,7 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
         "psnr_channels": ["RGB"],
         "separate_psnr": False,
         "ssim_channels": ["RGB", "Y"],
+        "ssim_impl": "wang",
     }
     assert isinstance(lit.hparams["training_config"], dict)
     assert not any("/" in k for k in lit.hparams)
