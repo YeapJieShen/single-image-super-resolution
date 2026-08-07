@@ -169,35 +169,79 @@ both are pinned:
   [`SRResNetEvalConfig`](sisr/models/srresnet/config.py) overrides it to `'daala'`
   because that is the convention its paper used; SRCNN keeps `'wang'`, the field
   standard. The switch is **in place**: `ssim/val/RGB` and `ssim/val/Y` name the
-  metric identically either way, so the convention is not visible in the tag — it is
-  recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
+  metric identically either way, and checkpoint filenames
+  (`sr-{step}-ssim_val_RGB={value:.4f}.ckpt`, built by
+  [`SRCheckpoint`](sisr/training/callbacks.py)) carry only the bare number — so
+  neither the tag nor the filename reveals which convention produced a given value.
+  It is recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
   SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
   (the EDSR/RCAN/SwinIR/BasicSR lineage); always say which convention a number came
   from.
 
-## Re-scoring a checkpoint with a different `ssim_impl`
+## `--ckpt_path` silently drops subclass-only `eval_config` defaults
 
 Checkpoints saved before `ssim_impl` existed do not pick up its new default when
-reloaded. `SRLightning` stores `eval_config` in `hparams` as a bare dict with no class
-identity, and `SRLightningCLI._parse_ckpt_path` reads that dict back from
-`--ckpt_path` and re-applies it as `model.*` CLI options — which **override**
-whatever you pass on the command line. So
+reloaded — and the mechanism is not "the checkpoint overrides the CLI"; it is more
+structural than that. `SRLightning` saves `eval_config` in `hparams` as
+`dataclasses.asdict(self.eval_config)` — a bare dict with no `class_path`
+([`sisr/training/lightning_module.py`](sisr/training/lightning_module.py)).
+`SRLightningCLI._parse_ckpt_path` rebuilds that dict via `_reconstruct_ckpt_hparams`
+and hands it to jsonargparse as the `model.eval_config` value
+([`sisr/cli.py`](sisr/cli.py)). Because the dict carries no class identity,
+jsonargparse instantiates the field's **annotation type** — the base `SREvalConfig`
+— never the subclass (`SRResNetEvalConfig`) that actually produced the value, and it
+does this whether or not a CLI override was also given, since the replacement runs
+after argument parsing. Keys the dict happens to carry survive as explicit values;
+any key it is missing falls back to `SREvalConfig`'s own default, not the subclass's.
+A checkpoint saved before `ssim_impl` existed simply has no such key, so nothing
+"overrides" anything — the field falls to the base default, `wang`. `crop_border=4`
+and `psnr_channels=['RGB', 'Y']` survive reload only because `dataclasses.asdict`
+happened to record them explicitly at save time, not because the subclass identity
+is preserved.
+
+**This generalises past `ssim_impl`.** Any `SREvalConfig` field an architecture
+subclass overrides is equally at risk the moment a checkpoint predates that field, on
+**every** subcommand that accepts `--ckpt_path` — `fit` resume included, not just
+`validate`/`test`. That makes resume the more damaging case: resuming a pre-change
+SRResNet run from an old checkpoint trains and checkpoints on `wang` `ssim/val/RGB`
+for the rest of the run, while a fresh `fit` from the identical YAML uses `daala` —
+two runs of "the same config" whose monitored metric means different things,
+distinguishable only by reading `hparams`, not by anything in the logs or filenames.
+This behaviour is locked in (deliberately not fixed) by
+`test_ckpt_path_loses_subclass_only_eval_defaults` in
+[`tests/test_cli.py`](tests/test_cli.py) — read it for the exact mechanics, including
+why a CLI override alongside `--ckpt_path` doesn't help.
+
+For example:
 
 ```bash
 sisr validate --config my.yaml --ckpt_path old.ckpt --model.eval_config.ssim_impl=daala
 ```
 
 silently scores with `wang`: the emitted config confirms `wang`, and the SSIM values
-come back bit-identical to a pre-upgrade run. This is a one-time migration issue, not
-an ongoing bug — checkpoints written after this change carry `ssim_impl` and restore
-it correctly.
+come back bit-identical to a pre-upgrade run. This is a one-time migration issue per
+field, not an ongoing bug — a checkpoint written after a given field was added
+carries it explicitly and restores it correctly; it is only checkpoints predating
+that field that fall back.
 
-Workaround: patch a **copy** of the checkpoint and re-score from the copy.
+Workaround: patch a **copy** of the checkpoint and re-score (or resume) from the
+copy. Handle both hparams formats the codebase supports — current checkpoints nest
+`eval_config` as a dict, but checkpoints from before `SRLightning` stopped
+flattening `self.hparams` store `'/'`-joined keys instead (e.g.
+`"eval_config/ssim_impl"`; see `_reconstruct_ckpt_hparams` in
+[`sisr/cli.py`](sisr/cli.py) and the legacy-flattened-checkpoint test in
+[`tests/test_cli.py`](tests/test_cli.py)) — and old checkpoints are exactly the
+population this section targets:
 
 ```python
 import torch
+
 ckpt = torch.load("old.ckpt", weights_only=True, map_location="cpu")
-ckpt["hyper_parameters"]["eval_config"]["ssim_impl"] = "daala"
+hp = ckpt["hyper_parameters"]
+if "eval_config" in hp and isinstance(hp["eval_config"], dict):
+    hp["eval_config"]["ssim_impl"] = "daala"  # current nested format
+else:
+    hp["eval_config/ssim_impl"] = "daala"  # legacy '/'-flattened format
 torch.save(ckpt, "old_daala.ckpt")
 ```
 
