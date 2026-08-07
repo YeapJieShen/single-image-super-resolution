@@ -20,6 +20,7 @@ import torch
 from sisr.ssim import _gaussian_kernel_int, daala_ssim, quantize_u8
 from tests.reference.daala_ssim_cases import (
     CASES,
+    REAL_SETS,
     discover_real_cases,
     make_planes,
     make_real_planes,
@@ -36,9 +37,22 @@ def test_reference_expectations_cover_every_case():
     Not an equality check against ``set(EXPECTED)``: the committed JSON also
     holds 119 real-image cases (see ``test_real_image_matches_daala_c_reference``
     below), which stay in the file regardless of whether ``data/`` exists on
-    the machine currently running the suite.
+    the machine currently running the suite. That subset check alone would miss
+    a stray, orphaned, or misspelled key anywhere in the 133-entry file -- the
+    only structural check on the JSON on a data-less machine (i.e. CI) -- so
+    every key that isn't a synthetic case name is additionally required to look
+    like a real-image key: ``<set>/<stem>`` with ``<set>`` one of
+    :data:`~tests.reference.daala_ssim_cases.REAL_SETS`.
     """
-    assert {c["name"] for c in CASES} <= set(EXPECTED)
+    synthetic_names = {c["name"] for c in CASES}
+    assert synthetic_names <= set(EXPECTED)
+    unrecognized = {
+        key for key in set(EXPECTED) - synthetic_names if key.split("/", 1)[0] not in REAL_SETS
+    }
+    assert not unrecognized, (
+        f"key(s) in {EXPECTED_PATH.name} are neither a synthetic case nor a "
+        f"'<set>/<stem>' real-image case with <set> in {sorted(REAL_SETS)}: {sorted(unrecognized)}"
+    )
     assert all(0.0 < v <= 1.0 for v in EXPECTED.values()), EXPECTED
 
 
@@ -136,9 +150,18 @@ def _real_case_params() -> list:
     Mirrors ``tests/test_imresize.py``'s real-data pattern (see
     ``REFERENCE_DIR`` and its skip logic): a directory-existence check
     producing a single cleanly-skipped node whose reason names what is
-    missing, versus the directory existing but yielding no cases, which is
-    an error (an ``assert`` here, surfaced as a collection failure) rather
-    than a silent pass.
+    missing, versus the directory existing but yielding no cases.
+
+    That second condition is *not* asserted here. This function runs inside
+    the ``@pytest.mark.parametrize(...)`` decorator expression, i.e. at
+    collection time -- an ``assert`` that fires here raises during collection
+    of this whole module, which pytest reports as an interrupted session
+    (``Interrupted: 1 error during collection``), aborting every test in the
+    run, not just this file. That's a real, ordinary failure mode: ``data/``
+    can exist (other tests need it) while none of Set5/Set14/BSD100 do (a
+    partial download). So an empty-but-present directory instead produces one
+    parametrized node carrying ``case=None``; the loud failure happens in the
+    test body below, which only fails that one node.
     """
     if not DATA_DIR.is_dir():
         reason = (
@@ -148,7 +171,8 @@ def _real_case_params() -> list:
         )
         return [pytest.param(None, marks=pytest.mark.skip(reason=reason), id="no-data")]
     cases = discover_real_cases()
-    assert cases, f"{DATA_DIR} exists but yielded no real-image daala SSIM cases"
+    if not cases:
+        return [pytest.param(None, id="no-cases")]
     return [pytest.param(c, id=c["name"]) for c in cases]
 
 
@@ -162,7 +186,13 @@ def test_real_image_matches_daala_c_reference(case):
     (:func:`~tests.reference.daala_ssim_cases.make_real_planes`) needs no
     trained checkpoint, so these 119 expected values stay regenerable and
     meaningful indefinitely.
+
+    ``case is None`` only reaches here for the "``data/`` exists but yielded no
+    cases" node (see :func:`_real_case_params`) -- the "``data/`` absent" node
+    carries the same sentinel but is skip-marked, so its body never runs.
     """
+    if case is None:
+        pytest.fail(f"{DATA_DIR} exists but yielded no real-image daala SSIM cases")
     bicubic, hr = make_real_planes(case)
     got = daala_ssim(_as_batch(bicubic), _as_batch(hr)).item()
     assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-9)

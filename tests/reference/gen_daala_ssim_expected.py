@@ -61,6 +61,14 @@ def score(exe: Path, workdir: Path, a, b) -> float:
 
 def main() -> None:
     real_cases = discover_real_cases()
+    if not real_cases:
+        sys.exit(
+            "discover_real_cases() found no images -- refusing to overwrite "
+            "daala_ssim_expected.json, which would silently discard its 119 committed "
+            "real-image values. Ensure data/Set5_HR, data/Set14_HR, and data/BSD100_HR "
+            "(see tests/reference/daala_ssim_cases.py REAL_SETS) are present before "
+            "regenerating."
+        )
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)
         exe = build(workdir)
