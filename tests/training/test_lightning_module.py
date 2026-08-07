@@ -966,6 +966,35 @@ def test_val_psnr_is_per_image_mean_not_batch_pooled():
     assert not torch.allclose(batch_val, pooled, atol=1e-3)
 
 
+def _make_lit_with_ssim_impl(ssim_impl: str) -> SRLightning:
+    """Small RGB SRCNN wrapped in SRLightning, varying only ``eval_config.ssim_impl``."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0, ssim_channels=["Y"], ssim_impl=ssim_impl),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_mean_ssim_dispatches_on_eval_config():
+    """One seam decides which SSIM exists. Flipping ssim_impl must change the
+    value, or the flag is silently inert."""
+    import sisr.ssim
+
+    sr = torch.rand(1, 1, 64, 64, generator=torch.Generator().manual_seed(0))
+    hr = torch.rand(1, 1, 64, 64, generator=torch.Generator().manual_seed(1))
+
+    wang = _make_lit_with_ssim_impl("wang")
+    daala = _make_lit_with_ssim_impl("daala")
+
+    assert daala._mean_ssim(sr, hr).item() == pytest.approx(
+        sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12
+    )
+    assert wang._mean_ssim(sr, hr).item() != pytest.approx(daala._mean_ssim(sr, hr).item())
+
+
 # ---------------------------------------------------------------------------
 # compile_backend — configurable torch.compile plumbing
 # ---------------------------------------------------------------------------

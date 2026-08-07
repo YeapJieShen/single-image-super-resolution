@@ -313,7 +313,11 @@ class BenchmarkImageLogger(Callback):
         PSNR/SSIM are computed from the on-device ``sr``/``hr_cropped``
         slices — mirroring the primary-val-loader path in
         ``SRLightning.validation_step`` — so only the scalar ``.item()``
-        results ever leave the GPU. When *should_log_images* (or
+        results ever leave the GPU. SSIM goes through ``pl_module._mean_ssim``
+        rather than calling ``torchmetrics`` here directly, so this callback
+        cannot silently diverge from ``validation_step`` on which SSIM
+        implementation a given ``eval_config.ssim_impl`` means. When
+        *should_log_images* (or
         ``self.log_per_image_metrics``), exactly one host transfer per image
         (``lr_img[i]``/``sr[i]``/``hr_img[i]`` each ``.cpu()`` at most once)
         composes the bicubic|SR|HR strip and/or the per-image scalars, and
@@ -344,6 +348,11 @@ class BenchmarkImageLogger(Callback):
             # seam, and duplicating it here would recreate a divergence
             # this design removed. Keys now come from eval_config, so this is a value
             # lookup only — the callback no longer decides *which* keys exist.
+            # Same rationale extends to _mean_ssim below: it is the only place
+            # that decides which SSIM implementation eval_config.ssim_impl
+            # means, so reaching into it here (rather than calling
+            # torchmetrics directly) keeps this path and validation_step's
+            # unable to disagree on what "ssim/..." tags under the same name.
             metric_tensors = pl_module._build_metric_tensors(sr_metric, hr_metric)
             psnr_dict = {
                 key: torchmetrics.functional.image.peak_signal_noise_ratio(
@@ -352,9 +361,7 @@ class BenchmarkImageLogger(Callback):
                 for key in pl_module.eval_config.psnr_keys
             }
             ssim_dict = {
-                key: torchmetrics.functional.image.structural_similarity_index_measure(
-                    *metric_tensors[key], data_range=1.0
-                ).item()
+                key: pl_module._mean_ssim(*metric_tensors[key]).item()
                 for key in pl_module.eval_config.ssim_keys
             }
             self._buffer[dataset_name].append(BenchmarkSample(filename, psnr_dict, ssim_dict))

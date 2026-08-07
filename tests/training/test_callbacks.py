@@ -695,6 +695,46 @@ def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering()
             assert ssim_new[key] == pytest.approx(ssim_old[key], abs=1e-6), f"ssim[{key}]"
 
 
+def test_benchmark_logger_uses_module_ssim_impl():
+    """BenchmarkImageLogger must not re-implement the metric: with
+    ssim_impl='daala' its buffered SSIM has to equal sisr.ssim.daala_ssim, not
+    torchmetrics. Guards against the two metric paths drifting apart."""
+    import sisr.ssim
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=0, ssim_channels=["Y"], ssim_impl="daala"),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    lr_img = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(0))
+    hr_img = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(1))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=(lr_img, hr_img),
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+
+    with torch.no_grad():
+        sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
+    metric_tensors = pl_module._build_metric_tensors(sr, hr_cropped)
+    expected = sisr.ssim.daala_ssim(*metric_tensors["Y"]).item()
+
+    sample = cb._buffer["Set5"][0]
+    assert sample.ssim["Y"] == pytest.approx(expected, rel=1e-9)
+
+
 def test_benchmark_validation_epoch_end_logs_means():
     """on_validation_epoch_end consumes the buffer and emits per-dataset mean
     PSNR + SSIM via pl_module.log (verified by mocking the log method)."""
