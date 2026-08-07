@@ -16,7 +16,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tests.reference.daala_ssim_cases import CASES, make_planes
+from tests.reference.daala_ssim_cases import (
+    CASES,
+    discover_real_cases,
+    make_planes,
+    make_real_planes,
+)
 
 HERE = Path(__file__).resolve().parent
 
@@ -55,14 +60,16 @@ def score(exe: Path, workdir: Path, a, b) -> float:
 
 
 def main() -> None:
+    real_cases = discover_real_cases()
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)
         exe = build(workdir)
         expected = {c["name"]: score(exe, workdir, *make_planes(c)) for c in CASES}
+        expected.update({c["name"]: score(exe, workdir, *make_real_planes(c)) for c in real_cases})
     (HERE / "daala_ssim_expected.json").write_text(
         json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(f"wrote {len(expected)} cases")
+    print(f"wrote {len(expected)} cases ({len(CASES)} synthetic, {len(real_cases)} real)")
 
 
 if __name__ == "__main__":

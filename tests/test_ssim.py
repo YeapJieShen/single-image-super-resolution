@@ -18,15 +18,27 @@ import pytest
 import torch
 
 from sisr.ssim import _gaussian_kernel_int, daala_ssim, quantize_u8
-from tests.reference.daala_ssim_cases import CASES, make_planes
+from tests.reference.daala_ssim_cases import (
+    CASES,
+    discover_real_cases,
+    make_planes,
+    make_real_planes,
+)
 
 EXPECTED_PATH = Path(__file__).resolve().parent / "reference" / "daala_ssim_expected.json"
 EXPECTED: dict[str, float] = json.loads(EXPECTED_PATH.read_text(encoding="utf-8"))
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def test_reference_expectations_cover_every_case():
-    """The committed C output must cover the whole case matrix, in range."""
-    assert set(EXPECTED) == {c["name"] for c in CASES}
+    """The committed C output must cover the whole synthetic case matrix, in range.
+
+    Not an equality check against ``set(EXPECTED)``: the committed JSON also
+    holds 119 real-image cases (see ``test_real_image_matches_daala_c_reference``
+    below), which stay in the file regardless of whether ``data/`` exists on
+    the machine currently running the suite.
+    """
+    assert {c["name"] for c in CASES} <= set(EXPECTED)
     assert all(0.0 < v <= 1.0 for v in EXPECTED.values()), EXPECTED
 
 
@@ -115,6 +127,44 @@ def test_matches_daala_c_reference(case):
     """
     a, b = make_planes(case)
     got = daala_ssim(_as_batch(a), _as_batch(b)).item()
+    assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-9)
+
+
+def _real_case_params() -> list:
+    """Build the ``case`` parametrize argument for the real-image parity test.
+
+    Mirrors ``tests/test_imresize.py``'s real-data pattern (see
+    ``REFERENCE_DIR`` and its skip logic): a directory-existence check
+    producing a single cleanly-skipped node whose reason names what is
+    missing, versus the directory existing but yielding no cases, which is
+    an error (an ``assert`` here, surfaced as a collection failure) rather
+    than a silent pass.
+    """
+    if not DATA_DIR.is_dir():
+        reason = (
+            f"{DATA_DIR} not present -- fetch Set5/Set14/BSD100 HR image sets (see "
+            "tests/reference/daala_ssim_cases.py REAL_SETS) to enable real-image daala "
+            "SSIM parity."
+        )
+        return [pytest.param(None, marks=pytest.mark.skip(reason=reason), id="no-data")]
+    cases = discover_real_cases()
+    assert cases, f"{DATA_DIR} exists but yielded no real-image daala SSIM cases"
+    return [pytest.param(c, id=c["name"]) for c in cases]
+
+
+@pytest.mark.parametrize("case", _real_case_params())
+def test_real_image_matches_daala_c_reference(case):
+    """Real Set5/Set14/BSD100 bicubic-baseline parity against the daala C.
+
+    Same rel=1e-9 bound as :func:`test_matches_daala_c_reference` and for the
+    same reason -- pooling summation-order divergence, not a defect; see that
+    test's docstring for the full measured bracket. The bicubic baseline
+    (:func:`~tests.reference.daala_ssim_cases.make_real_planes`) needs no
+    trained checkpoint, so these 119 expected values stay regenerable and
+    meaningful indefinitely.
+    """
+    bicubic, hr = make_real_planes(case)
+    got = daala_ssim(_as_batch(bicubic), _as_batch(hr)).item()
     assert got == pytest.approx(EXPECTED[case["name"]], rel=1e-9)
 
 
