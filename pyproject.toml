@@ -96,6 +96,14 @@ testpaths = ["tests"]
 # bare `pytest` in a dev shell runs serial. See test.yml's test-matrix job for the
 # worker-count rationale and measurements.
 addopts = "-ra --strict-markers --import-mode=importlib"
+# importlib import-mode does NOT add the repo root to sys.path — tests/test_ssim.py's
+# `from tests.reference....` (and any `import sisr`) only resolves today because the
+# editable install's .pth file happens to put it there. A non-editable install (`pip
+# install .`) plus bare pytest fails at collection; bare pytest from a git worktree
+# (this project's PR workflow) would resolve `tests.reference` from a DIFFERENT
+# checkout's sys.path entry while the sibling EXPECTED_PATH stays worktree-local,
+# silently mixing two trees. Explicit pythonpath removes the dependency on install mode.
+pythonpath = ["."]
 filterwarnings = [
     "error",
     # Lightning 2.6.5 constructs torch 2.12's deprecated pytree `LeafSpec` at
