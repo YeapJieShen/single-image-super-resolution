@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import GradientAccumulationScheduler
 
 from sisr.losses import SRLoss
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
-from sisr.models.srresnet import SRResNetTrainingConfig
+from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import (
     RGBProcessor,
@@ -994,6 +994,44 @@ def test_mean_ssim_dispatches_on_eval_config():
         sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12
     )
     assert wang._mean_ssim(sr, hr).item() != pytest.approx(daala._mean_ssim(sr, hr).item())
+
+
+def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
+    """Coverage gap: every other ssim_impl test above builds a manually
+    constructed base SREvalConfig, never SRResNet's own (unconfigured)
+    SRResNetEvalConfig() — so a future change that special-cases by eval-config
+    subclass, or a CLI/subclass field-resolution bug, could flip the
+    architecture default without failing anything. This computes a real SSIM
+    through the real subclass, mirroring test_metadata.py's _make_srresnet_lit()
+    construction rather than a bespoke one.
+
+    torch.manual_seed seeds SRResNet's weight init for reproducibility, even
+    though _mean_ssim never runs the model forward — sr/hr are independent
+    inputs — so nothing here is actually seed-sensitive, but a prior task's
+    unseeded model was flagged in review and this follows the same discipline.
+    """
+    from torchmetrics.functional.image import structural_similarity_index_measure
+
+    import sisr.ssim
+
+    torch.manual_seed(0)
+    model = SRResNet(scale=4, hidden_channel=8, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(),
+        eval_config=SRResNetEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+    sr = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(2))
+    hr = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(3))
+
+    result = lit._mean_ssim(sr, hr)
+
+    assert result.item() == pytest.approx(sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12)
+    wang_result = structural_similarity_index_measure(sr, hr, data_range=1.0)
+    assert result.item() != pytest.approx(wang_result.item())
 
 
 # ---------------------------------------------------------------------------

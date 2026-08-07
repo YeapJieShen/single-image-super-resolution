@@ -76,6 +76,7 @@ def test_srcnn_config_resolves_in_process():
     assert isinstance(m.training_config, SRCNNTrainingConfig)
     assert isinstance(m.eval_config, SRCNNEvalConfig)
     assert m.eval_config.crop_border == 3  # inherited-default check
+    assert m.eval_config.ssim_impl == "wang"  # inherited-default check
     # Paper recipe: reconstruction layer learns 10x slower than the other two.
     assert m.training_config.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
     # Top-level optimizer block linked from YAML.
@@ -104,6 +105,7 @@ def test_srresnet_config_resolves_in_process():
     assert isinstance(m.training_config, SRResNetTrainingConfig)
     assert isinstance(m.eval_config, SRResNetEvalConfig)
     assert m.eval_config.crop_border == 4  # inherited-default check
+    assert m.eval_config.ssim_impl == "daala"  # inherited-default check
     # Dataset specs stay plain {class_path, init_args} dicts (materialized lazily
     # in SRDataModule.setup), so assert on the resolved raw config.
     assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.srresnet.TrainDataset"
