@@ -151,6 +151,55 @@ both are pinned:
   the [EDSR authors](https://github.com/sanghyun-son/EDSR-PyTorch).
 - **Metrics** are Y-channel PSNR/SSIM in BT.601 studio range (MATLAB's `rgb2ycbcr`
   convention, which is what published figures use), computed on output clamped to `[0, 1]`.
+- **SSIM has two incompatible conventions, and unlike PSNR the choice is not
+  cosmetic.** PSNR is a closed-form function of squared error, so any correct
+  implementation agrees with any other. SSIM depends on a local-window gaussian that
+  the SR field never standardised on: Wang et al.'s original uses a fixed 11×11 window
+  at sigma 1.5 — what `torchmetrics`, MATLAB's reference code, and BasicSR's
+  `calculate_ssim` all compute, and therefore what most SR papers report. Ledig et al.
+  (SRResNet/SRGAN) instead scored with the **daala** video-codec package, whose
+  gaussian sigma scales with image height (`_h*(1.5/256)`) rather than staying fixed.
+  The same image therefore scores differently under the two conventions, and a
+  benchmark set's aggregate partly reflects the pixel dimensions of its images, not
+  only reconstruction quality. [`sisr/ssim.py`](sisr/ssim.py) ports daala's method,
+  verified against daala's own compiled C reference on 133 cases, and
+  `SREvalConfig.ssim_impl` (`'wang'` or `'daala'`, see
+  [`sisr/training/config.py`](sisr/training/config.py)) selects between them —
+  `'wang'` is the base default, and
+  [`SRResNetEvalConfig`](sisr/models/srresnet/config.py) overrides it to `'daala'`
+  because that is the convention its paper used; SRCNN keeps `'wang'`, the field
+  standard. The switch is **in place**: `ssim/val/RGB` and `ssim/val/Y` name the
+  metric identically either way, so the convention is not visible in the tag — it is
+  recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
+  SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
+  (the EDSR/RCAN/SwinIR/BasicSR lineage); always say which convention a number came
+  from.
+
+## Re-scoring a checkpoint with a different `ssim_impl`
+
+Checkpoints saved before `ssim_impl` existed do not pick up its new default when
+reloaded. `SRLightning` stores `eval_config` in `hparams` as a bare dict with no class
+identity, and `SRLightningCLI._parse_ckpt_path` reads that dict back from
+`--ckpt_path` and re-applies it as `model.*` CLI options — which **override**
+whatever you pass on the command line. So
+
+```bash
+sisr validate --config my.yaml --ckpt_path old.ckpt --model.eval_config.ssim_impl=daala
+```
+
+silently scores with `wang`: the emitted config confirms `wang`, and the SSIM values
+come back bit-identical to a pre-upgrade run. This is a one-time migration issue, not
+an ongoing bug — checkpoints written after this change carry `ssim_impl` and restore
+it correctly.
+
+Workaround: patch a **copy** of the checkpoint and re-score from the copy.
+
+```python
+import torch
+ckpt = torch.load("old.ckpt", weights_only=True, map_location="cpu")
+ckpt["hyper_parameters"]["eval_config"]["ssim_impl"] = "daala"
+torch.save(ckpt, "old_daala.ckpt")
+```
 
 ## ONNX export
 
