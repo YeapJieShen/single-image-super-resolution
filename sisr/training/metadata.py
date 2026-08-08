@@ -6,8 +6,21 @@ distributable ``.pt``), and :func:`sisr.export.to_onnx` (the ``.onnx``'s ``metad
 call :func:`build_metadata` so the three payloads cannot drift apart — mirrors how
 ``SREvalConfig.psnr_keys`` is the single derivation point for its three consumers.
 
-Carries ``format``, ``created``, ``versions``, ``model``, ``processor``, ``criterion``, ``io``,
-``eval_config``, and ``training``.
+:func:`build_component_metadata` is a second builder for a bare ``.pt`` that is **not** the SR
+model — e.g. a discriminator's weights. Both builders are built on one private :func:`_envelope`
+helper (``format``/``kind``/``created``/``versions``/``training``), so the two payload shapes
+cannot drift apart either. Each carries a ``kind`` field: ``"sr_model"`` for :func:`build_metadata`,
+``"component"`` for :func:`build_component_metadata`. This is an additive field, not a format
+change — ``FORMAT_VERSION`` is unchanged, and its absence on a file written before ``kind``
+existed means ``"sr_model"``, the only kind that existed then.
+
+:func:`build_metadata` carries ``format``, ``kind``, ``created``, ``versions``, ``model``,
+``processor``, ``criterion``, ``io``, ``eval_config``, and ``training`` — it describes the
+*generator*. :func:`build_component_metadata` carries ``format``, ``kind``, ``created``,
+``versions``, ``component``, ``io``, and ``training`` — it describes one other named component
+only. Attaching the former to the latter's weights would describe things the file does not
+contain (``io.scale``, ``criterion``, ``eval_config``); this is the silent-wrong-artifact class
+this metadata exists to prevent, so the two never share a shape beyond the envelope.
 
 Deliberately omits dataset paths: Ultralytics' ``train_args`` leaks local filesystem layout into
 distributed files; this stays leak-free by construction. If dataset provenance is ever added,
@@ -47,6 +60,39 @@ def _class_path(obj: Any) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
+def _envelope(
+    kind: str,
+    global_step: int | None,
+    epoch: int | None,
+    monitor: str | None,
+    monitor_value: float | None,
+) -> dict[str, Any]:
+    """Fields every sisr artifact carries, whatever it holds.
+
+    The one thing :func:`build_metadata` and :func:`build_component_metadata` build on
+    in common, so ``format``/``versions``/``training`` cannot drift apart between them.
+    """
+    return {
+        "format": FORMAT_VERSION,
+        "kind": kind,
+        "created": datetime.now(UTC).isoformat(),
+        "versions": {
+            # str(...) matters here: torch.__version__ is a TorchVersion (str
+            # subclass), which torch.load(weights_only=True) refuses to unpickle
+            # as an unlisted global. Coerce to plain str for every field.
+            "sisr": str(sisr.__version__),
+            "torch": str(torch.__version__),
+            "lightning": str(lightning.__version__),
+        },
+        "training": {
+            "global_step": global_step,
+            "epoch": epoch,
+            "monitor": monitor,
+            "monitor_value": monitor_value,
+        },
+    }
+
+
 def build_metadata(
     module: SRLightning,
     *,
@@ -68,11 +114,11 @@ def build_metadata(
         monitor_value: Value of ``monitor`` at save time (``None`` otherwise).
 
     Returns:
-        A dict tree carrying ``format``, ``created``, ``versions``, ``model``, ``processor``,
-        ``criterion``, ``io``, ``eval_config``, and ``training``. Contains only ``dict``/
-        ``list``/``str``/``int``/``float``/``bool``/``None`` values — safe for ``torch.save``/
-        ``torch.load(weights_only=True)`` and, per top-level field, for JSON-encoding into
-        ONNX ``metadata_props``.
+        A dict tree carrying ``format``, ``kind`` (``"sr_model"``), ``created``, ``versions``,
+        ``model``, ``processor``, ``criterion``, ``io``, ``eval_config``, and ``training``.
+        Contains only ``dict``/``list``/``str``/``int``/``float``/``bool``/``None`` values —
+        safe for ``torch.save``/``torch.load(weights_only=True)`` and, per top-level field, for
+        JSON-encoding into ONNX ``metadata_props``.
     """
     model = module.model
     processor = module.processor
@@ -81,40 +127,72 @@ def build_metadata(
     if scale is None:
         scale = model.hparams.get("scale")
 
-    return {
-        "format": FORMAT_VERSION,
-        "created": datetime.now(UTC).isoformat(),
-        "versions": {
-            # str(...) matters here: torch.__version__ is a TorchVersion (str
-            # subclass), which torch.load(weights_only=True) refuses to unpickle
-            # as an unlisted global. Coerce to plain str for every field.
-            "sisr": str(sisr.__version__),
-            "torch": str(torch.__version__),
-            "lightning": str(lightning.__version__),
-        },
-        "model": {
-            "class_path": _class_path(model),
-            "init_args": _to_plain(model.hparams),
-        },
-        "processor": {
-            "class_path": _class_path(processor),
-        },
-        "criterion": {
-            "class_path": _class_path(module.criterion),
-            "description": module.criterion_description,
-        },
-        "io": {
-            "scale": scale,
-            "input": model.input_contract,
-            "input_channels": processor.model_channels,
-            "output_range": list(processor.output_range),
-            "output_colorspace": processor.output_colorspace,
-        },
-        "eval_config": _to_plain(dataclasses.asdict(module.eval_config)),
-        "training": {
-            "global_step": global_step,
-            "epoch": epoch,
-            "monitor": monitor,
-            "monitor_value": monitor_value,
-        },
+    meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value)
+    meta["model"] = {
+        "class_path": _class_path(model),
+        "init_args": _to_plain(model.hparams),
     }
+    meta["processor"] = {
+        "class_path": _class_path(processor),
+    }
+    meta["criterion"] = {
+        "class_path": _class_path(module.criterion),
+        "description": module.criterion_description,
+    }
+    meta["io"] = {
+        "scale": scale,
+        "input": model.input_contract,
+        "input_channels": processor.model_channels,
+        "output_range": list(processor.output_range),
+        "output_colorspace": processor.output_colorspace,
+    }
+    meta["eval_config"] = _to_plain(dataclasses.asdict(module.eval_config))
+    return meta
+
+
+def build_component_metadata(
+    module: SRLightning,
+    attribute: str,
+    *,
+    global_step: int | None = None,
+    epoch: int | None = None,
+    monitor: str | None = None,
+    monitor_value: float | None = None,
+) -> dict[str, Any]:
+    """Provenance for a bare weights file that is **not** the SR model.
+
+    :func:`build_metadata` describes the *generator* — ``io.scale``, ``io.input``,
+    ``criterion``, ``eval_config``. Attaching that to a discriminator's weights would
+    describe something the file does not contain, which is the silent-wrong-artifact
+    failure this metadata exists to prevent.
+
+    ``io.input_range`` is the load-bearing field: a discriminator is trained on
+    model-space tensors (``[-1, 1]`` under ``RGBSignedOutputProcessor``), and feeding
+    it ``[0, 1]`` data later is wrong with no error.
+
+    Args:
+        module: The Lightning module owning the component.
+        attribute: Attribute name of the component on ``module`` (e.g. ``'discriminator'``).
+        global_step: Optimizer step at save time, when known.
+        epoch: Training epoch at save time, when known.
+        monitor: Metric that triggered this save, when monitor-driven.
+        monitor_value: Value of ``monitor`` at save time.
+
+    Returns:
+        A dict tree carrying ``format``, ``kind`` (``"component"``), ``created``,
+        ``versions``, ``component``, ``io``, and ``training`` — a plain dict, ``torch.load
+        (weights_only=True)``-safe like :func:`build_metadata`.
+    """
+    component = getattr(module, attribute)
+    processor = module.processor
+    meta = _envelope("component", global_step, epoch, monitor, monitor_value)
+    meta["component"] = {
+        "name": attribute,
+        "class_path": _class_path(component),
+        "init_args": _to_plain(getattr(component, "hparams", {})),
+    }
+    meta["io"] = {
+        "input_range": list(processor.output_range),
+        "input_colorspace": processor.output_colorspace,
+    }
+    return meta

@@ -9,7 +9,7 @@ from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNet, SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.processors import RGBProcessor, RGBSignedOutputProcessor, YChannelProcessor
 from sisr.training import SRLightning, SRTrainingConfig
-from sisr.training.metadata import build_metadata
+from sisr.training.metadata import build_component_metadata, build_metadata
 
 
 def _make_srcnn_lit() -> SRLightning:
@@ -39,6 +39,7 @@ def test_build_metadata_top_level_shape():
     meta = build_metadata(lit)
     assert set(meta.keys()) == {
         "format",
+        "kind",
         "created",
         "versions",
         "model",
@@ -252,3 +253,103 @@ def test_metadata_stays_weights_only_loadable_with_a_criterion_block(tmp_path):
     loaded = torch.load(path, weights_only=True)
 
     assert loaded["meta"]["criterion"]["description"] == "MSELoss"
+
+
+# ---------------------------------------------------------------------------
+# build_component_metadata — provenance for a non-generator component (e.g.
+# a future discriminator; SRDiscriminator itself doesn't exist until a later
+# task, so these use a local stand-in exercising the same generic mechanism).
+# ---------------------------------------------------------------------------
+
+
+class _StubComponent(torch.nn.Module):
+    """Stand-in for a not-yet-existing named component (e.g. a discriminator).
+
+    Deliberately not named after any real architecture: a class_path
+    assertion must check the metadata against *this* class's own real path,
+    not coincide with a hardcoded string that would keep passing even if the
+    real component were later renamed.
+    """
+
+    def __init__(self, hr_input_size: int):
+        super().__init__()
+        self.hparams = {"hr_input_size": hr_input_size}
+        self.net = torch.nn.Conv2d(3, 4, kernel_size=3, padding=1)
+
+
+class _StubComponentNoHparams(torch.nn.Module):
+    """Same shape, but with no `hparams` attribute — exercises
+    build_component_metadata's `getattr(component, 'hparams', {})` default."""
+
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Conv2d(3, 2, kernel_size=1)
+
+
+def _make_srresnet_lit_with_component(component: torch.nn.Module) -> SRLightning:
+    lit = _make_srresnet_lit()
+    lit.discriminator = component
+    return lit
+
+
+def test_generator_metadata_declares_its_kind():
+    meta = build_metadata(_make_srcnn_lit())
+    assert meta["kind"] == "sr_model"
+
+
+def test_component_metadata_describes_the_component_not_the_generator():
+    """A D weights file carrying the generator's metadata is the exact
+    silent-wrong-artifact class sisr_meta exists to prevent."""
+    stub = _StubComponent(hr_input_size=96)
+    module = _make_srresnet_lit_with_component(stub)
+    meta = build_component_metadata(module, "discriminator")
+
+    assert meta["kind"] == "component"
+    assert meta["component"]["name"] == "discriminator"
+    # Checked against the stub's own real path, not a hardcoded string --
+    # a coincidental match wouldn't prove build_component_metadata records
+    # the *actual* class of the component it was given.
+    assert meta["component"]["class_path"] == f"{type(stub).__module__}.{type(stub).__qualname__}"
+    # input_range is load-bearing: D is trained on model-space [-1,1] tensors,
+    # and feeding it [0,1] later is wrong with no error.
+    assert meta["io"]["input_range"] == [-1.0, 1.0]
+    assert "scale" not in meta["io"]
+    assert "criterion" not in meta
+
+
+def test_component_metadata_records_the_components_own_init_args():
+    module = _make_srresnet_lit_with_component(_StubComponent(hr_input_size=96))
+    meta = build_component_metadata(module, "discriminator")
+    assert meta["component"]["init_args"] == {"hr_input_size": 96}
+
+
+def test_component_metadata_init_args_defaults_to_empty_without_hparams():
+    """A component with no `hparams` attribute (a plain nn.Module) must not
+    crash build_component_metadata -- init_args just defaults to empty."""
+    module = _make_srresnet_lit_with_component(_StubComponentNoHparams())
+    meta = build_component_metadata(module, "discriminator")
+    assert meta["component"]["init_args"] == {}
+
+
+def test_component_metadata_training_fields_forwarded():
+    module = _make_srresnet_lit_with_component(_StubComponent(hr_input_size=96))
+    meta = build_component_metadata(
+        module, "discriminator", global_step=100, epoch=2, monitor=None, monitor_value=None
+    )
+    assert meta["training"] == {
+        "global_step": 100,
+        "epoch": 2,
+        "monitor": None,
+        "monitor_value": None,
+    }
+
+
+def test_component_metadata_is_weights_only_safe(tmp_path):
+    module = _make_srresnet_lit_with_component(_StubComponent(hr_input_size=96))
+    meta = build_component_metadata(module, "discriminator", global_step=7, epoch=0)
+    path = tmp_path / "component_meta.pt"
+    torch.save({"meta": meta}, path)
+
+    loaded = torch.load(path, weights_only=True)
+
+    assert loaded["meta"] == meta

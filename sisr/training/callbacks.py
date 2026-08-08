@@ -25,7 +25,7 @@ from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelChe
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from ..perceptual import PERCEPTUAL_METRICS
-from .metadata import build_metadata
+from .metadata import build_component_metadata, build_metadata
 
 
 class BenchmarkSample(NamedTuple):
@@ -768,6 +768,8 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             filepath: Destination path, already formatted by ``ModelCheckpoint``.
         """
         super()._save_checkpoint(trainer, filepath)
+        # Any edit here must preserve this call -- see _RollingSaveMixin's
+        # docstring for why a rolling window can't be expressed via save_top_k alone.
         self._enforce_rolling_window(trainer, filepath)
 
     def setup(
@@ -810,18 +812,24 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
 
 
 class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
-    """Model checkpoint that saves bare, optimizer-free SR model weights as ``.pt`` files.
+    """Model checkpoint that saves bare, optimizer-free weights as ``.pt`` files.
 
     A distributable sibling to :class:`SRCheckpoint`: that class produces resumable
     ``.ckpt`` files (full training state — optimizer moments, LR scheduler, callback
     state); this one produces ``.pt`` files containing only
-    ``pl_module.model.state_dict()`` (the bare :class:`~sisr.models.base.SRModel`, so
-    keys carry no ``model.`` wrapper prefix) plus the :func:`~sisr.training.metadata.build_metadata`
-    provenance dict. Both run side by side off the same validation metrics — top-k
-    selection, monitor validation (inherited from ``SRCheckpoint``'s ``setup``), and
-    filename formatting are inherited from :class:`~lightning.pytorch.callbacks.ModelCheckpoint`
-    unchanged; only :meth:`_save_checkpoint` — the single method that actually writes bytes
-    to disk — is overridden to swap the payload.
+    ``getattr(pl_module, attribute).state_dict()`` plus a matching provenance dict.
+    By default ``attribute='model'`` — the bare :class:`~sisr.models.base.SRModel` (so
+    keys carry no ``model.`` wrapper prefix), described by
+    :func:`~sisr.training.metadata.build_metadata`. Any other ``attribute`` (e.g.
+    ``'discriminator'``) saves that component instead, described by
+    :func:`~sisr.training.metadata.build_component_metadata` — ``build_metadata``'s
+    generator-scoped fields (``io.scale``, ``criterion``, ``eval_config``) would
+    describe something a non-generator file does not contain. Both run side by side
+    off the same validation metrics — top-k selection, monitor validation (inherited
+    from ``SRCheckpoint``'s ``setup``), and filename formatting are inherited from
+    :class:`~lightning.pytorch.callbacks.ModelCheckpoint` unchanged; only
+    :meth:`_save_checkpoint` — the single method that actually writes bytes to disk —
+    is overridden to swap the payload.
 
     ``_save_checkpoint`` is a private Lightning method, unlike the rest of this class's
     public-API surface. ``tests/training/test_callbacks.py``'s
@@ -847,6 +855,11 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         mode: ``'max'`` or ``'min'`` — same contract as :class:`SRCheckpoint`.
         keep_last: In rolling mode, number of most recent weight files to retain.
             Ignored when ``monitor_metric`` is set. Defaults to ``3``.
+        attribute: Name of the ``pl_module`` attribute whose ``state_dict()`` is saved.
+            Defaults to ``'model'`` (the SR model). Any other value saves that named
+            component instead (e.g. ``'discriminator'`` for an adversarial run's
+            discriminator), with metadata scoped to that component rather than the
+            generator — see the class docstring.
         **kwargs: Extra keyword arguments forwarded to
             :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
     """
@@ -861,6 +874,7 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         filename_prefix: str = "sr-weights",
         mode: str = "max",
         keep_last: int = 3,
+        attribute: str = "model",
         **kwargs: Any,
     ):
         if monitor_metric is None:
@@ -879,6 +893,7 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             **kwargs,
         )
         self._init_rolling(keep_last)
+        self.attribute = attribute
 
     def setup(
         self,
@@ -910,7 +925,7 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module, mode=self.mode)
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
-        """Write bare model weights + provenance metadata instead of a full checkpoint.
+        """Write one component's bare weights + matching provenance metadata.
 
         Overrides :meth:`ModelCheckpoint._save_checkpoint` — the private hook every
         public save path (``_save_topk_checkpoint``, ``_save_none_monitor_checkpoint``,
@@ -920,6 +935,12 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         ``_last_checkpoint_saved``, logger notification) so this callback stays a drop-in
         peer of :class:`SRCheckpoint` from the trainer's point of view.
 
+        ``self.attribute`` selects both the saved component and its metadata builder:
+        ``'model'`` (the default) uses :func:`~sisr.training.metadata.build_metadata`,
+        which describes the generator; anything else uses
+        :func:`~sisr.training.metadata.build_component_metadata`, so a discriminator's
+        ``.pt`` never carries metadata describing a network it does not contain.
+
         Rolling-mode deletion (:meth:`_RollingSaveMixin._enforce_rolling_window`) runs
         last, after this method's own writes — it does not go through ``super()``
         the way :class:`SRCheckpoint`'s does, since this override never calls
@@ -927,21 +948,32 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         optimizer-bearing payload this class exists to avoid).
 
         Args:
-            trainer: The active trainer — supplies ``lightning_module`` (for the bare
-                ``model.state_dict()`` and metadata) and ``global_step``/``current_epoch``.
+            trainer: The active trainer — supplies ``lightning_module`` (for the
+                component's ``state_dict()`` and metadata) and ``global_step``/``current_epoch``.
             filepath: Destination path, already formatted by ``ModelCheckpoint``
                 (``.pt`` via ``FILE_EXTENSION``).
         """
         pl_module = trainer.lightning_module
+        component = getattr(pl_module, self.attribute)
         monitor_value = float(self.current_score) if self.current_score is not None else None
-        meta = build_metadata(
-            pl_module,
-            global_step=trainer.global_step,
-            epoch=trainer.current_epoch,
-            monitor=self.monitor,
-            monitor_value=monitor_value,
-        )
-        torch.save({"state_dict": pl_module.model.state_dict(), "meta": meta}, filepath)
+        if self.attribute == "model":
+            meta = build_metadata(
+                pl_module,
+                global_step=trainer.global_step,
+                epoch=trainer.current_epoch,
+                monitor=self.monitor,
+                monitor_value=monitor_value,
+            )
+        else:
+            meta = build_component_metadata(
+                pl_module,
+                self.attribute,
+                global_step=trainer.global_step,
+                epoch=trainer.current_epoch,
+                monitor=self.monitor,
+                monitor_value=monitor_value,
+            )
+        torch.save({"state_dict": component.state_dict(), "meta": meta}, filepath)
 
         self._last_global_step_saved = trainer.global_step
         self._last_checkpoint_saved = filepath
@@ -950,6 +982,8 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             for logger in trainer.loggers:
                 logger.after_save_checkpoint(proxy(self))
 
+        # Any edit here must preserve this call -- see _RollingSaveMixin's
+        # docstring for why a rolling window can't be expressed via save_top_k alone.
         self._enforce_rolling_window(trainer, filepath)
 
 

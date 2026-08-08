@@ -171,6 +171,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
     props = {p.key: p.value for p in onnx_model.metadata_props}
     assert set(props.keys()) == {
         "format",
+        "kind",
         "created",
         "versions",
         "model",
@@ -181,6 +182,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
         "training",
     }
     assert props["format"] == "sisr-meta-v1"  # stored as-is: already a str
+    assert props["kind"] == "sr_model"  # stored as-is: already a str
 
     model_field = json.loads(props["model"])
     assert model_field["class_path"] == "sisr.models.srcnn.model.SRCNN"

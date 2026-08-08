@@ -457,6 +457,63 @@ def test_sr_weights_checkpoint_save_checkpoint_is_actually_overridden():
     assert SRWeightsCheckpoint._save_checkpoint is not ModelCheckpoint._save_checkpoint
 
 
+class _StubComponent(torch.nn.Module):
+    """Stand-in for a not-yet-existing named component (e.g. a discriminator).
+
+    Deliberately not named after any real architecture -- SRDiscriminator
+    doesn't exist until a later task, and asserting metadata against a
+    hardcoded "SRDiscriminator" string here would test a coincidence of
+    naming, not the mechanism (it would keep passing even if the real class
+    were later renamed). test_metadata.py's twin stub covers the metadata
+    builder directly; this one only needs a state_dict this callback can
+    save and load back.
+    """
+
+    def __init__(self, hr_input_size: int):
+        super().__init__()
+        self.hparams = {"hr_input_size": hr_input_size}
+        self.net = torch.nn.Conv2d(3, 4, kernel_size=3, padding=1)
+
+
+def build_module_with_component() -> SRLightning:
+    """An SRLightning carrying an extra, non-generator component under a
+    `discriminator` attribute.
+
+    Deliberately not SRGANLightning -- that class does not exist until a
+    later PR, and this behaviour is about the callback, not the training
+    loop. The component itself is a local stand-in (`_StubComponent`), not
+    the real SRDiscriminator either -- that architecture is a later task's
+    job; this only exercises the generic attribute/metadata mechanism.
+    """
+    module = build_module()
+    module.discriminator = _StubComponent(hr_input_size=96)
+    return module
+
+
+def test_weights_checkpoint_can_save_a_named_component(tmp_path):
+    module = build_module_with_component()
+    # MagicMock, not Mock: _save_checkpoint's post-save logger notification
+    # does `for logger in trainer.loggers`, and a plain Mock's auto-attrs
+    # don't support __iter__ (raises TypeError) -- MagicMock's do.
+    trainer = MagicMock(lightning_module=module, global_step=7, current_epoch=0)
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=1, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    cb.current_score = None
+
+    cb._save_checkpoint(trainer, str(tmp_path / "d-weights-7.pt"))
+
+    saved = torch.load(tmp_path / "d-weights-7.pt", weights_only=True)
+    assert set(saved["state_dict"]) == set(module.discriminator.state_dict())
+    # build_module()'s generator is SRCNN, whose top-level submodules are
+    # feat/mapping/recon -- a "feat."-prefixed key here would mean the
+    # generator's weights leaked into what must be a discriminator-only file.
+    assert not any(key.startswith("feat.") for key in saved["state_dict"]), (
+        "generator weights must not appear in a discriminator file"
+    )
+    assert saved["meta"]["kind"] == "component"
+
+
 def _make_srcnn_datamodule(image_dir: Path):
     """Tiny SRDataModule (3 fixture images) mirroring test_integration.py's helper —
     real Trainer.fit needs a real datamodule to reach ModelCheckpoint's save path."""
