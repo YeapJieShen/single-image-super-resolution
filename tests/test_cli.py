@@ -797,38 +797,39 @@ def test_ckpt_path_reloads_a_legacy_flattened_checkpoint(tiny_rgb_image_dir: Pat
     _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
 
 
-def test_ckpt_path_loses_subclass_only_eval_defaults(tiny_rgb_image_dir: Path, tmp_path: Path):
-    """Regression (documented, not fixed): `--ckpt_path` silently drops any
-    subclass-only ``eval_config`` default a checkpoint's stored hparams doesn't
-    happen to carry.
+def test_ckpt_path_preserves_eval_config_subclass_identity(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """`--ckpt_path` reload must keep `eval_config`'s subclass, not just its values.
 
-    ``_reconstruct_ckpt_hparams`` always rebuilds ``eval_config`` as a bare dict
-    with no ``class_path`` — it has no way to know the value was originally an
-    ``SRResNetEvalConfig`` rather than the base ``SREvalConfig``, and current
-    checkpoints don't record that identity either. ``parser.parse_object`` then
-    instantiates the field's *annotation* type (``SREvalConfig``) from that bare
-    dict: keys the dict happens to carry survive as explicit values, but any key
-    it is missing falls back to ``SREvalConfig``'s own default, not the
-    subclass's — silently discarding the architecture-specific override. A CLI
-    override given alongside ``--ckpt_path`` doesn't help either, since the same
-    bare-dict replacement runs after argument parsing and clobbers it too.
+    A regression here would revert to instantiating the field's bare annotation
+    type (base ``SREvalConfig``) from the checkpoint's stored dict instead of
+    merging onto the class the config file already selected
+    (``SRResNetEvalConfig``) — the two assertions below can fail independently:
+    the reloaded object's *class*, and a subclass-only *default* the checkpoint's
+    stored dict never mentions at all.
 
-    Demonstrated here with ``ssim_impl`` (base default ``'wang'``,
-    ``SRResNetEvalConfig``'s ``'daala'``) because it is the field this branch
-    just added, but the trap is general: **any** future ``SREvalConfig`` field
-    with an architecture-specific override is equally at risk on a
-    ``--ckpt_path`` reload of a checkpoint saved before that field existed.
-    This test exists to protect the next one, not just this one.
-
-    Deliberately not a fix — ``SRLightningCLI`` is unchanged here. This locks in
-    the measured behaviour so any future change to checkpoint-reload semantics
-    is a deliberate, reviewed decision instead of an accidental regression.
+    ``_parse_ckpt_path`` merges the reconstructed ``training_config``/
+    ``eval_config`` dict through the *subcommand's own* parser
+    (``self._parser(subcommand)``) onto the already-resolved
+    ``model.init_args.eval_config`` namespace, whose ``class_path`` is already
+    ``SRResNetEvalConfig`` from ``--config``. That merge fills in the given keys
+    as ``init_args`` overrides on the class already selected, so a subclass-only
+    default the checkpoint's dict doesn't mention (``ssim_impl``, demonstrated
+    here since it's the field this arc added) still applies. Routing the same
+    merge through the top-level, subcommand-dispatching parser instead forces
+    jsonargparse to re-validate the whole subclass spec from scratch and fall
+    back to the field's bare annotation type — the base class, wrong default.
     """
+    from sisr.models.srresnet import SRResNetEvalConfig
+
     config_path, ckpt_path = _build_srresnet_checkpoint(tiny_rgb_image_dir, tmp_path)
 
     # Simulates a checkpoint saved before `ssim_impl` existed: the field simply
     # isn't a key in its stored eval_config dict (dataclasses.asdict at save
-    # time wouldn't have produced one yet).
+    # time wouldn't have produced one yet) — SRResNetEvalConfig's own
+    # ssim_impl='daala' default must still apply on reload, not the base's
+    # 'wang'.
     raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
     legacy_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
     del legacy_hparams["eval_config"]["ssim_impl"]
@@ -836,31 +837,15 @@ def test_ckpt_path_loses_subclass_only_eval_defaults(tiny_rgb_image_dir: Path, t
     legacy_ckpt_path = tmp_path / "legacy.ckpt"
     torch.save(raw, legacy_ckpt_path)
 
-    # 1. Legacy checkpoint, no CLI override: SRResNetEvalConfig's ssim_impl='daala'
-    # default is lost; the reload falls back to the base SREvalConfig default.
     cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(legacy_ckpt_path)])
-    assert cli.model.eval_config.ssim_impl == "wang"
+    assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
+    assert cli.model.eval_config.ssim_impl == "daala"
 
-    # 2. Same legacy checkpoint, but the user also asks for daala on the CLI: the
-    # --ckpt_path reload runs after argument parsing and replaces the whole
-    # eval_config object wholesale, so the explicit CLI request is lost too.
-    cli = _run_cli(
-        [
-            "validate",
-            "--config",
-            str(config_path),
-            "--ckpt_path",
-            str(legacy_ckpt_path),
-            "--model.eval_config.ssim_impl=daala",
-        ]
-    )
-    assert cli.model.eval_config.ssim_impl == "wang"
-
-    # 3. A checkpoint saved by the current code *does* carry `ssim_impl`
-    # explicitly (dataclasses.asdict includes every current field), so it
-    # survives reload — not because the subclass identity is preserved, but
-    # because the value arrives as an explicit key rather than a fallback default.
+    # A checkpoint saved by the current code carries `ssim_impl` explicitly
+    # (dataclasses.asdict includes every current field) — confirms identity
+    # holds for the ordinary round trip too, not just the missing-key case above.
     cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
+    assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
     assert cli.model.eval_config.ssim_impl == "daala"
 
 
@@ -940,3 +925,71 @@ def test_fit_resume_via_ckpt_path_is_not_just_validate_test(
             "--trainer.max_steps=2",
         ]
     )
+
+
+def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
+    """--ckpt_path must still seed model config after the subclass-mode move.
+
+    _parse_ckpt_path injects the checkpoint's hyper_parameters as CLI options.
+    In subclass mode those options live one level deeper (model.init_args.*),
+    so the un-nested injection silently stops applying — a resumed run would
+    quietly fall back to the config file's values.
+
+    ``--ckpt_path`` is only a recognized option under subcommand-based parsing
+    (``run=True``, the default) — ``run=False`` has no ``ckpt_path`` argument
+    at all, so this reload can't be observed through ``_resolve``'s pattern.
+    ``Trainer.validate`` is stubbed to a no-op so the subcommand completes
+    without needing real data: hparams are already merged into ``cli.model``
+    by the time ``instantiate_classes`` finishes, before ``validate`` runs.
+    """
+    import functools
+
+    from sisr.cli import SRLightningCLI
+    from sisr.training import SRDataModule, SRLightning
+
+    # jsonargparse derives --ckpt_path/--verbose from Trainer.validate's signature
+    # (add_method_arguments), so the stub must preserve it — functools.wraps sets
+    # __wrapped__, which inspect.signature follows by default.
+    @functools.wraps(lightning.pytorch.Trainer.validate)
+    def _noop_validate(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(lightning.pytorch.Trainer, "validate", _noop_validate)
+
+    ckpt = tmp_path / "fake.ckpt"
+    torch.save(
+        {
+            "hyper_parameters": {
+                "training_config": {"example_input_shape": [3, 24, 24]},
+                "eval_config": {"crop_border": 4},
+            }
+        },
+        ckpt,
+    )
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        SUBCLASS_MODE_CONFIG.replace("IMG_DIR", str(tmp_path).replace("\\", "/")),
+        encoding="utf-8",
+    )
+    # See _resolve's comment: LightningCLI warns when both args= and pytest's own
+    # sys.argv are set, and Lightning's own "No seed found" fires since
+    # SUBCLASS_MODE_CONFIG carries no seed_everything: — both need local
+    # suppression under the strict global filterwarnings=error.
+    saved_argv = sys.argv
+    sys.argv = saved_argv[:1]
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", message="GPU available but not used.*")
+            warnings.filterwarnings("ignore", message="No seed found.*")
+            cli = SRLightningCLI(
+                model_class=SRLightning,
+                datamodule_class=SRDataModule,
+                subclass_mode_model=True,
+                auto_configure_optimizers=False,
+                save_config_callback=None,
+                args=["validate", "--config", str(cfg), "--ckpt_path", str(ckpt)],
+            )
+    finally:
+        sys.argv = saved_argv
+    assert cli.model.eval_config.crop_border == 4
