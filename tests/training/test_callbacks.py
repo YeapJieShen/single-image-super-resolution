@@ -1,14 +1,18 @@
 import functools
+import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import lightning
+import numpy as np
 import pytest
 import torch
 import torchmetrics.functional
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
+from PIL import Image
 
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
@@ -554,6 +558,177 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
 
     fresh_model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     fresh_model.load_state_dict(bare["state_dict"], strict=True)  # the real proof
+
+
+# ---------------------------------------------------------------------------
+# Rolling last-N checkpoint mode (monitor_metric=None)
+# ---------------------------------------------------------------------------
+
+
+def _run_tiny_fit(callbacks: list, n_batches: int) -> lightning.Trainer:
+    """Real `Trainer.fit` for `n_batches` steps, driving `callbacks`'s real save path.
+
+    Rolling-mode retention depends on Lightning's actual save cadence, filename
+    formatting, and `_remove_checkpoint` bookkeeping, so (unlike most of this
+    file) a mocked hook can't stand in for the Trainer here. Images live in
+    their own throwaway dir rather than a `tmp_path` fixture, since callers
+    pass their checkpoint `dirpath` as `tmp_path` itself and
+    `ModelCheckpoint.setup` errors (-> strict filterwarnings) if that dir is
+    non-empty at startup. Teardown uses `ignore_errors=True`: LMDB keeps
+    `data.mdb` memory-mapped past the dataset object's own lifetime on
+    Windows, so a strict rmtree here intermittently raises `PermissionError`
+    -- immaterial to what this helper actually verifies.
+    """
+    image_dir = Path(tempfile.mkdtemp())
+    try:
+        rng = np.random.default_rng(seed=0)
+        for i in range(3):
+            arr = rng.integers(0, 256, size=(36, 36, 3), dtype=np.uint8)
+            Image.fromarray(arr).save(image_dir / f"img_{i:02d}.png")
+
+        model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+        module = SRLightning(
+            model=model,
+            processor=RGBProcessor(),
+            eval_config=SREvalConfig(crop_border=0),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
+        )
+        trainer = lightning.Trainer(
+            max_epochs=-1,
+            max_steps=n_batches,
+            limit_val_batches=0,
+            num_sanity_val_steps=0,
+            accelerator="cpu",
+            devices=1,
+            logger=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=callbacks,
+        )
+        trainer.fit(module, datamodule=_make_srcnn_datamodule(image_dir))
+        return trainer
+    finally:
+        shutil.rmtree(image_dir, ignore_errors=True)
+
+
+@_ignore_gpu_warning
+def test_rolling_mode_keeps_only_the_last_n(tmp_path):
+    """monitor_metric=None keeps a sliding window of recent checkpoints.
+
+    Needed because an adversarial objective makes PSNR/SSIM worse by design, so
+    a metric-monitored save_top_k selects the LEAST adversarial model — very
+    likely one from the first few thousand steps.
+    """
+    cb = SRCheckpoint(
+        monitor_metric=None, keep_last=3, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[cb], n_batches=20)
+    files = sorted(p.name for p in tmp_path.glob("*.ckpt"))
+    assert len(files) == 3, files
+    # Not just any 3 -- the 3 *newest* by step (oldest-first deletion), matching
+    # the mechanism spike's own result (20 batches, every_n_train_steps=2, keep_last=3
+    # -> steps 16/18/20 survive out of the 10 saved at steps 2, 4, ..., 20).
+    assert files == ["sr-16.ckpt", "sr-18.ckpt", "sr-20.ckpt"], files
+
+
+@_ignore_gpu_warning
+def test_rolling_mode_needs_no_monitor_validation(tmp_path: Path):
+    """Rolling mode monitors nothing, so monitor validation must not fire.
+
+    A bare `unittest.mock.Mock` trainer can't stand in for `.setup()` here —
+    `ModelCheckpoint.setup` unconditionally calls
+    `trainer.strategy.broadcast(dirpath)`, which returns a nonsense Mock
+    instead of the path and crashes downstream filesystem resolution,
+    regardless of monitor. `_make_bare_trainer()` (used by every other
+    `.setup()` test in this file) is a real, unfitted Trainer that clears
+    that machinery without running an actual loop, isolating this test to
+    what it actually claims: that `_validate_monitor_metric` doesn't fire.
+    """
+    cb = SRCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    cb.setup(trainer=_make_bare_trainer(), pl_module=build_module(), stage="fit")  # must not raise
+
+
+def test_srcheckpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path):
+    """Rolling mode has no monitored metric, so the filename must be
+    step-only — MEASURED FACT 3: omitting {step} would make every save
+    overwrite the last."""
+    ckpt = SRCheckpoint(monitor_metric=None, dirpath=str(tmp_path))
+    assert ckpt.filename == "sr-{step}"
+    assert ckpt.save_top_k == -1
+    assert ckpt.monitor is None
+    assert ckpt.keep_last == 3
+
+
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_rolling_mode_keeps_only_the_last_n(tmp_path):
+    """SRWeightsCheckpoint's own _save_checkpoint override (bare .pt weights)
+    must still compose with rolling deletion — it doesn't inherit
+    ModelCheckpoint's save path the way SRCheckpoint does, so this is the
+    place a mixin-only implementation would silently do nothing."""
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[cb], n_batches=20)
+    files = sorted(p.name for p in tmp_path.glob("*.pt"))
+    assert files == ["sr-weights-18.pt", "sr-weights-20.pt"], files
+
+
+def test_sr_weights_checkpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path):
+    ckpt = SRWeightsCheckpoint(monitor_metric=None, dirpath=str(tmp_path))
+    assert ckpt.filename == "sr-weights-{step}"
+    assert ckpt.save_top_k == -1
+    assert ckpt.monitor is None
+    assert ckpt.keep_last == 3
+
+
+@_ignore_gpu_warning
+def test_rolling_checkpoints_coexist_without_cross_deletion(tmp_path):
+    """SRCheckpoint and SRWeightsCheckpoint, both rolling, sharing one dirpath,
+    must never delete each other's files — each tracks its own _rolling list
+    of its own filepaths, and FILE_EXTENSION/filename_prefix already keep the
+    two from colliding by name."""
+    sr_ckpt = SRCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    sr_weights_ckpt = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[sr_ckpt, sr_weights_ckpt], n_batches=20)
+    ckpt_files = sorted(p.name for p in tmp_path.glob("sr-*.ckpt"))
+    pt_files = sorted(p.name for p in tmp_path.glob("sr-weights-*.pt"))
+    all_files = sorted(p.name for p in tmp_path.iterdir())
+    assert ckpt_files == ["sr-18.ckpt", "sr-20.ckpt"], ckpt_files
+    assert pt_files == ["sr-weights-18.pt", "sr-weights-20.pt"], pt_files
+    assert len(all_files) == 4, all_files
+
+
+@pytest.mark.parametrize("cls", [SRCheckpoint, SRWeightsCheckpoint])
+def test_rolling_mode_rejects_keep_last_below_one(cls, tmp_path: Path):
+    with pytest.raises(ValueError, match="keep_last"):
+        cls(monitor_metric=None, keep_last=0, dirpath=str(tmp_path))
+
+
+@pytest.mark.parametrize("cls", [SRCheckpoint, SRWeightsCheckpoint])
+def test_enforce_rolling_window_is_noop_when_monitor_is_set(cls, tmp_path: Path):
+    """With a monitor set, _enforce_rolling_window must not track saves or
+    delete anything -- Lightning's own top-k selection owns retention then.
+
+    A version that tracked saves unconditionally would eventually evict a
+    file top-k still wants to keep once more than keep_last saves accumulate
+    (e.g. save_top_k=1 keeps exactly 1 file at a time; FIFO-evicting by save
+    count rather than by top-k's own bookkeeping can target that surviving
+    file once the metric plateaus for keep_last+ saves), silently leaving the
+    run with zero checkpoints until the next save recreates one. Calling
+    _enforce_rolling_window directly, rather than through a full Trainer.fit,
+    isolates this to the guard itself rather than needing a metric-plateau
+    scenario reproduced end-to-end.
+    """
+    ckpt = cls(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(tmp_path))
+    trainer = MagicMock()
+    for i in range(ckpt.keep_last + 2):
+        ckpt._enforce_rolling_window(trainer, f"fake-{i}{ckpt.FILE_EXTENSION}")
+    assert ckpt._rolling == []
+    trainer.strategy.remove_checkpoint.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
