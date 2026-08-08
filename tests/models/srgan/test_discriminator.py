@@ -35,6 +35,16 @@ def test_indivisible_input_size_rejected():
         SRDiscriminator(hr_input_size=100)
 
 
+def test_non_positive_input_size_message_says_positive_multiple():
+    """0 and negative multiples of 16 ARE divisible by 16, so the check's real
+    condition is 'positive multiple' — the message must say that, not just
+    'divisible', or a hr_input_size=0 error reads as self-contradictory."""
+    with pytest.raises(ValueError, match="positive multiple"):
+        SRDiscriminator(hr_input_size=0)
+    with pytest.raises(ValueError, match="positive multiple"):
+        SRDiscriminator(hr_input_size=-16)
+
+
 def test_hparams_roundtrip_for_metadata():
     d = SRDiscriminator(hr_input_size=96, dense_features=512)
     assert d.hparams["hr_input_size"] == 96

@@ -58,7 +58,8 @@ class SRDiscriminator(torch.nn.Module):
         stride_factor = 2**_DOWNSAMPLES
         if hr_input_size < stride_factor or hr_input_size % stride_factor:
             raise ValueError(
-                f"hr_input_size must be divisible by 16 (the discriminator has "
+                f"hr_input_size must be a positive multiple of {stride_factor} "
+                f"(divisible by {stride_factor}; the discriminator has "
                 f"{_DOWNSAMPLES} stride-2 convolutions); got {hr_input_size}."
             )
 
