@@ -267,8 +267,12 @@ class SRLightningCLI(LightningCLI):
         parsed through the *subcommand's own* parser/config branch
         (``self._parser(subcommand)``, ``self.config[subcommand]``), never through
         the top-level subcommand-dispatching one (``self.parser``, ``self.config``),
-        even though both expose the same ``model.init_args.<key>`` option path and
-        neither raises at parse time.
+        even though both expose the same ``model.init_args.<key>`` option path.
+        The top-level route parses without a syntax error, but per-field the
+        outcome is either a hard ``SystemExit`` (``model``, ``processor``: no
+        default, required) or a silent revert to the bare-annotation default
+        (any nested subclass field with a fallback, e.g. ``eval_config``) — see
+        below for which and why.
 
         The reason: jsonargparse's subclass-merge machinery
         (``ActionTypeHint._check_type``) looks up the field's *previous* value as

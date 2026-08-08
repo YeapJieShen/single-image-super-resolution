@@ -821,6 +821,10 @@ def test_ckpt_path_preserves_eval_config_subclass_identity(
     jsonargparse to re-validate the whole subclass spec from scratch and fall
     back to the field's bare annotation type — the base class, wrong default.
     """
+    # Pre-fix RED is a construction-time SystemExit ("model, processor"
+    # required), raised before either assertion below runs — structural, not
+    # untried: `model` is Union-typed and required with no fallback, so any
+    # un-nested override hits it before ever reaching eval_config's resolution.
     from sisr.models.srresnet import SRResNetEvalConfig
 
     config_path, ckpt_path = _build_srresnet_checkpoint(tiny_rgb_image_dir, tmp_path)
@@ -931,9 +935,10 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
     """--ckpt_path must still seed model config after the subclass-mode move.
 
     _parse_ckpt_path injects the checkpoint's hyper_parameters as CLI options.
-    In subclass mode those options live one level deeper (model.init_args.*),
-    so the un-nested injection silently stops applying — a resumed run would
-    quietly fall back to the config file's values.
+    In subclass mode those options live one level deeper (model.init_args.*):
+    un-nested, the injected dict lands on `model` itself, which is Union-typed
+    and required under subclass mode, so jsonargparse can't resolve it and
+    raises SystemExit outright rather than quietly falling back.
 
     ``--ckpt_path`` is only a recognized option under subcommand-based parsing
     (``run=True``, the default) — ``run=False`` has no ``ckpt_path`` argument
