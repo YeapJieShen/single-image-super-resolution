@@ -24,6 +24,7 @@ from ..colorspace import rgb_to_ycbcr_studio
 from ..losses import SRLoss
 from ..models.base import SRModel
 from ..processors import SRProcessor
+from ..ssim import daala_ssim
 from .config import SREvalConfig, SRTrainingConfig
 from .cuda_graph import CUDAGraphStep
 from .metadata import build_metadata
@@ -497,6 +498,32 @@ class SRLightning(lightning.LightningModule):
             sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
         )
 
+    def _mean_ssim(self, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
+        """Mean SSIM under the configured implementation.
+
+        The single decision point for which SSIM this project computes —
+        consumed by :meth:`validation_step` and by
+        :class:`~sisr.training.callbacks.BenchmarkImageLogger`, so the
+        validation and benchmark paths cannot report different metrics under
+        the same tag (the two call sites used to each call ``torchmetrics``
+        independently, and only one learning about a new implementation would
+        have silently split them). Not a ``staticmethod`` (unlike
+        :meth:`_mean_psnr`) because it reads ``self.eval_config.ssim_impl``.
+
+        Args:
+            sr: Reconstruction, ``(B, C, H, W)`` float in ``[0, 1]``.
+            hr: Reference, same shape.
+
+        Returns:
+            0-dim tensor. Both implementations reduce per-image then mean over
+            the batch.
+        """
+        if self.eval_config.ssim_impl == "daala":
+            return daala_ssim(sr, hr)
+        return torchmetrics.functional.image.structural_similarity_index_measure(
+            sr, hr, data_range=1.0
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the wrapped SR model on ``x`` and return its raw output.
 
@@ -911,9 +938,7 @@ class SRLightning(lightning.LightningModule):
             sr_t, hr_t = metric_tensors[key]
             self.log(
                 f"ssim/val/{key}",
-                torchmetrics.functional.image.structural_similarity_index_measure(
-                    sr_t, hr_t, data_range=1.0
-                ),
+                self._mean_ssim(sr_t, hr_t),
                 prog_bar=(key == primary_ssim),
                 on_step=False,
                 add_dataloader_idx=False,

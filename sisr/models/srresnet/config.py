@@ -84,7 +84,9 @@ class SRResNetEvalConfig(SREvalConfig):
     Reports PSNR on RGB and Y — Ledig et al. quote Y-channel only (the full
     YCbCr aggregate reads optimistically high since chroma planes are far
     smoother than luma); excludes the outer ``scale=4`` pixels before
-    computing PSNR / SSIM, matching the standard SR-evaluation convention.
+    computing PSNR / SSIM, matching the standard SR-evaluation convention;
+    and computes SSIM with the daala convention Ledig et al. themselves used,
+    rather than the field-standard Wang SSIM most SR papers report.
 
     Args:
         crop_border: Overrides the base default to ``4`` (outer pixels
@@ -92,7 +94,14 @@ class SRResNetEvalConfig(SREvalConfig):
         psnr_channels: Overrides the base default to ``['RGB', 'Y']`` —
             ``'Y'`` is the paper's own metric; ``'RGB'`` is a supplementary
             aggregate.
+        ssim_impl: Overrides the base default to ``'daala'`` — Ledig et al.
+            computed SSIM with the daala package, whose gaussian sigma scales
+            with image height, not with Wang's fixed 11x11. PSNR is unaffected
+            (it is implementation-invariant); SSIM under this setting is
+            comparable to the paper and **not** to the wider SR literature,
+            which reports Wang. See :mod:`sisr.ssim`.
     """
 
     crop_border: int = 4
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
+    ssim_impl: Literal["wang", "daala"] = "daala"

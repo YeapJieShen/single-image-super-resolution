@@ -128,6 +128,14 @@ def test_build_metadata_scale_is_none_when_neither_source_has_it():
     assert meta["io"]["scale"] is None
 
 
+def test_metadata_records_ssim_impl():
+    """Which SSIM produced a checkpoint's filename must be answerable from the
+    artifact alone. eval_config is serialised wholesale, so this rides along —
+    the assertion exists so a future refactor can't quietly drop it."""
+    meta = build_metadata(_make_srresnet_lit())
+    assert meta["eval_config"]["ssim_impl"] == "daala"
+
+
 def test_build_metadata_eval_config_matches_dataclass_asdict():
     import dataclasses
 

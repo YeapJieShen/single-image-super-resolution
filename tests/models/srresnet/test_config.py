@@ -41,6 +41,14 @@ def test_srresnet_eval_config_subclass():
     assert issubclass(SRResNetEvalConfig, SREvalConfig)
 
 
+def test_srresnet_eval_config_defaults_to_daala_ssim():
+    """Ledig et al. computed SSIM with the daala package, so the paper-faithful
+    default belongs here — the same place crop_border=4 lives. The base
+    SREvalConfig stays on 'wang', so SRCNN is unaffected."""
+    assert SRResNetEvalConfig().ssim_impl == "daala"
+    assert SREvalConfig().ssim_impl == "wang"
+
+
 def test_srresnet_eval_config_psnr_channels_independent_per_instance():
     """`default_factory` produces a fresh list per instance — guards against mutable-default bug."""
     a = SRResNetEvalConfig()

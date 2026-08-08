@@ -76,6 +76,7 @@ def test_srcnn_config_resolves_in_process():
     assert isinstance(m.training_config, SRCNNTrainingConfig)
     assert isinstance(m.eval_config, SRCNNEvalConfig)
     assert m.eval_config.crop_border == 3  # inherited-default check
+    assert m.eval_config.ssim_impl == "wang"  # inherited-default check
     # Paper recipe: reconstruction layer learns 10x slower than the other two.
     assert m.training_config.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
     # Top-level optimizer block linked from YAML.
@@ -104,6 +105,7 @@ def test_srresnet_config_resolves_in_process():
     assert isinstance(m.training_config, SRResNetTrainingConfig)
     assert isinstance(m.eval_config, SRResNetEvalConfig)
     assert m.eval_config.crop_border == 4  # inherited-default check
+    assert m.eval_config.ssim_impl == "daala"  # inherited-default check
     # Dataset specs stay plain {class_path, init_args} dicts (materialized lazily
     # in SRDataModule.setup), so assert on the resolved raw config.
     assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.srresnet.TrainDataset"
@@ -448,14 +450,17 @@ def test_template_disables_default_hp_metric(template_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _run_cli(args: list[str]) -> None:
+def _run_cli(args: list[str]):
     """Run SRLightningCLI in-process for the given args, restoring sys.argv after.
 
     Mirrors ``_resolve``'s argv save/restore, but with ``run=True`` (the
     default) so the subcommand actually executes — needed here since the
     checkpoint round trip requires a real ``fit`` and a real second parse of
     ``--ckpt_path`` through ``LightningCLI._parse_ckpt_path``, not just config
-    resolution.
+    resolution. Returns the constructed ``SRLightningCLI`` so a caller can
+    inspect ``.model`` as resolved *after* any ``--ckpt_path`` hyperparameter
+    merge — ``_resolve``'s ``run=False`` path can't observe that merge at all,
+    since ``_parse_ckpt_path`` no-ops when no subcommand was set up.
     """
     from sisr.cli import SRLightningCLI
     from sisr.training import SRDataModule, SRLightning
@@ -469,7 +474,7 @@ def _run_cli(args: list[str]) -> None:
             warnings.filterwarnings(
                 "ignore", category=lightning.pytorch.utilities.warnings.PossibleUserWarning
             )
-            SRLightningCLI(
+            return SRLightningCLI(
                 model_class=SRLightning,
                 datamodule_class=SRDataModule,
                 auto_configure_optimizers=False,
@@ -520,6 +525,89 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
             },
             "val_dataset": {
                 "class_path": "sisr.datasets.srcnn.ValidationDataset",
+                "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+            },
+            "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},
+            "val_dataloader_kwargs": {"batch_size": 1, "num_workers": 0},
+        },
+        "trainer": {
+            "max_epochs": 1,
+            "max_steps": 1,
+            "limit_train_batches": 1,
+            "limit_val_batches": 1,
+            "num_sanity_val_steps": 0,
+            "accelerator": "cpu",
+            "devices": 1,
+            "logger": False,
+            "enable_progress_bar": False,
+            "enable_model_summary": False,
+            "default_root_dir": str(tmp_path),
+            "callbacks": [
+                {
+                    "class_path": "lightning.pytorch.callbacks.ModelCheckpoint",
+                    "init_args": {
+                        "dirpath": str(ckpt_dir),
+                        "filename": "sr-test",
+                        "every_n_train_steps": 1,
+                        "save_top_k": -1,
+                    },
+                }
+            ],
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    _run_cli(["fit", "--config", str(config_path)])
+
+    ckpt_files = sorted(ckpt_dir.glob("*.ckpt"))
+    assert ckpt_files, "fit did not write a checkpoint"
+    return config_path, ckpt_files[-1]
+
+
+def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """Run a real one-step SRResNet fit and return (config_path, ckpt_path).
+
+    Mirrors ``_build_srcnn_checkpoint``, but over SRResNet's native-LR pipeline
+    and its ``SRResNetEvalConfig`` — the only shipped eval_config subclass with
+    a subclass-only default (``ssim_impl='daala'``), which is what
+    ``test_ckpt_path_loses_subclass_only_eval_defaults`` needs to observe.
+    """
+    ckpt_dir = tmp_path / "checkpoints"
+    config = {
+        "model": {
+            "model": {
+                "class_path": "sisr.models.srresnet.SRResNet",
+                "init_args": {
+                    "scale": 2,
+                    "in_out_channels": 3,
+                    "hidden_channel": 4,
+                    "kernel_sizes": [3, 3, 3],
+                    "num_residual_blocks": 1,
+                    "padding": "same",
+                },
+            },
+            "processor": {"class_path": "sisr.processors.RGBProcessor"},
+            "training_config": {
+                "class_path": "sisr.models.srresnet.SRResNetTrainingConfig",
+                "init_args": {"scale": 2},
+            },
+            "eval_config": {"class_path": "sisr.models.srresnet.SRResNetEvalConfig"},
+        },
+        "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
+        "data": {
+            "train_dataset": {
+                "class_path": "sisr.datasets.srresnet.TrainDataset",
+                "init_args": {
+                    "img_dir": str(tiny_rgb_image_dir),
+                    "scale": 2,
+                    "hr_crop_size": 24,
+                    "use_tqdm": False,
+                    "cache_dir": str(tmp_path / ".lmdb_cache"),
+                },
+            },
+            "val_dataset": {
+                "class_path": "sisr.datasets.srresnet.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},
@@ -615,6 +703,73 @@ def test_ckpt_path_reloads_a_legacy_flattened_checkpoint(tiny_rgb_image_dir: Pat
 
     # Must not raise — this is exactly the legacy-checkpoint scenario --ckpt_path failed on.
     _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
+
+
+def test_ckpt_path_loses_subclass_only_eval_defaults(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """Regression (documented, not fixed): `--ckpt_path` silently drops any
+    subclass-only ``eval_config`` default a checkpoint's stored hparams doesn't
+    happen to carry.
+
+    ``_reconstruct_ckpt_hparams`` always rebuilds ``eval_config`` as a bare dict
+    with no ``class_path`` — it has no way to know the value was originally an
+    ``SRResNetEvalConfig`` rather than the base ``SREvalConfig``, and current
+    checkpoints don't record that identity either. ``parser.parse_object`` then
+    instantiates the field's *annotation* type (``SREvalConfig``) from that bare
+    dict: keys the dict happens to carry survive as explicit values, but any key
+    it is missing falls back to ``SREvalConfig``'s own default, not the
+    subclass's — silently discarding the architecture-specific override. A CLI
+    override given alongside ``--ckpt_path`` doesn't help either, since the same
+    bare-dict replacement runs after argument parsing and clobbers it too.
+
+    Demonstrated here with ``ssim_impl`` (base default ``'wang'``,
+    ``SRResNetEvalConfig``'s ``'daala'``) because it is the field this branch
+    just added, but the trap is general: **any** future ``SREvalConfig`` field
+    with an architecture-specific override is equally at risk on a
+    ``--ckpt_path`` reload of a checkpoint saved before that field existed.
+    This test exists to protect the next one, not just this one.
+
+    Deliberately not a fix — ``SRLightningCLI`` is unchanged here. This locks in
+    the measured behaviour so any future change to checkpoint-reload semantics
+    is a deliberate, reviewed decision instead of an accidental regression.
+    """
+    config_path, ckpt_path = _build_srresnet_checkpoint(tiny_rgb_image_dir, tmp_path)
+
+    # Simulates a checkpoint saved before `ssim_impl` existed: the field simply
+    # isn't a key in its stored eval_config dict (dataclasses.asdict at save
+    # time wouldn't have produced one yet).
+    raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
+    legacy_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
+    del legacy_hparams["eval_config"]["ssim_impl"]
+    raw["hyper_parameters"] = legacy_hparams
+    legacy_ckpt_path = tmp_path / "legacy.ckpt"
+    torch.save(raw, legacy_ckpt_path)
+
+    # 1. Legacy checkpoint, no CLI override: SRResNetEvalConfig's ssim_impl='daala'
+    # default is lost; the reload falls back to the base SREvalConfig default.
+    cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(legacy_ckpt_path)])
+    assert cli.model.eval_config.ssim_impl == "wang"
+
+    # 2. Same legacy checkpoint, but the user also asks for daala on the CLI: the
+    # --ckpt_path reload runs after argument parsing and replaces the whole
+    # eval_config object wholesale, so the explicit CLI request is lost too.
+    cli = _run_cli(
+        [
+            "validate",
+            "--config",
+            str(config_path),
+            "--ckpt_path",
+            str(legacy_ckpt_path),
+            "--model.eval_config.ssim_impl=daala",
+        ]
+    )
+    assert cli.model.eval_config.ssim_impl == "wang"
+
+    # 3. A checkpoint saved by the current code *does* carry `ssim_impl`
+    # explicitly (dataclasses.asdict includes every current field), so it
+    # survives reload — not because the subclass identity is preserved, but
+    # because the value arrives as an explicit key rather than a fallback default.
+    cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
+    assert cli.model.eval_config.ssim_impl == "daala"
 
 
 def test_reconstruct_ckpt_hparams_unflattens_legacy_keys():
