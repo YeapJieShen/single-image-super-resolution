@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import fields
 
 import pytest
@@ -84,6 +85,8 @@ def test_sr_eval_config_field_names():
         "separate_psnr",
         "ssim_channels",
         "ssim_impl",
+        "perceptual_metrics",
+        "lpips_net",
     }
 
 
@@ -215,6 +218,40 @@ def test_ssim_keys_equals_ssim_channels_verbatim(ssim_channels):
 def test_ssim_keys_is_not_a_dataclass_field():
     names = {f.name for f in fields(SREvalConfig)}
     assert "ssim_keys" not in names
+
+
+# ---------------------------------------------------------------------------
+# perceptual_metrics / lpips_net / perceptual_keys
+# ---------------------------------------------------------------------------
+
+
+def test_perceptual_metrics_default_off():
+    """Existing architectures must log exactly the tags they logged before."""
+    assert SREvalConfig().perceptual_keys == []
+
+
+def test_perceptual_metrics_validated_at_construction():
+    with pytest.raises(ValueError, match="perceptual_metrics"):
+        SREvalConfig(perceptual_metrics=["lpips", "psnr"])
+
+
+def test_lpips_net_validated_at_construction():
+    with pytest.raises(ValueError, match="lpips_net"):
+        SREvalConfig(lpips_net="resnet")
+
+
+def test_perceptual_fields_live_on_the_base_class():
+    """A subclass-only *field* breaks --ckpt_path outright, not just silently.
+
+    dataclasses.asdict dumps every field into the checkpoint's hyper_parameters;
+    on reload that dict is handed to the *annotation* type, which is base
+    SREvalConfig. A field only the subclass declares is then an unexpected
+    keyword argument — a hard failure, strictly worse than reverting to a base
+    default. ssim_impl is the precedent: field on the base, default on the
+    subclass.
+    """
+    field_names = {f.name for f in dataclasses.fields(SREvalConfig)}
+    assert {"perceptual_metrics", "lpips_net"} <= field_names
 
 
 # ---------------------------------------------------------------------------

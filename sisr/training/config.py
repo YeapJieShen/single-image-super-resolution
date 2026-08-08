@@ -32,6 +32,7 @@ from typing import Literal
 import torch
 
 from ..models.base import SRModel
+from ..perceptual import PERCEPTUAL_METRICS
 from ..processors.base import SRProcessor
 
 # Colorspace entries map to their sub-channel names, expanded only when
@@ -276,6 +277,21 @@ class SREvalConfig:
             change, so a figure is comparable only to one computed under the
             same setting. The value is recorded in ``hparams`` and in every
             artifact's ``sisr_meta`` so any checkpoint can be traced back.
+
+        perceptual_metrics: Perceptual metrics to report, from ``'lpips'`` and
+            ``'dists'``. Empty by default, so an architecture that never asks
+            for them logs exactly the tags it logged before. Both are
+            lower-is-better and RGB-only (no colorspace decomposition), so they
+            get their own tag families ``lpips/val`` / ``dists/val`` rather than
+            a key under the PSNR/SSIM scheme. ``'lpips'`` requires the
+            ``[perceptual]`` extra.
+
+        lpips_net: LPIPS backbone — ``'alex'`` (default, and what the SR
+            literature usually reports), ``'vgg'`` or ``'squeeze'``. **A LPIPS
+            figure is comparable only to one computed under the same backbone**,
+            exactly as an SSIM figure is comparable only within one
+            ``ssim_impl``. Recorded in ``hparams`` and in every artifact's
+            ``sisr_meta``, so any number can be traced back. Ignored by DISTS.
     """
 
     crop_border: int = 0
@@ -283,15 +299,22 @@ class SREvalConfig:
     separate_psnr: bool = False
     ssim_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
     ssim_impl: Literal["wang", "daala"] = "wang"
+    perceptual_metrics: list[str] = field(default_factory=list)
+    lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
 
     def __post_init__(self) -> None:
-        """Validate ``psnr_channels``, ``ssim_channels`` and ``ssim_impl`` at construction.
+        """Validate all channel/metric fields at construction.
+
+        Covers ``psnr_channels``, ``ssim_channels``, ``ssim_impl``,
+        ``perceptual_metrics`` and ``lpips_net``.
 
         Raises:
             ValueError: If any entry of either channel field is not a
                 supported colorspace or single-channel name (see
-                ``_CHANNEL_SUBNAMES``), or if ``ssim_impl`` is not ``'wang'``
-                or ``'daala'``.
+                ``_CHANNEL_SUBNAMES``), if ``ssim_impl`` is not ``'wang'`` or
+                ``'daala'``, if any entry of ``perceptual_metrics`` is not a
+                supported metric (see ``PERCEPTUAL_METRICS``), or if
+                ``lpips_net`` is not ``'alex'``, ``'vgg'`` or ``'squeeze'``.
         """
         valid = tuple(_CHANNEL_SUBNAMES)
         for field_name in ("psnr_channels", "ssim_channels"):
@@ -307,6 +330,18 @@ class SREvalConfig:
                 f"SREvalConfig.ssim_impl must be 'wang' or 'daala'; got "
                 f"{self.ssim_impl!r}. Fix model.eval_config.init_args.ssim_impl "
                 f"in your YAML."
+            )
+        unsupported = [m for m in self.perceptual_metrics if m not in PERCEPTUAL_METRICS]
+        if unsupported:
+            raise ValueError(
+                f"SREvalConfig.perceptual_metrics entries must be one of "
+                f"{sorted(PERCEPTUAL_METRICS)}; got unsupported {unsupported}. Fix "
+                f"model.eval_config.init_args.perceptual_metrics in your YAML."
+            )
+        if self.lpips_net not in ("alex", "vgg", "squeeze"):
+            raise ValueError(
+                f"SREvalConfig.lpips_net must be 'alex', 'vgg' or 'squeeze'; got "
+                f"{self.lpips_net!r}. Fix model.eval_config.init_args.lpips_net."
             )
 
     @property
@@ -354,3 +389,18 @@ class SREvalConfig:
             Ordered list of SSIM keys, e.g. ``['RGB', 'Y']``.
         """
         return list(self.ssim_channels)
+
+    @property
+    def perceptual_keys(self) -> list[str]:
+        """Ordered perceptual metric names this config requests.
+
+        The single derivation of the perceptual key list, mirroring
+        ``psnr_keys`` / ``ssim_keys`` — consumed by ``SRLightning`` (validation
+        logging, HParams registration), ``BenchmarkImageLogger`` (test-set
+        scoring) and the checkpoint-monitor validator, so the three cannot
+        disagree about which tags exist.
+
+        Returns:
+            e.g. ``['lpips', 'dists']``, or ``[]`` when none are requested.
+        """
+        return list(self.perceptual_metrics)
