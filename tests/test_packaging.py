@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 
 def test_pyyaml_declared_in_dev_extra():
@@ -44,3 +45,14 @@ def test_torch_floor_excludes_weights_only_bypass():
     deps = pyproject["project"]["dependencies"]
     assert _floor(deps, "torch") >= (2, 6), f"torch floor must be >= 2.6: {deps}"
     assert _floor(deps, "torchvision") >= (0, 21), f"torchvision floor must be >= 0.21: {deps}"
+
+
+def test_perceptual_extra_declares_lpips():
+    """LPIPS needs the `lpips` package; torchmetrics gates it on _LPIPS_AVAILABLE.
+
+    DISTS deliberately stays out of any extra — it needs only torchvision,
+    already a core dependency.
+    """
+    pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    extras = pyproject["project"]["optional-dependencies"]
+    assert any(dep.startswith("lpips") for dep in extras["perceptual"])
