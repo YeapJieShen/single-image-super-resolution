@@ -23,7 +23,7 @@ from sisr.training import (
     SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
-from sisr.training.callbacks import BenchmarkSample
+from sisr.training.callbacks import BenchmarkSample, _validate_monitor_metric
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -363,6 +363,45 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     assert "psnr/val/RGB" in str(exc_info.value)
     assert "ssim/val/RGB" in str(exc_info.value)
     assert "ssim/val/Y" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _validate_monitor_metric direction check (LPIPS/DISTS are lower-is-better)
+# ---------------------------------------------------------------------------
+
+
+def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
+    """Real SRLightning exposing only the `eval_config` `_validate_monitor_metric` reads."""
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=eval_config or SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_perceptual_monitor_is_accepted():
+    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
+    _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="min")  # must not raise
+
+
+def test_lower_is_better_metric_rejects_mode_max():
+    """SRCheckpoint defaults mode='max'; LPIPS and DISTS are lower-better.
+
+    Monitoring lpips/val at the default keeps the WORST model for the whole
+    run, and nothing in the logs, tags or filenames says so.
+    """
+    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
+    with pytest.raises(MisconfigurationException, match="lower-is-better"):
+        _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="max")
+
+
+def test_psnr_monitor_still_requires_mode_max():
+    module = build_module(eval_config=SREvalConfig())
+    with pytest.raises(MisconfigurationException, match="higher-is-better"):
+        _validate_monitor_metric("SRCheckpoint", "psnr/val/RGB", module, mode="min")
 
 
 # ---------------------------------------------------------------------------
