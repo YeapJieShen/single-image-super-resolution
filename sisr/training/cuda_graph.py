@@ -4,9 +4,9 @@ An SRCNN training step is kernel-launch-bound, not compute-bound: measured 78
 ``cudaLaunchKernel`` calls per step, with the CPU's launch time equal to the
 step's wall time and the GPU at under 30% utilisation. Replaying one captured
 graph runs the identical kernels as a single ``cudaGraphLaunch`` at near-full
-utilisation, cutting device-side time roughly in half and the whole Lightning
-step by ~2.6x — see the measured figures in ``templates/config.srcnn.template.yaml``,
-which is the one place they are quoted and kept current.
+utilisation, cutting device-side time roughly in half — see the measured
+figures in ``templates/config.srcnn.template.yaml``, which is the one place
+they are quoted and kept current.
 
 Only ``{zero_grad, forward, loss, backward}`` is captured — ``optimizer.step()``
 stays eager and stays Lightning's. Capturing it too saves a further 0.07 ms/step

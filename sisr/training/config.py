@@ -135,8 +135,7 @@ class SRTrainingConfig:
             mistraining. Mutually exclusive with ``compile_backend`` (see
             :meth:`__post_init__`). Validation, test and predict always stay
             eager — their image sizes vary, and graphs need static shapes.
-            Measured ~2.6x steps/s on one RTX 5060 Laptop with bit-identical
-            losses; the figures live in
+            Losses are bit-identical to eager; the measured speedups live in
             ``templates/config.srcnn.template.yaml`` so there is one place to
             keep current. The win is proportional to how launch-bound the
             architecture is, so it is far smaller for SRResNet, whose GPU floor
