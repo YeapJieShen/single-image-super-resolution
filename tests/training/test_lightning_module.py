@@ -2181,3 +2181,64 @@ def test_criterion_description_prefers_describe_for_srloss():
 
     assert lit.criterion_description == "spy(recipe)"
     assert lit._tb_hparams["criterion"] == "spy(recipe)"
+
+
+# ---------------------------------------------------------------------------
+# validation_step — perceptual metric logging (lpips/dists)
+# ---------------------------------------------------------------------------
+
+
+def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
+    """Native-LR SRLightning (SRResNet-style, scale=4) for validation_step-level tests.
+
+    lr (1, 3, 8, 8) -> sr (1, 3, 32, 32), matching the hr size these tests use, so
+    validation_step's HR-not-smaller-than-SR check never fires.
+    """
+    model = SRResNet(scale=4, num_residual_blocks=1)
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=4),
+        eval_config=eval_config or SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def capture_logged_metrics(module: SRLightning) -> dict[str, float]:
+    """Monkeypatch module.log to record name -> float(value), bypassing the real
+    Trainer-attached self.log (which validation_step's callers would otherwise need).
+
+    Detaches tensors before the float() cast — validation_step runs outside
+    torch.no_grad() here (no real Trainer to enter it), so logged tensors carry
+    requires_grad, and float() on those warns (an error under filterwarnings).
+    """
+    logged: dict[str, float] = {}
+
+    def fake_log(name, value, **kwargs):
+        logged[name] = float(value.detach()) if isinstance(value, torch.Tensor) else float(value)
+
+    module.log = fake_log
+    return logged
+
+
+def test_validation_logs_perceptual_tags(monkeypatch):
+    """Requested perceptual metrics reach TensorBoard under their own tag family."""
+    monkeypatch.setattr(
+        "sisr.training.lightning_module.perceptual_score",
+        lambda name, sr, hr, lpips_net: torch.tensor(0.5 if name == "lpips" else 0.25),
+    )
+    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips", "dists"]))
+    logged = capture_logged_metrics(module)
+
+    module.validation_step((torch.rand(1, 3, 8, 8), torch.rand(1, 3, 32, 32)), 0)
+
+    assert logged["lpips/val"] == pytest.approx(0.5)
+    assert logged["dists/val"] == pytest.approx(0.25)
+
+
+def test_no_perceptual_tags_when_unrequested(monkeypatch):
+    """Default-off must mean no new tags for existing SRCNN/SRResNet runs."""
+    module = build_module(eval_config=SREvalConfig())
+    logged = capture_logged_metrics(module)
+    module.validation_step((torch.rand(1, 3, 8, 8), torch.rand(1, 3, 32, 32)), 0)
+    assert not [tag for tag in logged if tag.startswith(("lpips", "dists"))]

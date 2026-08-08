@@ -23,6 +23,7 @@ from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from ..colorspace import rgb_to_ycbcr_studio
 from ..losses import SRLoss
 from ..models.base import SRModel
+from ..perceptual import perceptual_score
 from ..processors import SRProcessor
 from ..ssim import daala_ssim
 from .config import SREvalConfig, SRTrainingConfig
@@ -524,6 +525,26 @@ class SRLightning(lightning.LightningModule):
             sr, hr, data_range=1.0
         )
 
+    def _mean_perceptual(self, name: str, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
+        """Mean perceptual score under the configured backbone.
+
+        The single decision point for which perceptual metric this project
+        computes, mirroring :meth:`_mean_ssim` — consumed by
+        :meth:`validation_step` and by
+        :class:`~sisr.training.callbacks.BenchmarkImageLogger`, so the
+        validation and benchmark paths cannot report different quantities under
+        the same tag.
+
+        Args:
+            name: ``'lpips'`` or ``'dists'``.
+            sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
+            hr: Reference, same shape.
+
+        Returns:
+            0-dim tensor.
+        """
+        return perceptual_score(name, sr, hr, lpips_net=self.eval_config.lpips_net)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the wrapped SR model on ``x`` and return its raw output.
 
@@ -943,6 +964,13 @@ class SRLightning(lightning.LightningModule):
                 on_step=False,
                 add_dataloader_idx=False,
             )
+        for name in self.eval_config.perceptual_keys:
+            self.log(
+                f"{name}/val",
+                self._mean_perceptual(name, sr, hr_cropped),
+                on_step=False,
+                add_dataloader_idx=False,
+            )
 
     def on_fit_start(self) -> None:
         """Check the CUDA-graph prerequisites, then warm up the compiled training path.
@@ -1079,6 +1107,7 @@ class SRLightning(lightning.LightningModule):
         metrics = {
             **{f"psnr/val/{k}": 0.0 for k in self.eval_config.psnr_keys},
             **{f"ssim/val/{k}": 0.0 for k in self.eval_config.ssim_keys},
+            **{f"{name}/val": 0.0 for name in self.eval_config.perceptual_keys},
         }
         for tb in tb_loggers:
             tb.log_hyperparams(self._tb_hparams, metrics)
