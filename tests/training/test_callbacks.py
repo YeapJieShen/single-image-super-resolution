@@ -24,7 +24,6 @@ from sisr.training import (
     WeightHistogramLogger,
 )
 from sisr.training.callbacks import BenchmarkSample
-from tests.training.test_lightning_module import build_module, capture_logged_metrics
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -1036,12 +1035,17 @@ def test_benchmark_test_epoch_end_logs_means():
 
 
 def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
-    """_collect_batch must route perceptual scoring through pl_module._mean_perceptual
-    (mocked here at its perceptual_score seam, so no real LPIPS/DISTS weights load),
-    landing in BenchmarkSample.perceptual under eval_config.perceptual_keys."""
+    """_collect_batch must pass the per-image, border-cropped SR/HR pair into
+    pl_module._mean_perceptual (mocked here at its perceptual_score seam, so no
+    real LPIPS/DISTS weights load) -- not the un-cropped batch-level tensors or
+    anything else in scope. The mock's return depends on sr/hr
+    (``sr.sum() - hr.sum()``) rather than being a constant, so a wrong tensor
+    pair changes the recorded value instead of passing regardless of it; a
+    non-zero crop_border also means a wrong (un-cropped) pair differs in shape,
+    not just content."""
     monkeypatch.setattr(
         "sisr.training.lightning_module.perceptual_score",
-        lambda name, sr, hr, lpips_net: torch.tensor(0.42),
+        lambda name, sr, hr, lpips_net: sr.sum() - hr.sum(),
     )
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
@@ -1050,8 +1054,13 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
         model=model,
         processor=RGBProcessor(),
         training_config=SRTrainingConfig(),
-        eval_config=SREvalConfig(crop_border=0, perceptual_metrics=["lpips"]),
+        eval_config=SREvalConfig(crop_border=2, perceptual_metrics=["lpips"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    sr_fixed = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(0))
+    hr_cropped_fixed = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(1))
+    monkeypatch.setattr(
+        pl_module, "predict_rgb", MagicMock(return_value=(sr_fixed, hr_cropped_fixed))
     )
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     ds = _stub_dataset_with_img_paths(n=1, name="Set5")
@@ -1065,36 +1074,37 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
         batch_idx=0,
         dataloader_idx=1,
     )
+
+    n = pl_module.eval_config.crop_border
+    expected_sr = sr_fixed[0:1][..., n:-n, n:-n]
+    expected_hr = hr_cropped_fixed[0:1][..., n:-n, n:-n]
+    expected = (expected_sr.sum() - expected_hr.sum()).item()
+
     sample = cb._buffer["Set5"][0]
-    assert sample.perceptual == pytest.approx({"lpips": 0.42})
+    assert sample.perceptual == pytest.approx({"lpips": expected})
 
 
-def test_benchmark_logs_perceptual_per_set(monkeypatch):
+def test_benchmark_logs_perceptual_per_set():
     """Test-set scoring must offer the same metric families validation does.
 
-    Routed through pl_module._mean_perceptual, not perceptual_score directly:
-    the PSNR/SSIM pair used to call torchmetrics independently from these two
-    places, and only one of them learning about a new convention is exactly how
-    two tags under one name come to mean different things.
+    _flush_buffer only reduces already-buffered floats -- perceptual scoring
+    itself happens upstream in _collect_batch (see
+    test_benchmark_collect_batch_populates_perceptual_dict) -- so a plain
+    MagicMock pl_module is enough here, mirroring
+    test_benchmark_validation_epoch_end_logs_means.
     """
-    monkeypatch.setattr(
-        "sisr.training.lightning_module.perceptual_score",
-        lambda name, sr, hr, lpips_net: torch.tensor(0.5),
-    )
-    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
-    logger = BenchmarkImageLogger()
-    logger.dataset_names = ["Set5"]
-    logger._buffer = {
-        "Set5": [
-            BenchmarkSample("a.png", {"RGB": 30.0}, {"RGB": 0.9}, {"lpips": 0.5}),
-            BenchmarkSample("b.png", {"RGB": 32.0}, {"RGB": 0.8}, {"lpips": 0.3}),
-        ]
-    }
-    logged = capture_logged_metrics(module)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=99)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    cb._buffer["Set5"] = [
+        BenchmarkSample("a.png", {"RGB": 30.0}, {"RGB": 0.9}, {"lpips": 0.5}),
+        BenchmarkSample("b.png", {"RGB": 32.0}, {"RGB": 0.8}, {"lpips": 0.3}),
+    ]
+    cb.on_validation_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
 
-    logger._flush_buffer(pl_module=module)
-
-    assert logged["lpips/Set5"] == pytest.approx(0.4)  # mean of 0.5 and 0.3
+    lpips_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "lpips/Set5")
+    assert lpips_call.args[1] == pytest.approx(0.4)  # mean of 0.5 and 0.3
 
 
 # ---------------------------------------------------------------------------
