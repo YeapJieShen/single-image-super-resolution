@@ -43,6 +43,14 @@ model:
       # combination is refused with a warning and trains eagerly. Dropping pinning
       # measured neutral-to-positive here (the pin thread contends for the GIL).
       # cuda_graph: true
+  # No init_args: the dataclass default leaves ssim_impl at wang -- the field
+  # standard fixed 11x11 gaussian (sigma 1.5), what torchmetrics/MATLAB/BasicSR
+  # compute and what most SR papers report (SRResNet's paper is the exception --
+  # see the daala note in its template). Override with:
+  #   eval_config:
+  #     class_path: sisr.models.srcnn.SRCNNEvalConfig
+  #     init_args:
+  #       ssim_impl: daala
   eval_config:
     class_path: sisr.models.srcnn.SRCNNEvalConfig
 

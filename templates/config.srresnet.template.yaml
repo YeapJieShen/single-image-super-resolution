@@ -62,6 +62,15 @@ model:
       # TensorBoard-graph dummy -- it also shapes the compile warm-up (a wrong size
       # compiles once then recompiles on step 1) and ModelSummary's FLOPs.
       example_input_shape: [3, 24, 24]
+  # No init_args: the dataclass default already sets ssim_impl: daala, the
+  # convention Ledig et al.'s paper actually used (sigma scales with image height,
+  # not Wang's fixed 11x11 -- see sisr/ssim.py). That makes this run's SSIM
+  # comparable to the paper and NOT to the Wang-based numbers the rest of the SR
+  # literature reports (EDSR/RCAN/SwinIR/BasicSR lineage). Override with:
+  #   eval_config:
+  #     class_path: sisr.models.srresnet.SRResNetEvalConfig
+  #     init_args:
+  #       ssim_impl: wang
   eval_config:
     class_path: sisr.models.srresnet.SRResNetEvalConfig
 
