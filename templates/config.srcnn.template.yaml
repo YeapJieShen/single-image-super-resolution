@@ -11,48 +11,50 @@ optimizer:
     momentum: 0.9
 
 model:
-  model:
-    class_path: sisr.models.srcnn.SRCNN
-    init_args:
-      num_channels: 1                    # Y-channel only (was 3 — latent bug fix)
-      num_filters: [64, 32]
-      kernel_sizes: [9, 1, 5]
-      padding: 0
-  processor:
-    class_path: sisr.processors.YChannelProcessor
-  training_config:
-    class_path: sisr.models.srcnn.SRCNNTrainingConfig
-    init_args:
-      # Must match the real training input: 1-channel Y at subimg_size x subimg_size.
-      # No longer only a TensorBoard-graph dummy -- it also shapes the compile warm-up
-      # (a wrong size compiles once then recompiles on step 1) and ModelSummary's FLOPs.
-      example_input_shape: [1, 33, 33]
-      # Replay one captured graph of {zero_grad, forward, loss, backward} per step
-      # instead of relaunching 78 kernels. Real-DIV2K measurement at this template's
-      # geometry (num_workers 16, pin_memory false): 14.9 -> 8.3 ms/step (~1.8x; the
-      # full 1e7-step budget drops ~41 h -> ~23 h), losses bit-identical to eager.
-      # SRCNN's step is launch-bound, so removing the launches is nearly all of it;
-      # compute-bound architectures gain less but still gain (SRResNet ~1.4x).
-      # Off by default: requires precision 32-true, one device, no gradient
-      # accumulation and no compile_backend (SRLightning refuses the rest rather
-      # than mistrain quietly -- re-checked every epoch, since a callback can
-      # switch accumulation on after fit starts).
-      # When enabling this, also set pin_memory: false below: the pin-memory
-      # thread's cudaHostAlloc can invalidate a capture mid-flight (the only
-      # measured capture crashes came from graphs + workers + pinning), so that
-      # combination is refused with a warning and trains eagerly. Dropping pinning
-      # measured neutral-to-positive here (the pin thread contends for the GIL).
-      # cuda_graph: true
-  # No init_args: the dataclass default leaves ssim_impl at wang -- the field
-  # standard fixed 11x11 gaussian (sigma 1.5), what torchmetrics/MATLAB/BasicSR
-  # compute and what most SR papers report (SRResNet's paper is the exception --
-  # see the daala note in its template). Override with:
-  #   eval_config:
-  #     class_path: sisr.models.srcnn.SRCNNEvalConfig
-  #     init_args:
-  #       ssim_impl: daala
-  eval_config:
-    class_path: sisr.models.srcnn.SRCNNEvalConfig
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.srcnn.SRCNN
+        init_args:
+          num_channels: 1                    # Y-channel only (was 3 — latent bug fix)
+          num_filters: [64, 32]
+          kernel_sizes: [9, 1, 5]
+          padding: 0
+      processor:
+        class_path: sisr.processors.YChannelProcessor
+      training_config:
+        class_path: sisr.models.srcnn.SRCNNTrainingConfig
+        init_args:
+          # Must match the real training input: 1-channel Y at subimg_size x subimg_size.
+          # No longer only a TensorBoard-graph dummy -- it also shapes the compile warm-up
+          # (a wrong size compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+          example_input_shape: [1, 33, 33]
+          # Replay one captured graph of {zero_grad, forward, loss, backward} per step
+          # instead of relaunching 78 kernels. Real-DIV2K measurement at this template's
+          # geometry (num_workers 16, pin_memory false): 14.9 -> 8.3 ms/step (~1.8x; the
+          # full 1e7-step budget drops ~41 h -> ~23 h), losses bit-identical to eager.
+          # SRCNN's step is launch-bound, so removing the launches is nearly all of it;
+          # compute-bound architectures gain less but still gain (SRResNet ~1.4x).
+          # Off by default: requires precision 32-true, one device, no gradient
+          # accumulation and no compile_backend (SRLightning refuses the rest rather
+          # than mistrain quietly -- re-checked every epoch, since a callback can
+          # switch accumulation on after fit starts).
+          # When enabling this, also set pin_memory: false below: the pin-memory
+          # thread's cudaHostAlloc can invalidate a capture mid-flight (the only
+          # measured capture crashes came from graphs + workers + pinning), so that
+          # combination is refused with a warning and trains eagerly. Dropping pinning
+          # measured neutral-to-positive here (the pin thread contends for the GIL).
+          # cuda_graph: true
+      # No init_args: the dataclass default leaves ssim_impl at wang -- the field
+      # standard fixed 11x11 gaussian (sigma 1.5), what torchmetrics/MATLAB/BasicSR
+      # compute and what most SR papers report (SRResNet's paper is the exception --
+      # see the daala note in its template). Override with:
+      #   eval_config:
+      #     class_path: sisr.models.srcnn.SRCNNEvalConfig
+      #     init_args:
+      #       ssim_impl: daala
+      eval_config:
+        class_path: sisr.models.srcnn.SRCNNEvalConfig
 
 data:
   # LR is derived via MATLAB-compatible antialiased bicubic resizing (see

@@ -223,13 +223,14 @@ class SRLightningCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
-        Non-subclass mode (``model_class=SRLightning`` fixed) means
-        ``SRLightning``'s init args land at ``model.<arg>``, not
-        ``model.init_args.<arg>`` — that's why the link targets omit
-        ``init_args``.
+        Subclass mode (``subclass_mode_model=True``) means the module's init args
+        live under ``model.init_args.<arg>``, which is what these links must
+        target. Subclass mode exists so a YAML can name its Lightning module by
+        ``class_path`` — without it ``model_class`` is fixed and no config can
+        select :class:`~sisr.training.SRGANLightning`.
         """
-        parser.add_optimizer_args(link_to="model.optimizer")
-        parser.add_lr_scheduler_args(link_to="model.lr_scheduler")
+        parser.add_optimizer_args(link_to="model.init_args.optimizer")
+        parser.add_lr_scheduler_args(link_to="model.init_args.lr_scheduler")
         parser.add_argument(
             "--matmul_precision",
             type=Literal["highest", "high", "medium"] | None,
@@ -306,6 +307,7 @@ def main() -> None:
     SRLightningCLI(
         model_class=SRLightning,
         datamodule_class=SRDataModule,
+        subclass_mode_model=True,
         save_config_kwargs={"overwrite": True},
         auto_configure_optimizers=False,
     )

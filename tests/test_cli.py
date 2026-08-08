@@ -20,6 +20,45 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 
+SUBCLASS_MODE_CONFIG = """
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 1.0e-4
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+    model:
+      class_path: sisr.models.srresnet.SRResNet
+      init_args:
+        scale: 4
+    processor:
+      class_path: sisr.processors.RGBSignedOutputProcessor
+    training_config:
+      class_path: sisr.models.srresnet.SRResNetTrainingConfig
+      init_args:
+        example_input_shape: [3, 24, 24]
+    eval_config:
+      class_path: sisr.models.srresnet.SRResNetEvalConfig
+data:
+  train_dataset:
+    class_path: sisr.datasets.srresnet.TrainDataset
+    init_args:
+      img_dir: IMG_DIR
+      scale: 4
+      hr_crop_size: 96
+  val_dataset:
+    class_path: sisr.datasets.srresnet.ValidationDataset
+    init_args:
+      img_dir: IMG_DIR
+      scale: 4
+trainer:
+  accelerator: cpu
+  devices: 1
+  logger: false
+  enable_checkpointing: false
+"""
+
 
 def _resolve(*args: str):
     """Resolve a config fully in-process via ``SRLightningCLI(run=False)``.
@@ -49,6 +88,7 @@ def _resolve(*args: str):
             return SRLightningCLI(
                 model_class=SRLightning,
                 datamodule_class=SRDataModule,
+                subclass_mode_model=True,
                 auto_configure_optimizers=False,
                 save_config_kwargs={"overwrite": True},
                 args=[*args, "--trainer.accelerator=cpu", "--trainer.devices=1"],
@@ -56,6 +96,48 @@ def _resolve(*args: str):
             )
     finally:
         sys.argv = saved_argv
+
+
+def test_subclass_mode_accepts_a_class_path_model_block(tmp_path):
+    """A YAML naming its Lightning module by class_path builds that module.
+
+    Guards the whole point of subclass mode: before it, model_class was fixed
+    and no config could select a different module.
+    """
+    from sisr.cli import SRLightningCLI
+    from sisr.training import SRDataModule, SRLightning
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        SUBCLASS_MODE_CONFIG.replace("IMG_DIR", str(tmp_path).replace("\\", "/")),
+        encoding="utf-8",
+    )
+    # See _resolve's comment: LightningCLI warns when both args= and pytest's own
+    # sys.argv are set, which the strict global filterwarnings=error would fail on.
+    # SUBCLASS_MODE_CONFIG also carries no seed_everything: (unlike the shipped
+    # templates), so Lightning's own "No seed found" UserWarning needs the same
+    # local suppression.
+    saved_argv = sys.argv
+    sys.argv = saved_argv[:1]
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", message="GPU available but not used.*")
+            warnings.filterwarnings("ignore", message="No seed found.*")
+            cli = SRLightningCLI(
+                model_class=SRLightning,
+                datamodule_class=SRDataModule,
+                subclass_mode_model=True,
+                auto_configure_optimizers=False,
+                run=False,
+                args=["--config", str(cfg)],
+            )
+    finally:
+        sys.argv = saved_argv
+    assert isinstance(cli.model, SRLightning)
+    optimizer = cli.model.optimizer([torch.zeros(1, requires_grad=True)])
+    assert isinstance(optimizer, torch.optim.Adam)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4)
 
 
 def test_srcnn_config_resolves_in_process():
@@ -181,6 +263,7 @@ def test_test_subcommand_help_exposes_ckpt_path_in_process(capsys, monkeypatch):
         SRLightningCLI(
             model_class=SRLightning,
             datamodule_class=SRDataModule,
+            subclass_mode_model=True,
             auto_configure_optimizers=False,
             save_config_kwargs={"overwrite": True},
             args=["test", "--help"],
@@ -206,6 +289,7 @@ def test_export_subcommand_help_exposes_its_args_in_process(capsys, monkeypatch)
         SRLightningCLI(
             model_class=SRLightning,
             datamodule_class=SRDataModule,
+            subclass_mode_model=True,
             auto_configure_optimizers=False,
             save_config_kwargs={"overwrite": True},
             args=["export", "--help"],
@@ -239,6 +323,7 @@ def test_export_subcommand_runs_end_to_end_in_process(tmp_path):
             SRLightningCLI(
                 model_class=SRLightning,
                 datamodule_class=SRDataModule,
+                subclass_mode_model=True,
                 auto_configure_optimizers=False,
                 save_config_kwargs={"overwrite": True},
                 args=[
@@ -477,6 +562,7 @@ def _run_cli(args: list[str]):
             return SRLightningCLI(
                 model_class=SRLightning,
                 datamodule_class=SRDataModule,
+                subclass_mode_model=True,
                 auto_configure_optimizers=False,
                 save_config_callback=None,
                 args=args,
@@ -495,19 +581,22 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
     ckpt_dir = tmp_path / "checkpoints"
     config = {
         "model": {
-            "model": {
-                "class_path": "sisr.models.srcnn.SRCNN",
-                "init_args": {
-                    "num_channels": 3,
-                    "num_filters": [64, 32],
-                    "kernel_sizes": [9, 1, 5],
-                    "padding": 0,
+            "class_path": "sisr.training.SRLightning",
+            "init_args": {
+                "model": {
+                    "class_path": "sisr.models.srcnn.SRCNN",
+                    "init_args": {
+                        "num_channels": 3,
+                        "num_filters": [64, 32],
+                        "kernel_sizes": [9, 1, 5],
+                        "padding": 0,
+                    },
                 },
-            },
-            "processor": {"class_path": "sisr.processors.RGBProcessor"},
-            "eval_config": {
-                "class_path": "sisr.training.SREvalConfig",
-                "init_args": {"crop_border": 0},
+                "processor": {"class_path": "sisr.processors.RGBProcessor"},
+                "eval_config": {
+                    "class_path": "sisr.training.SREvalConfig",
+                    "init_args": {"crop_border": 0},
+                },
             },
         },
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
@@ -576,23 +665,26 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
     ckpt_dir = tmp_path / "checkpoints"
     config = {
         "model": {
-            "model": {
-                "class_path": "sisr.models.srresnet.SRResNet",
-                "init_args": {
-                    "scale": 2,
-                    "in_out_channels": 3,
-                    "hidden_channel": 4,
-                    "kernel_sizes": [3, 3, 3],
-                    "num_residual_blocks": 1,
-                    "padding": "same",
+            "class_path": "sisr.training.SRLightning",
+            "init_args": {
+                "model": {
+                    "class_path": "sisr.models.srresnet.SRResNet",
+                    "init_args": {
+                        "scale": 2,
+                        "in_out_channels": 3,
+                        "hidden_channel": 4,
+                        "kernel_sizes": [3, 3, 3],
+                        "num_residual_blocks": 1,
+                        "padding": "same",
+                    },
                 },
+                "processor": {"class_path": "sisr.processors.RGBProcessor"},
+                "training_config": {
+                    "class_path": "sisr.models.srresnet.SRResNetTrainingConfig",
+                    "init_args": {"scale": 2},
+                },
+                "eval_config": {"class_path": "sisr.models.srresnet.SRResNetEvalConfig"},
             },
-            "processor": {"class_path": "sisr.processors.RGBProcessor"},
-            "training_config": {
-                "class_path": "sisr.models.srresnet.SRResNetTrainingConfig",
-                "init_args": {"scale": 2},
-            },
-            "eval_config": {"class_path": "sisr.models.srresnet.SRResNetEvalConfig"},
         },
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
