@@ -249,6 +249,7 @@ class SRLightning(lightning.LightningModule):
                 source, dataset = probe
                 lr, hr = self._sample_zero(dataset)
                 self._check_input_contract(lr, hr, source, dataset)
+                self._extra_probe(lr, hr, source)
                 if source == "train_dataset":
                     train_lr = lr  # reuse below instead of re-sampling index 0
 
@@ -399,6 +400,20 @@ class SRLightning(lightning.LightningModule):
             f"native-LR dataset (e.g. sisr.datasets.srresnet), or fix "
             f"training_config.scale."
         )
+
+    def _extra_probe(self, lr: torch.Tensor, hr: torch.Tensor, source: str) -> None:
+        """Subclass hook: additional checks against a real ``(lr, hr)`` sample.
+
+        No-op by default. Exists so a subclass can validate its own components
+        against real data without repeating :meth:`setup`'s RNG snapshot and
+        pickle-clone sampling — repeating that means consuming random draws the
+        training loop needs, which shifts every seeded crop after it.
+
+        Args:
+            lr: LR sample, ``(C, H, W)``.
+            hr: HR sample, ``(C, H, W)``.
+            source: Config path the sample came from, for error messages.
+        """
 
     def _check_example_input_shape(self, lr: torch.Tensor, train_dataset: Any) -> None:
         """Raise if ``example_input_shape``'s H/W disagrees with the real train LR patch.
