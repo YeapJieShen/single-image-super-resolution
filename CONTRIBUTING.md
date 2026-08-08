@@ -44,10 +44,54 @@ Branch off `main`, add tests with your change, run `pytest`, open a PR. Three ch
 to pass: **test** (pytest + coverage), **build** (`pip install .` and imports work), and
 **lint** (`ruff check` + `ruff format --check`). `main` keeps linear history.
 
-Commits:
+The path a change takes:
 
-- Imperative subject, for example "Add ...", "Fix ...", "Remove ...".
-- Docs-only changes go in their own commit, never mixed with code.
+| Stage | What it means |
+| --- | --- |
+| **Design** | Anything touching a public contract, a metric, or the data path gets agreed before it gets written. A typo fix does not. |
+| **Branch** | `<type>/<topic>`, e.g. `fix/cache-locking`, `docs/workflow`. |
+| **Verify** | Correctness: a test that fails before your change and passes after. Performance: before/after numbers, on real data. |
+| **PR** | Opened against `main`. Stacked PRs must be retargeted to `main` before their final push, or CI never runs on them. |
+| **Merge** | Squash for a single-purpose PR; rebase for one carrying both code and docs, so the commits stay separate. |
+
+### Evidence
+
+Two claims need proof in the PR, not just assertion:
+
+- **A bug fix** ships the test that catches it. Run it against the unfixed code and confirm
+  it fails — a test that passes both ways documents nothing. Name it for the failure, not
+  the fix.
+- **A performance claim** ships before/after numbers measured on real data, reporting
+  **medians with warm-up excluded**. A mean over a short run hides one-time setup costs
+  (worker spawn, cache warm, autotune) and can invert the conclusion. Say how many
+  iterations you discarded.
+
+Anything touching `sisr/imresize.py` must re-prove byte-identical output against the
+MATLAB reference set; that byte-equality is the basis of every comparison to published
+results.
+
+### Commits
+
+Conventional Commit types, with subjects that describe the effect:
+
+```
+<type>: <what changes, in the imperative>
+
+<why — never a restatement of the diff>
+```
+
+- **Types:** `feat`, `fix`, `docs`, `perf`, `refactor`, `test`, `chore`.
+- **Describe the effect, not the mechanism.**
+  `fix: make the cache build lock unable to destroy live data`, not
+  `fix: refactor _try_load`. Sentence case, no trailing period.
+- **Code and docs may share a PR but never a commit.** Put docs in their own `docs:`
+  commit. A PR carrying both is rebase-merged so the split survives.
+- **Breaking changes** take `!` and a footer: `feat!: ...` plus
+  `BREAKING CHANGE: <what downstream code must do>`.
+- **The body explains why.** The diff already shows what. Omit it when the change is
+  self-evident.
+- Reference PRs (`#42`) freely; the history is public, so keep internal tracker ids out
+  of it.
 
 ## Style
 
