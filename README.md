@@ -130,10 +130,11 @@ before running it:
 - **TV's `2e-8` presumes a `[-1, 1]` model output range**, i.e.
   `RGBSignedOutputProcessor`. Under a `[0, 1]` processor the same image has half
   the total variation, so the effective weight differs by 2×.
-- **A perceptual run scores worse PSNR by design.** The shipped templates already
-  checkpoint on both `psnr/val/RGB` and `ssim/val/RGB` — under a perceptual
-  criterion the PSNR-monitored "best" no longer tracks the training objective, so
-  decide which monitored checkpoint you actually want.
+- **A perceptual run scores worse PSNR by design.** The shipped non-adversarial
+  templates (SRCNN, SRResNet) already checkpoint on both `psnr/val/RGB` and
+  `ssim/val/RGB` — under a perceptual criterion the PSNR-monitored "best" no longer
+  tracks the training objective, so decide which monitored checkpoint you actually
+  want. (SRGAN's template is deliberately monitor-free instead — see [SRGAN](#srgan).)
 
 A VGG loss normalises with RGB ImageNet statistics, so it refuses a 1-channel
 processor (SRCNN's `YChannelProcessor`) unless you set `grayscale_to_rgb: true`,
@@ -166,11 +167,18 @@ provenance metadata is checked against this run's generator, processor, output r
 scale, and refused on any mismatch: weights trained under a different one produce a model
 that trains and scores without ever erroring. Set `init_from: null` in the YAML to train
 from scratch, which is not the paper's recipe (`--...init_from=null` on the command line
-does not work — jsonargparse coerces it to the string `'None'`).
+does not work — jsonargparse coerces it to the string `'None'`). YAML is also the safer
+place for any other `training_config` field, for the reason covered under
+[Config overrides and subclass defaults](#config-overrides-and-subclass-defaults):
+`training_config` is a dataclass-typed field, and here it also carries
+`adversarial_weight` and `d_steps_per_g_step`, so a dotted CLI override of one field
+reverts the rest. `SRGANLightning` rejects the reverted base config at construction, so
+this fails loudly rather than silently — but it fails.
 
 **`global_step` runs ahead of the batch count here, and only here.** It counts optimizer
-steps, and this module takes two per batch, so after `N` batches it reads `N + N // k` —
-twice `N` at the default `k = 1`. This is unchanged Lightning behaviour, not a quirk of
+steps, and this module takes one discriminator step every batch plus one generator step
+every `k`-th batch, so after `N` batches it reads `N + N // k` — twice `N` at the default
+`k = 1`. This is unchanged Lightning behaviour, not a quirk of
 manual optimization: manual optimization with a *single* optimizer still gives
 `global_step == batches`, measured. No other architecture here is affected. Two knobs
 that read alike are in different units, so check which before copying a number between
@@ -179,6 +187,10 @@ templates:
 | Counted in global steps | Counted in batches |
 |---|---|
 | `trainer.max_steps`, `every_n_train_steps`, the `{step}` in checkpoint filenames | `val_check_interval`, `log_every_n_steps`, LR-scheduler milestones |
+
+`every_n_train_steps` needs an even value to fire at its stated cadence, since
+`global_step` only takes even values here — an odd one fires at twice its nominal
+period (mechanics in the template's comment).
 
 TensorBoard's default x-axis is the batch counter, so a curve and the checkpoint pulled
 off it are a factor of 2 apart.
@@ -287,9 +299,11 @@ sisr validate --config templates/config.srresnet.template.yaml \
 
 resolves `eval_config` to the base `SREvalConfig`. `ssim_impl` is `wang` as asked, but
 `crop_border` drops `4` → `0` and `psnr_channels` drops `['RGB', 'Y']` → `['RGB']`, and
-nothing in the logs says so. The same happens to `training_config`, and to any field
-whose annotation has subclasses. Naming the class in a separate argument does not help;
-the dotted override that follows resets it again.
+nothing in the logs says so. The same happens to `training_config` — these two
+dataclass-typed config fields are the affected shape, not subclass-typed fields
+generally: `model` itself has subclasses (`SRResNet` among them) and survives a dotted
+override of one of its own scalar fields with every other value intact. Naming the class
+in a separate argument does not help; the dotted override that follows resets it again.
 
 Two forms do work. Set the field in YAML — in the config itself, or in an overlay passed
 as a second `--config`:
