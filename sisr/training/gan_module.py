@@ -104,6 +104,19 @@ class SRGANLightning(SRLightning):
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
         )
+        # The type hint is not enforced at runtime, and everything this module
+        # asserts about its config rests on the subclass: the base carries no
+        # adversarial_weight/d_steps_per_g_step, and does not refuse cuda_graph.
+        if not isinstance(self.training_config, SRGANTrainingConfig):
+            raise TypeError(
+                f"training_config must be an SRGANTrainingConfig, got "
+                f"{type(self.training_config).__name__}. This module reads "
+                f"adversarial_weight and d_steps_per_g_step off it on every step, and "
+                f"only that subclass refuses cuda_graph — which no two-optimizer manual "
+                f"loop can honour, and which SRLightning.on_fit_start would otherwise "
+                f"accept and start checking graph prerequisites for."
+            )
+
         # The correlated check SRGANTrainingConfig.validate_against cannot do:
         # its (model, processor) signature never sees the discriminator.
         if discriminator.hparams["in_channels"] != processor.model_channels:
@@ -141,7 +154,23 @@ class SRGANLightning(SRLightning):
             set. The shape is always this pair — never a bare optimizer list —
             so callers never branch on it; :meth:`training_step` unpacks the
             optimizers positionally and the order is part of the contract.
+
+        Raises:
+            ValueError: If ``training_config.layer_lrs`` is set.
         """
+        # Inherited through SRResNetTrainingConfig, so YAML can set it; this
+        # override never reads it, and a silent uniform-LR fallback is the one
+        # unsignalled misconfiguration in a module that refuses four others.
+        if self.training_config.layer_lrs is not None:
+            raise ValueError(
+                f"training_config.layer_lrs is not supported for adversarial training "
+                f"(got {len(self.training_config.layer_lrs)} entries). SRLightning's "
+                f"per-Conv2d param_groups are built by the base configure_optimizers, "
+                f"which this override replaces to build one optimizer per network, so "
+                f"the setting would be silently ignored and both networks would train "
+                f"at their optimizer's uniform lr. Set layer_lrs to null and tune "
+                f"optimizer.lr / discriminator_optimizer.lr instead."
+            )
         opt_g = self.optimizer(self.model.parameters())
         opt_d = self.discriminator_optimizer(self.discriminator.parameters())
         schedulers = []
@@ -257,8 +286,9 @@ class SRGANLightning(SRLightning):
 
         The base's CUDA-graph path is unreachable from here — it is gated on
         ``training_config.cuda_graph``, which :class:`SRGANTrainingConfig`
-        refuses at construction — so what ``super()`` contributes is the
-        ``torch.compile`` warm-up and the graph-state reset.
+        refuses at construction, and :meth:`__init__` refuses any other config
+        type — so what ``super()`` contributes is the ``torch.compile`` warm-up
+        and the graph-state reset.
 
         Raises:
             RuntimeError: If ``trainer.world_size > 1``.
@@ -275,26 +305,45 @@ class SRGANLightning(SRLightning):
         super().on_fit_start()
 
     def _extra_probe(self, lr: torch.Tensor, hr: torch.Tensor, source: str) -> None:
-        """Check the discriminator's declared input size against the real HR crop.
+        """Check the discriminator's declared input size against the HR crop it will score.
+
+        Keys on the **post-crop** size, not the raw HR patch: what
+        :meth:`training_step` feeds the discriminator is
+        ``extract_target(hr_cropped)``, and ``_forward_sr`` center-crops HR to
+        the generator's output size. The two coincide only while the generator
+        emits exactly ``scale x lr``, which is an SRResNet property rather than
+        anything this module requires.
+
+        The probe forward runs in ``eval`` mode under ``no_grad`` — a train-mode
+        forward would fold this sample into the generator's BatchNorm running
+        statistics before training has taken a single step.
 
         Args:
-            lr: LR sample, ``(C, H, W)``. Unused — the discriminator only ever
-                sees HR-sized tensors.
+            lr: LR sample, ``(C, H, W)``.
             hr: HR sample, ``(C, H, W)``.
             source: Config path the sample came from, for the error message.
 
         Raises:
-            ValueError: If the HR patch is not square at the declared
-                ``hr_input_size``.
+            ValueError: If the cropped HR the discriminator would score is not
+                square at the declared ``hr_input_size``.
         """
         declared = self.discriminator.hparams["hr_input_size"]
-        actual = tuple(hr.shape[-2:])
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                _, _, hr_cropped = self._forward_sr(lr[None], hr[None], need_sr_rgb=False)
+        finally:
+            self.model.train(was_training)
+        actual = tuple(self.processor.extract_target(hr_cropped).shape[-2:])
         if actual == (declared, declared):
             return
         raise ValueError(
-            f"discriminator hr_input_size={declared} does not match the HR patch "
-            f"data.{source} serves ({actual[0]}x{actual[1]}). The discriminator's "
-            f"dense head fixes its input size, so a mismatch is a raw Linear shape "
-            f"error on the first step otherwise. Set hr_crop_size={declared} on the "
-            f"train dataset, or hr_input_size={actual[0]} on the discriminator."
+            f"discriminator hr_input_size={declared} does not match the HR crop it "
+            f"would score ({actual[0]}x{actual[1]}) for the samples data.{source} "
+            f"serves ({tuple(hr.shape[-2:])} before {type(self.model).__name__}'s "
+            f"output size crops it). The discriminator's dense head fixes its input "
+            f"size, so a mismatch is a raw Linear shape error on the first step "
+            f"otherwise. Set hr_input_size={actual[0]} on the discriminator, or size "
+            f"the dataset's crops so the generator emits {declared}x{declared}."
         )
