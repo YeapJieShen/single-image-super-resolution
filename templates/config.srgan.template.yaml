@@ -163,11 +163,21 @@ data:
     # cost, and num_workers=0 hits a hard serial floor (real DIV2K steady-state:
     # 56.0 ms/step at w0 vs 40.1 ms/step at w16 -- 0.72x). The ~2-minute one-time
     # spawn cost amortizes to nothing over a full run.
+    # These counts OOM'd host RAM on a 16-worker box -- see the note beside
+    # val_dataloader_kwargs below.
     num_workers: 16
     pin_memory: true
     persistent_workers: true
   val_dataloader_kwargs:
     batch_size: 1
+    # These worker counts (16 train, 2 val) OOM'd host RAM on a 16-worker box: a
+    # val worker's float64 imresize on a full-size DIV2K image (2040px wide)
+    # raised numpy._ArrayMemoryError, at the FIRST validation, not step 0. This
+    # module is more exposed than the SRResNet template on the same data path --
+    # a resident discriminator plus a VGG19 feature extractor eat the RAM the
+    # SRResNet template doesn't need. A smoke run only got through at 4 train /
+    # 0 val workers; the safe counts on any given box are unmeasured -- lower
+    # these if you OOM.
     num_workers: 2
     persistent_workers: true
 
