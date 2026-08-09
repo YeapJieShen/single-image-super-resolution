@@ -11,17 +11,16 @@ optimizer:
   init_args:
     lr: 1.0e-4
 
-# No lr_scheduler by default. SRGANLightning steps its schedulers by hand in
-# on_train_batch_end (manual optimization does not step them), so milestones are
-# counted in BATCHES — not the global-step unit everything under trainer: uses.
-# Ledig et al. decay 1e-4 -> 1e-5 after 1e5 generator iterations, which is exactly
-# where max_steps below stops; running the paper's second phase means raising
-# max_steps to 400000 and uncommenting this.
-# lr_scheduler:
-#   class_path: torch.optim.lr_scheduler.MultiStepLR
-#   init_args:
-#     milestones: [100000]   # BATCHES, not global steps
-#     gamma: 0.1
+# The generator's LR schedule, and the paper's second training phase: Ledig et al.
+# decay 1e-4 -> 1e-5 after 1e5 generator iterations, then train 1e5 more.
+# SRGANLightning steps its schedulers by hand in on_train_batch_end (manual
+# optimization does not step them), so milestones are counted in BATCHES — at the
+# default k=1 one batch is one generator iteration.
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.MultiStepLR
+  init_args:
+    milestones: [100000]   # BATCHES, not global steps
+    gamma: 0.1
 
 model:
   class_path: sisr.training.SRGANLightning
@@ -70,7 +69,9 @@ model:
         class_path: torch.optim.Adam
         init_args:
           lr: 1.0e-4
-      # discriminator_lr_scheduler: same shape, also nested; unset by default.
+      # discriminator_lr_scheduler: same shape, also nested. Unset, so the critic
+      # holds 1e-4 while the generator decays -- Ledig et al. give one schedule
+      # without splitting it per network.
       # adversarial_loss: unset means sisr.losses.AdversarialLoss — the
       # non-saturating objective over the discriminator's LOGITS. Do not pair it
       # with a sigmoid-terminated critic; SRDiscriminator deliberately emits logits.
@@ -159,14 +160,17 @@ trainer:
   # the default k=1. That is unchanged Lightning behaviour, not a quirk of manual
   # optimization: measured, manual optimization with a SINGLE optimizer still
   # gives global_step == batches. Every other architecture here is unaffected.
-  # max_steps, val_check_interval and checkpoint filenames are all in global-step
-  # units. every_n_train_steps is too, and its condition is checked once per
-  # batch -- so an EVEN value halves the batch cadence (1000 -> every 500
-  # batches) while an odd one does not (5 -> still every 5). The LR scheduler is
-  # stepped by hand per batch, so its milestones are in BATCHES.
-  # 200000 here = the paper's 1e5 generator iterations.
-  max_steps: 200000
-  val_check_interval: 10000
+  # The units differ, so read this before changing any of them. max_steps,
+  # checkpoint filenames and every_n_train_steps are in GLOBAL STEPS;
+  # val_check_interval and the hand-stepped LR scheduler's milestones are in
+  # BATCHES (Lightning keys val_check_interval on total_batch_idx whenever
+  # check_val_every_n_epoch is null, as it is below). every_n_train_steps' own
+  # condition is checked once per batch, so an EVEN value halves the batch cadence
+  # (10000 -> every 5000 batches) while an odd one does not (5 -> still every 5).
+  # 400000 here = the paper's 2e5 generator iterations (1e5 at 1e-4 + 1e5 at 1e-5).
+  max_steps: 400000
+  # 5000 batches = every 10000 global steps: the checkpoint cadence below.
+  val_check_interval: 5000
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
