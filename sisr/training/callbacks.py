@@ -895,6 +895,27 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         self._init_rolling(keep_last)
         self.attribute = attribute
 
+    @property
+    def state_key(self) -> str:
+        """Lightning's callback-state key, widened by ``attribute``.
+
+        ``ModelCheckpoint``'s own key is built from ``monitor``/``mode`` and the
+        cadence fields only — not from ``attribute``, ``dirpath`` or
+        ``filename``. Lightning refuses two stateful callbacks that share a key
+        (``_validate_callbacks_list``), so without this, one generator and one
+        discriminator weights callback on the same monitor and cadence — the
+        configuration ``attribute`` exists for, and the one the SRGAN template
+        ships — cannot be constructed at all.
+
+        Appended to ``super()``'s key rather than rebuilding it, so a Lightning
+        release that adds or renames a key field is carried through here
+        unchanged instead of silently dropping it.
+
+        Returns:
+            A key unique per ``(monitor, mode, cadence, attribute)``.
+        """
+        return f"{super().state_key}[attribute={self.attribute}]"
+
     def setup(
         self,
         trainer: lightning.Trainer,

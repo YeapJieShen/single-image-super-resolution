@@ -514,6 +514,27 @@ def test_weights_checkpoint_can_save_a_named_component(tmp_path):
     assert saved["meta"]["kind"] == "component"
 
 
+def test_two_weights_checkpoints_can_watch_different_components():
+    """Generator and discriminator side by side is the whole reason ``attribute``
+    exists, and it is unconstructable without this.
+
+    Lightning refuses two stateful callbacks sharing a ``state_key``, and
+    ``ModelCheckpoint``'s key is built from ``monitor``/``mode``/the cadence
+    fields only — not from ``attribute``, ``dirpath`` or ``filename``. Two
+    rolling weights callbacks differing only in which network they save
+    therefore collide at ``Trainer`` construction, which is where the shipped
+    SRGAN template puts them.
+    """
+    generator = SRWeightsCheckpoint(monitor_metric=None, attribute="model")
+    discriminator = SRWeightsCheckpoint(monitor_metric=None, attribute="discriminator")
+
+    assert generator.state_key != discriminator.state_key
+    # Same config still keys the same, or saved callback state stops round-tripping.
+    assert generator.state_key == SRWeightsCheckpoint(monitor_metric=None).state_key
+    # The real failure path: Trainer validates the callback list on construction.
+    lightning.Trainer(callbacks=[generator, discriminator], logger=False)
+
+
 def _make_srcnn_datamodule(image_dir: Path):
     """Tiny SRDataModule (3 fixture images) mirroring test_integration.py's helper —
     real Trainer.fit needs a real datamodule to reach ModelCheckpoint's save path."""
