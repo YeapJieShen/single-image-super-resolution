@@ -284,6 +284,69 @@ def test_srgan_template_parses_and_builds(tmp_path: Path):
     assert {id(p) for group in opt_d.param_groups for p in group["params"]} == {
         id(p) for p in m.discriminator.parameters()
     }
+    # ...and the top-level lr_scheduler: key still links into the GAN module under
+    # subclass mode, which is what carries the paper's second training phase.
+    opt_g = m.optimizer(m.model.parameters())
+    assert isinstance(m.lr_scheduler(opt_g), torch.optim.lr_scheduler.MultiStepLR)
+
+
+def test_srgan_template_ships_the_papers_full_two_phase_schedule():
+    """Ledig trains 1e5 generator iterations at 1e-4, then 1e5 more at 1e-5.
+
+    This module takes two optimizer steps per batch, so 2e5 iterations is
+    ``max_steps: 400000`` *global steps*, while the decay milestone is in BATCHES —
+    ``SRGANLightning`` steps its schedulers by hand, once per batch. Shipping half
+    the schedule, or the full length with the scheduler commented out, reproduces
+    neither phase of the paper.
+
+    ``val_check_interval`` is in batches too (Lightning keys it on
+    ``total_batch_idx`` whenever ``check_val_every_n_epoch`` is null, which this
+    template sets), so 5000 there is the same 10000-global-step cadence the
+    checkpoint callbacks fire on.
+    """
+    with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    assert data["trainer"]["max_steps"] == 400000
+    assert data["trainer"]["check_val_every_n_epoch"] is None
+    assert data["trainer"]["val_check_interval"] == 5000
+    assert data["lr_scheduler"]["class_path"].endswith("MultiStepLR")
+    assert data["lr_scheduler"]["init_args"]["milestones"] == [100000]
+    assert data["lr_scheduler"]["init_args"]["gamma"] == pytest.approx(0.1)
+
+
+@_ignore_random_vgg
+def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
+    """Instantiating the model is what every subcommand does — ``validate``/``test``/
+    ``export --ckpt_path`` included — so reading ``init_from`` at construction made
+    all of them depend on the gitignored golden ``.pt``. This resolves the shipped
+    template with ``init_from`` pointed at a file that does not exist: it must build,
+    because nothing here is fitting.
+    """
+    overlay = tmp_path / "missing_init_from.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {
+                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                        },
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cli = _resolve("--config", str(SRGAN_TEMPLATE), "--config", str(overlay))
+
+    assert cli.model.training_config.init_from == str(tmp_path / "absent.pt")
 
 
 def test_srgan_template_ships_a_real_init_from_path():

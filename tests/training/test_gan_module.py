@@ -103,6 +103,18 @@ def write_weights(tmp_path, **meta_overrides):
     return path, source
 
 
+def init_gan_from(path, **kwargs):
+    """Build a GAN module and run the ``fit`` setup — the hook ``init_from`` loads in.
+
+    The load is deferred out of ``__init__`` so that ``validate``/``test``/
+    ``export``, which all instantiate the model from config, never read the file.
+    Every ``init_from`` assertion therefore has to drive the stage that does.
+    """
+    module = build_gan_module(init_from=str(path), **kwargs)
+    module.setup("fit")
+    return module
+
+
 def clone_params(module):
     return {name: p.detach().clone() for name, p in module.named_parameters()}
 
@@ -677,7 +689,7 @@ def test_init_from_loads_generator_weights_bit_exactly(tmp_path):
     """
     path, source = write_weights(tmp_path)
 
-    gan = build_gan_module(init_from=str(path))
+    gan = init_gan_from(path)
 
     loaded, original = gan.model.state_dict(), source.model.state_dict()
     assert loaded.keys() == original.keys()
@@ -722,7 +734,7 @@ def test_init_from_refuses_a_mismatched_artifact(tmp_path, override, field):
     path, _ = write_weights(tmp_path, **override)
 
     with pytest.raises(ValueError) as excinfo:
-        build_gan_module(init_from=str(path))
+        init_gan_from(path)
 
     message = str(excinfo.value)
     assert [name for name in INIT_FROM_FIELDS if name in message] == [field]
@@ -734,7 +746,7 @@ def test_init_from_accepts_an_artifact_whose_unvalidated_fields_differ(tmp_path)
     says nothing about whether its weights fit this generator."""
     path, _ = write_weights(tmp_path, **{"eval_config.crop_border": 99})
 
-    build_gan_module(init_from=str(path))  # must not raise
+    init_gan_from(path)  # must not raise
 
 
 def test_init_from_rejects_a_ckpt_and_names_the_pt(tmp_path):
@@ -745,7 +757,7 @@ def test_init_from_rejects_a_ckpt_and_names_the_pt(tmp_path):
     torch.save({"state_dict": {}}, path)
 
     with pytest.raises(ValueError) as excinfo:
-        build_gan_module(init_from=str(path))
+        init_gan_from(path)
 
     message = str(excinfo.value)
     assert "sr-42.ckpt" in message
@@ -759,7 +771,98 @@ def test_init_from_refuses_a_pt_with_no_metadata(tmp_path):
     torch.save({"state_dict": build_source_module().model.state_dict()}, path)
 
     with pytest.raises(ValueError, match="meta"):
-        build_gan_module(init_from=str(path))
+        init_gan_from(path)
+
+
+def test_init_from_names_the_component_artifact_it_was_handed(tmp_path):
+    """A ``d-weights-*.pt`` is the likeliest misuse after a ``.ckpt``: the template
+    writes both files into one dirpath.
+
+    It is refused either way — a component's meta has no generator-scoped ``io``
+    section — but "io.scale is None" never tells the user they grabbed the
+    discriminator's weights, which is the whole mistake.
+    """
+    module = build_gan_module()
+    path = tmp_path / "d-weights-10000.pt"
+    torch.save(
+        {
+            "state_dict": module.discriminator.state_dict(),
+            "meta": build_component_metadata(module, "discriminator"),
+        },
+        path,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        init_gan_from(path)
+
+    message = str(excinfo.value)
+    assert "d-weights-10000.pt" in message
+    assert "discriminator" in message, "the message must name the component it was handed"
+    assert "sr-weights" in message, "...and the generator file that should have been used"
+    assert not [name for name in INIT_FROM_FIELDS if name in message], (
+        "a component file is not a field mismatch, and must not be reported as one"
+    )
+
+
+def test_init_from_accepts_a_pt_written_before_kind_existed(tmp_path):
+    """``kind`` is an additive field: the golden 1e6-step artifact the template
+    ships predates it, and keying the component refusal on its *absence* would
+    refuse the one file ``init_from`` is shipped pointing at."""
+    source = build_source_module()
+    meta = build_metadata(source)
+    del meta["kind"]
+    path = tmp_path / "sr-weights.pt"
+    torch.save({"state_dict": source.model.state_dict(), "meta": meta}, path)
+
+    init_gan_from(path)  # must not raise
+
+
+def test_init_from_names_the_cli_null_coercion_trap():
+    """``--...init_from=null`` does not unset it: jsonargparse coerces a null CLI
+    value for a ``str | None`` field to the *string* ``'None'``, which then reaches
+    ``torch.load`` as a filename and dies as a missing file. Name the trap instead —
+    the comment in the template cannot reach someone who has already typed it."""
+    with pytest.raises(ValueError) as excinfo:
+        init_gan_from("None")
+
+    message = str(excinfo.value)
+    assert "null" in message, "the message must name the CLI override that produces it"
+    assert "--config" in message, "...and the overlay that actually works"
+
+
+def test_init_from_is_only_read_when_the_run_is_fitting(tmp_path):
+    """Every subcommand instantiates the model from config — ``--ckpt_path`` does
+    not skip it — so a construction-time load made ``validate``/``test``/``export``
+    depend on an artifact they never use, and die with ``FileNotFoundError`` on
+    every clone, worktree and CI box that lacks it.
+
+    A path that does not exist is the whole proof: the non-fit stages must not
+    touch it, and ``fit`` must.
+    """
+    missing = tmp_path / "absent-sr-weights.pt"
+
+    module = build_gan_module(init_from=str(missing))  # construction must not read it
+    for stage in ("validate", "test", "predict"):
+        module.setup(stage)  # must not raise
+
+    with pytest.raises(FileNotFoundError):
+        module.setup("fit")
+
+
+@_ignore_cpu_fit_warnings
+def test_init_from_is_reached_through_a_real_trainer_fit(tmp_path):
+    """The stage gate must hold for the value Lightning passes — ``trainer.state.fn``,
+    a ``TrainerFn`` enum — not only the plain string a direct ``setup()`` call uses.
+
+    A gate that missed it would skip the MSE initialisation of every real run
+    without a word: the generator would just start from scratch, which is not the
+    paper's recipe and looks like nothing at all. Driving a refusal out through
+    ``trainer.fit`` is the cheap proof that the call site is reached.
+    """
+    path, _ = write_weights(tmp_path, **{"io.scale": 2})
+
+    with pytest.raises(ValueError, match="io.scale"):
+        fit_gan(build_gan_module(init_from=str(path)), n_batches=1)
 
 
 # ---------------------------------------------------------------------------

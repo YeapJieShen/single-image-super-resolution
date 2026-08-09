@@ -69,8 +69,8 @@ class SRGANLightning(SRLightning):
             itself. Required.
         training_config: Defaults to :class:`SRGANTrainingConfig`, which
             supplies ``adversarial_weight`` and ``d_steps_per_g_step`` — both
-            read by :meth:`training_step` — plus ``init_from`` (read here), and
-            refuses ``cuda_graph``.
+            read by :meth:`training_step` — plus ``init_from`` (read by
+            :meth:`setup`, on ``fit`` only), and refuses ``cuda_graph``.
         eval_config: Defaults to :class:`SRGANEvalConfig` (SRResNet's scoring
             plus perceptual metrics, which are the only metrics that track what
             an adversarial objective optimises).
@@ -93,9 +93,8 @@ class SRGANLightning(SRLightning):
 
     Raises:
         ValueError: If ``discriminator``'s ``in_channels`` disagrees with
-            ``processor.model_channels``, or if ``training_config.init_from``
-            names an artifact this run's generator cannot be initialised from
-            (see :meth:`_init_generator_from`).
+            ``processor.model_channels``. ``training_config.init_from`` is
+            validated in :meth:`setup` instead — construction touches no files.
         TypeError: Via :class:`SRLightning` if ``model`` / ``processor`` are
             not of the required base types.
     """
@@ -158,10 +157,34 @@ class SRGANLightning(SRLightning):
         self.discriminator_lr_scheduler = discriminator_lr_scheduler
         self.automatic_optimization = False
 
-        # Last: after the base's own init_strategy pass, whose weights this
-        # deliberately overwrites, and after every refusal above — a load is the
-        # one step here that touches the filesystem.
-        if self.training_config.init_from is not None:
+    def setup(self, stage: str | None = None) -> None:
+        """Run the base's sample probe, then MSE-initialise the generator — ``fit`` only.
+
+        The load is gated on the stage because *every* subcommand instantiates
+        the model from config, ``--ckpt_path`` included: an ``__init__``-time
+        read made ``validate``/``test``/``export`` depend on an artifact they
+        never use, so they died with ``FileNotFoundError`` on any machine
+        without it (every clone, every worktree, CI).
+
+        Here rather than in :meth:`on_fit_start` because Lightning restores a
+        ``--ckpt_path`` resume *between* the two hooks (``Trainer._run``): from
+        the later one this load would overwrite the resumed generator with the
+        pretrained weights and silently restart it, while the discriminator and
+        the optimizer state carried on from where they were.
+
+        Args:
+            stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
+                ``'test'`` or ``'predict'``. Only ``'fit'`` loads.
+
+        Raises:
+            ValueError: Via :meth:`_init_generator_from`, if
+                ``training_config.init_from`` names an artifact this run's
+                generator cannot be initialised from.
+        """
+        super().setup(stage)
+        # Last: after the base's own probe, and after every construction-time
+        # refusal — a load is the one step here that touches the filesystem.
+        if stage == "fit" and self.training_config.init_from is not None:
             self._init_generator_from(self.training_config.init_from)
 
     def _init_generator_from(self, init_from: str) -> None:
@@ -183,12 +206,23 @@ class SRGANLightning(SRLightning):
                 ``attribute='model'`` — a ``{'state_dict', 'meta'}`` payload.
 
         Raises:
-            ValueError: If ``init_from`` names a ``.ckpt``; if the payload
-                carries no ``meta`` to validate against; or if any of
-                :data:`_INIT_FROM_FIELDS` disagrees with this run.
+            ValueError: If ``init_from`` is the string ``'None'`` a CLI
+                ``=null`` collapses to; if it names a ``.ckpt`` or another
+                network's component ``.pt``; if the payload carries no ``meta``
+                to validate against; or if any of :data:`_INIT_FROM_FIELDS`
+                disagrees with this run.
             RuntimeError: From ``load_state_dict(strict=True)`` if the metadata
                 matches but the tensors do not.
         """
+        if init_from == "None":
+            raise ValueError(
+                "init_from is the literal string 'None', not a path. jsonargparse "
+                "coerces a null CLI override of a `str | None` field to that string, so "
+                "--...init_from=null does not unset init_from — it renames the file "
+                "being looked for. Pass an overlay instead: --config a YAML setting "
+                "init_from: null."
+            )
+
         path = Path(init_from)
         if path.suffix == ".ckpt":
             raise ValueError(
@@ -211,6 +245,19 @@ class SRGANLightning(SRLightning):
                 f"(architecture, processor, output range, upscaling factor) can run, so "
                 f"accepting it would reinstate exactly the silent mistraining they exist "
                 f"to prevent."
+            )
+
+        # Only when 'kind' is present: it is an additive field, and the golden
+        # artifact the template ships predates it. Absent means generator.
+        if meta.get("kind") == "component":
+            name = meta.get("component", {}).get("name", "unnamed")
+            raise ValueError(
+                f"init_from={path.name!r} holds this run's {name!r} component, not a "
+                f"generator: an SRWeightsCheckpoint with attribute={name!r} wrote it, and "
+                f"the SRGAN template writes both kinds into one dirpath. Its metadata "
+                f"describes only that component, so none of the generator checks "
+                f"(architecture, processor, output range, upscaling factor) can run "
+                f"against it. Point init_from at the sr-weights-*.pt sibling."
             )
 
         expected = build_metadata(self)

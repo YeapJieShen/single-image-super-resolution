@@ -86,7 +86,10 @@ model:
           # all checked against the file's own metadata and refused on any
           # mismatch — loading weights trained under a different one produces a
           # model that trains and scores without ever erroring.
-          # Set to null to train the GAN from scratch (not the paper's recipe).
+          # Set to null HERE (or in a --config overlay) to train the GAN from
+          # scratch -- not the paper's recipe. --...init_from=null on the command
+          # line does not work: jsonargparse coerces it to the string 'None',
+          # which SRGANLightning refuses by name rather than hunting for a file.
           init_from: "experiments/SRResNet/golden/checkpoints/sr-weights-1000000-psnr_val_RGB=28.8635.pt"
           # Matches the real training input: RGB at hr_crop_size / scale. Not only a
           # TensorBoard-graph dummy -- it also shapes the compile warm-up (a wrong size
