@@ -167,13 +167,19 @@ provenance metadata is checked against this run's generator, processor, output r
 scale, and refused on any mismatch: weights trained under a different one produce a model
 that trains and scores without ever erroring. Set `init_from: null` in the YAML to train
 from scratch, which is not the paper's recipe (`--...init_from=null` on the command line
-does not work — jsonargparse coerces it to the string `'None'`). YAML is also the safer
-place for any other `training_config` field, for the reason covered under
-[Config overrides and subclass defaults](#config-overrides-and-subclass-defaults):
-`training_config` is a dataclass-typed field, and here it also carries
-`adversarial_weight` and `d_steps_per_g_step`, so a dotted CLI override of one field
-reverts the rest. `SRGANLightning` rejects the reverted base config at construction, so
-this fails loudly rather than silently — but it fails.
+does not work — jsonargparse coerces it to the string `'None'`). A dotted CLI override
+of one field is safe on `training_config` here but not on `eval_config`, and the
+difference is the annotation each argument carries, not the field. `SRGANLightning`
+types `training_config` as `SRGANTrainingConfig | None`, so the bare-annotation rebuild
+described under
+[Config overrides and subclass defaults](#config-overrides-and-subclass-defaults) lands
+back on the subclass itself — overriding `adversarial_weight` or `d_steps_per_g_step`
+alone costs nothing. `eval_config` is still typed at the base `SREvalConfig | None`,
+exactly as it is on `SRLightning`, so a dotted override of one of its fields reverts the
+rest: `perceptual_metrics` empties — silently removing the only metric family that
+tracks an adversarial objective — and `ssim_impl` flips from `daala` to `wang`, with
+nothing logged. YAML, or the whole-object JSON override from that section, is what to
+use for any `eval_config` field here.
 
 **`global_step` runs ahead of the batch count here, and only here.** It counts optimizer
 steps, and this module takes one discriminator step every batch plus one generator step
