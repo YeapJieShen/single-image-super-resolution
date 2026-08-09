@@ -23,7 +23,7 @@ from sisr.training import (
     SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
-from sisr.training.callbacks import BenchmarkSample
+from sisr.training.callbacks import BenchmarkSample, _validate_monitor_metric
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -363,6 +363,45 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     assert "psnr/val/RGB" in str(exc_info.value)
     assert "ssim/val/RGB" in str(exc_info.value)
     assert "ssim/val/Y" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _validate_monitor_metric direction check (LPIPS/DISTS are lower-is-better)
+# ---------------------------------------------------------------------------
+
+
+def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
+    """Real SRLightning exposing only the `eval_config` `_validate_monitor_metric` reads."""
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    return SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=eval_config or SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def test_perceptual_monitor_is_accepted():
+    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
+    _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="min")  # must not raise
+
+
+def test_lower_is_better_metric_rejects_mode_max():
+    """SRCheckpoint defaults mode='max'; LPIPS and DISTS are lower-better.
+
+    Monitoring lpips/val at the default keeps the WORST model for the whole
+    run, and nothing in the logs, tags or filenames says so.
+    """
+    module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
+    with pytest.raises(MisconfigurationException, match="lower-is-better"):
+        _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="max")
+
+
+def test_psnr_monitor_still_requires_mode_max():
+    module = build_module(eval_config=SREvalConfig())
+    with pytest.raises(MisconfigurationException, match="higher-is-better"):
+        _validate_monitor_metric("SRCheckpoint", "psnr/val/RGB", module, mode="min")
 
 
 # ---------------------------------------------------------------------------
@@ -743,8 +782,8 @@ def test_benchmark_validation_epoch_end_logs_means():
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     cb._buffer["Set5"] = [
-        BenchmarkSample("img_0", {"RGB": 30.0}, {"RGB": 0.9}),
-        BenchmarkSample("img_1", {"RGB": 32.0}, {"RGB": 0.85}),
+        BenchmarkSample("img_0", {"RGB": 30.0}, {"RGB": 0.9}, {}),
+        BenchmarkSample("img_1", {"RGB": 32.0}, {"RGB": 0.85}, {}),
     ]
     cb.on_validation_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
     # Two log calls per dataset: psnr + ssim.
@@ -1022,11 +1061,89 @@ def test_benchmark_test_epoch_end_logs_means():
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
     pl_module = MagicMock()
     cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
-    cb._buffer["Set5"] = [BenchmarkSample("img_0", {"RGB": 28.0}, {"RGB": 0.7})]
+    cb._buffer["Set5"] = [BenchmarkSample("img_0", {"RGB": 28.0}, {"RGB": 0.7}, {})]
     cb.on_test_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
     log_keys = [call.args[0] for call in pl_module.log.call_args_list]
     assert "psnr/Set5/RGB" in log_keys
     assert "ssim/Set5/RGB" in log_keys
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkImageLogger perceptual metrics (LPIPS/DISTS) per benchmark set
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
+    """_collect_batch must pass the per-image, border-cropped SR/HR pair into
+    pl_module._mean_perceptual (mocked here at its perceptual_score seam, so no
+    real LPIPS/DISTS weights load) -- not the un-cropped batch-level tensors or
+    anything else in scope. The mock's return depends on sr/hr
+    (``sr.sum() - hr.sum()``) rather than being a constant, so a wrong tensor
+    pair changes the recorded value instead of passing regardless of it; a
+    non-zero crop_border also means a wrong (un-cropped) pair differs in shape,
+    not just content."""
+    monkeypatch.setattr(
+        "sisr.training.lightning_module.perceptual_score",
+        lambda name, sr, hr, lpips_net: sr.sum() - hr.sum(),
+    )
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    pl_module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(crop_border=2, perceptual_metrics=["lpips"]),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    sr_fixed = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(0))
+    hr_cropped_fixed = torch.rand(1, 3, 16, 16, generator=torch.Generator().manual_seed(1))
+    monkeypatch.setattr(
+        pl_module, "predict_rgb", MagicMock(return_value=(sr_fixed, hr_cropped_fixed))
+    )
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+
+    n = pl_module.eval_config.crop_border
+    expected_sr = sr_fixed[0:1][..., n:-n, n:-n]
+    expected_hr = hr_cropped_fixed[0:1][..., n:-n, n:-n]
+    expected = (expected_sr.sum() - expected_hr.sum()).item()
+
+    sample = cb._buffer["Set5"][0]
+    assert sample.perceptual == pytest.approx({"lpips": expected})
+
+
+def test_benchmark_logs_perceptual_per_set():
+    """Test-set scoring must offer the same metric families validation does.
+
+    _flush_buffer only reduces already-buffered floats -- perceptual scoring
+    itself happens upstream in _collect_batch (see
+    test_benchmark_collect_batch_populates_perceptual_dict) -- so a plain
+    MagicMock pl_module is enough here, mirroring
+    test_benchmark_validation_epoch_end_logs_means.
+    """
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=99)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    pl_module = MagicMock()
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    cb._buffer["Set5"] = [
+        BenchmarkSample("a.png", {"RGB": 30.0}, {"RGB": 0.9}, {"lpips": 0.5}),
+        BenchmarkSample("b.png", {"RGB": 32.0}, {"RGB": 0.8}, {"lpips": 0.3}),
+    ]
+    cb.on_validation_epoch_end(trainer=SimpleNamespace(), pl_module=pl_module)
+
+    lpips_call = next(c for c in pl_module.log.call_args_list if c.args[0] == "lpips/Set5")
+    assert lpips_call.args[1] == pytest.approx(0.4)  # mean of 0.5 and 0.3
 
 
 # ---------------------------------------------------------------------------

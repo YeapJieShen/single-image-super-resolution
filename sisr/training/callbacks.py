@@ -24,6 +24,7 @@ import torchvision
 from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
+from ..perceptual import PERCEPTUAL_METRICS
 from .metadata import build_metadata
 
 
@@ -38,11 +39,13 @@ class BenchmarkSample(NamedTuple):
         filename: Stem of the source image path, used as the TensorBoard tag suffix.
         psnr: PSNR value per configured key (``eval_config.psnr_keys``).
         ssim: SSIM value per configured key (``eval_config.ssim_keys``).
+        perceptual: Perceptual score per configured metric (``eval_config.perceptual_keys``).
     """
 
     filename: str
     psnr: dict[str, float]
     ssim: dict[str, float]
+    perceptual: dict[str, float]
 
 
 class BenchmarkImageLogger(Callback):
@@ -67,9 +70,11 @@ class BenchmarkImageLogger(Callback):
     SR output is center-padded when smaller than HR (``padding='valid'``) so
     all three panels share the same spatial size.
 
-    Per-set means go under ``"psnr/{name}/{key}"`` and ``"ssim/{name}/{key}"``
-    every cycle. Per-image scalars under ``"per_image/{name}/psnr/{key}/{filename}"``
-    and ``"per_image/{name}/ssim/{key}/{filename}"`` are gated by
+    Per-set means go under ``"psnr/{name}/{key}"``, ``"ssim/{name}/{key}"`` and,
+    for each metric in ``eval_config.perceptual_keys``, ``"{metric}/{name}"``
+    (e.g. ``"lpips/Set5"``) every cycle. Per-image scalars under
+    ``"per_image/{name}/psnr/{key}/{filename}"`` and
+    ``"per_image/{name}/ssim/{key}/{filename}"`` are gated by
     ``log_per_image_metrics`` (default off — see that arg).
 
     Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
@@ -82,7 +87,7 @@ class BenchmarkImageLogger(Callback):
     Buffering full-resolution LR/SR/HR CPU tensors for every image across
     every test set until epoch end cost ~0.5 GB per validation cycle purely
     to defer ``add_image``; only a :class:`BenchmarkSample` (filename +
-    PSNR/SSIM dicts) is buffered now, for the per-set mean computed in
+    PSNR/SSIM/perceptual dicts) is buffered now, for the per-set mean computed in
     :meth:`_flush_buffer`. The TensorBoard experiment is resolved once, in
     :meth:`setup`, rather than re-searched on every batch/epoch-end.
 
@@ -310,20 +315,22 @@ class BenchmarkImageLogger(Callback):
         *source_dataloaders* recovers the underlying dataset for filename
         resolution.
 
-        PSNR/SSIM are computed from the on-device ``sr``/``hr_cropped``
+        PSNR/SSIM/perceptual are computed from the on-device ``sr``/``hr_cropped``
         slices — mirroring the primary-val-loader path in
         ``SRLightning.validation_step`` — so only the scalar ``.item()``
-        results ever leave the GPU. SSIM goes through ``pl_module._mean_ssim``
-        rather than calling ``torchmetrics`` here directly, so this callback
+        results ever leave the GPU. SSIM and perceptual scores go through
+        ``pl_module._mean_ssim``/``pl_module._mean_perceptual`` rather than calling
+        ``torchmetrics``/``perceptual_score`` here directly, so this callback
         cannot silently diverge from ``validation_step`` on which SSIM
-        implementation a given ``eval_config.ssim_impl`` means. When
+        implementation or perceptual backbone a given ``eval_config`` means. When
         *should_log_images* (or
         ``self.log_per_image_metrics``), exactly one host transfer per image
         (``lr_img[i]``/``sr[i]``/``hr_img[i]`` each ``.cpu()`` at most once)
         composes the bicubic|SR|HR strip and/or the per-image scalars, and
         both are emitted to TensorBoard immediately — nothing image-shaped is
-        buffered. Only ``BenchmarkSample(filename, psnr_dict, ssim_dict)`` is
-        appended to ``self._buffer``, for :meth:`_flush_buffer`'s per-set mean.
+        buffered. Only ``BenchmarkSample(filename, psnr_dict, ssim_dict,
+        perceptual_dict)`` is appended to ``self._buffer``, for
+        :meth:`_flush_buffer`'s per-set mean.
         """
         lr_img, hr_img = batch
 
@@ -364,7 +371,13 @@ class BenchmarkImageLogger(Callback):
                 key: pl_module._mean_ssim(*metric_tensors[key]).item()
                 for key in pl_module.eval_config.ssim_keys
             }
-            self._buffer[dataset_name].append(BenchmarkSample(filename, psnr_dict, ssim_dict))
+            perceptual_dict = {
+                name: pl_module._mean_perceptual(name, sr_metric, hr_metric).item()
+                for name in pl_module.eval_config.perceptual_keys
+            }
+            self._buffer[dataset_name].append(
+                BenchmarkSample(filename, psnr_dict, ssim_dict, perceptual_dict)
+            )
 
             if self._tb_experiment is None:
                 continue
@@ -406,13 +419,15 @@ class BenchmarkImageLogger(Callback):
             )
 
     def _flush_buffer(self, pl_module: lightning.LightningModule):
-        """Log per-set mean PSNR/SSIM from the buffered samples.
+        """Log per-set mean PSNR/SSIM/perceptual scores from the buffered samples.
 
         Shared between :meth:`on_validation_epoch_end` and
         :meth:`on_test_epoch_end`. Per-image scalars and image strips were
         already streamed to TensorBoard from :meth:`_collect_batch`; this
-        only reduces the buffered ``BenchmarkSample.psnr``/``.ssim`` dicts to
-        a mean per dataset/key.
+        only reduces the buffered ``BenchmarkSample.psnr``/``.ssim``/``.perceptual``
+        dicts to a mean per dataset/key. Perceptual tags are metric-first
+        (``lpips/{dataset_name}``, ``dists/{dataset_name}``) with no ``perceptual/``
+        prefix segment, matching ``psnr/{dataset_name}/{key}``'s hierarchy.
         """
         for dataset_name, samples in self._buffer.items():
             if not samples:
@@ -427,6 +442,9 @@ class BenchmarkImageLogger(Callback):
             for key in ssim_keys:
                 mean_ssim = sum(s.ssim[key] for s in samples) / len(samples)
                 pl_module.log(f"ssim/{dataset_name}/{key}", mean_ssim, add_dataloader_idx=False)
+            for name in samples[0].perceptual:
+                mean = sum(s.perceptual[name] for s in samples) / len(samples)
+                pl_module.log(f"{name}/{dataset_name}", mean, add_dataloader_idx=False)
 
         self._buffer.clear()
 
@@ -564,31 +582,64 @@ class WeightHistogramLogger(Callback):
 
 
 def _validate_monitor_metric(
-    label: str, monitor: str | None, pl_module: lightning.LightningModule
+    label: str, monitor: str | None, pl_module: lightning.LightningModule, mode: str
 ) -> None:
-    """Raise if ``monitor`` doesn't name a ``psnr/val/*`` or ``ssim/val/*`` metric.
+    """Raise if ``monitor`` names no logged metric, or is monitored in the wrong direction.
 
     Shared by :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint`'s ``setup`` —
     they are siblings under :class:`~lightning.pytorch.callbacks.ModelCheckpoint`,
     not parent/child, so this check cannot be reused via ``super()`` across them.
 
+    The direction half exists because both classes default to ``mode='max'``,
+    which is right for PSNR/SSIM and exactly inverted for LPIPS/DISTS — the
+    failure is silent, keeping the worst checkpoint of the run with nothing in
+    the logs or filenames to indicate it. Which perceptual metrics are
+    lower-is-better comes from ``PERCEPTUAL_METRICS`` rather than being
+    restated here, so a future higher-is-better perceptual metric would still
+    be checked in the right direction.
+
     Args:
         label: Name of the calling class, for the error message only.
-        monitor: The ``monitor`` value to validate (``self.monitor``).
+        monitor: The ``monitor`` value to validate (``self.monitor``). ``None``
+            means rolling mode, which monitors nothing and is always valid.
         pl_module: The model being trained; must expose ``eval_config``.
+        mode: The callback's ``mode`` — ``'max'`` or ``'min'``.
 
     Raises:
         MisconfigurationException: If ``monitor`` does not name a metric
-            ``SRLightning`` will log during ``fit``.
+            ``SRLightning`` will log during ``fit``, or if ``mode`` disagrees
+            with that metric's direction.
     """
-    valid_metrics = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
-    valid_metrics |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
-    if monitor is not None and monitor not in valid_metrics:
+    if monitor is None:
+        return
+
+    higher_better = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
+    higher_better |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
+    higher_better |= {
+        f"{name}/val"
+        for name in pl_module.eval_config.perceptual_keys
+        if not PERCEPTUAL_METRICS[name]
+    }
+    lower_better = {
+        f"{name}/val" for name in pl_module.eval_config.perceptual_keys if PERCEPTUAL_METRICS[name]
+    }
+
+    valid_metrics = higher_better | lower_better
+    if monitor not in valid_metrics:
         raise MisconfigurationException(
             f"`{label}(monitor_metric={monitor!r})` does not match any "
             f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
-            f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, or "
-            f"`eval_config.ssim_channels`."
+            f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, "
+            f"`eval_config.ssim_channels`, or `eval_config.perceptual_metrics`."
+        )
+
+    wanted = "min" if monitor in lower_better else "max"
+    if mode != wanted:
+        direction = "lower-is-better" if wanted == "min" else "higher-is-better"
+        raise MisconfigurationException(
+            f"`{label}(monitor_metric={monitor!r}, mode={mode!r})` monitors a "
+            f"{direction} metric in the wrong direction — it would keep the worst "
+            f"checkpoint of the run, silently. Set mode={wanted!r}."
         )
 
 
@@ -672,12 +723,14 @@ class SRCheckpoint(ModelCheckpoint):
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a
-                metric ``SRLightning`` will log during ``fit``.
+                metric ``SRLightning`` will log during ``fit``, or if
+                ``mode`` disagrees with that metric's direction (PSNR/SSIM
+                are higher-is-better; LPIPS/DISTS are lower-is-better).
         """
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
-        _validate_monitor_metric("SRCheckpoint", self.monitor, pl_module)
+        _validate_monitor_metric("SRCheckpoint", self.monitor, pl_module, mode=self.mode)
 
 
 class SRWeightsCheckpoint(ModelCheckpoint):
@@ -761,12 +814,14 @@ class SRWeightsCheckpoint(ModelCheckpoint):
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a metric
-                ``SRLightning`` will log during ``fit``.
+                ``SRLightning`` will log during ``fit``, or if ``mode``
+                disagrees with that metric's direction (PSNR/SSIM are
+                higher-is-better; LPIPS/DISTS are lower-is-better).
         """
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
-        _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module)
+        _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module, mode=self.mode)
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Write bare model weights + provenance metadata instead of a full checkpoint.

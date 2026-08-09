@@ -41,7 +41,10 @@ dependencies = [
     "torch>=2.6",
     "torchvision>=0.21",
     "lightning>=2.4",
-    "torchmetrics>=1.4",
+    # 1.9 is the version DISTS was verified present in on this project
+    # (torchmetrics.functional.image.deep_image_structure_and_texture_similarity).
+    # Lowering it means testing the lower version, not guessing.
+    "torchmetrics>=1.9",
     "jsonargparse[signatures]>=4.27",
     "lmdb>=1.4",
     "pillow>=10",
@@ -72,6 +75,11 @@ export = [
     "onnx>=1.16",
     "onnxruntime>=1.19",
 ]
+# LPIPS only. torchmetrics implements both LPIPS and DISTS, but gates LPIPS on
+# the `lpips` package (_LPIPS_AVAILABLE) while DISTS needs only torchvision,
+# already a core dep — so DISTS ships in core and this extra buys exactly one
+# metric. Optional because it is a scoring convention, not a training need.
+perceptual = ["lpips>=0.1"]
 
 [project.scripts]
 sisr = "sisr.cli:main"
