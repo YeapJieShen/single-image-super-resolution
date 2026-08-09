@@ -1,7 +1,8 @@
 """Regenerate ``daala_ssim_expected.json`` from the real daala C reference.
 
-Developer-only: needs a C compiler in the ``sisr`` env (see the plan). The test
-suite and CI read the committed JSON and never run this.
+Developer-only: needs a C compiler in the ``sisr`` env -- see :func:`build` for the
+drivers tried and how to install one. The test suite and CI read the committed JSON
+and never run this.
 
 Usage (from the repo root, PowerShell, with the ``sisr`` conda env activated --
 activation puts the env's ``Library\\bin``, hence the compiler, on PATH):
@@ -28,16 +29,15 @@ HERE = Path(__file__).resolve().parent
 
 def build(workdir: Path) -> Path:
     """Compile the vendored reference and return the executable path."""
-    # conda-forge's Windows gcc/clang packages only ship a target-prefixed
-    # driver (e.g. x86_64-w64-mingw32-gcc.exe) -- no plain gcc/clang alias --
-    # so that name is tried too, after the plain ones.
+    # conda-forge's `gcc` ships a plain gcc.exe on Windows, but `gcc_win-64` alone
+    # ships only the target-prefixed driver (x86_64-w64-mingw32-gcc.exe), so that
+    # name is tried too, after the plain ones.
     cc = shutil.which("gcc") or shutil.which("clang") or shutil.which("x86_64-w64-mingw32-gcc")
     if cc is None:
         sys.exit(
-            "No C compiler on PATH. If m2w64-gcc is already installed in the sisr env, "
-            "activate that env (or add its Library\\bin to PATH) so "
-            "x86_64-w64-mingw32-gcc.exe resolves. Otherwise install it: "
-            "conda install -n sisr -c conda-forge m2w64-gcc"
+            "No C compiler on PATH. If gcc is already installed in the sisr env, "
+            "activate that env (or add its Library\\bin to PATH) so gcc.exe "
+            "resolves. Otherwise install it: conda install -n sisr -c conda-forge gcc"
         )
     exe = workdir / ("daala_ssim.exe" if sys.platform == "win32" else "daala_ssim")
     subprocess.run(
