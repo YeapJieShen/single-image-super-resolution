@@ -234,6 +234,55 @@ def test_resize_axis_einsum_matches_naive_multiply_then_sum(in_h, in_w, out_h, o
     )
 
 
+@pytest.mark.parametrize("axis", [0, 1])
+def test_resize_axis_gather_chunking_is_byte_identical_and_really_splits(axis, monkeypatch):
+    """Slicing the gather along the free axis must not move a single byte.
+
+    ``_resize_axis`` caps one gather's float64 footprint at
+    ``_GATHER_CHUNK_BYTES`` and walks the free axis in slices, because the
+    un-split gather is 286.88 MiB for a full-size DIV2K validation image and that
+    allocation is what exhausted host RAM at a run's first validation. The
+    contraction runs over the tap axis alone, so the split is arithmetically
+    inert.
+
+    Both halves are load-bearing. The equality alone would pass vacuously under a
+    cap that never splits — which is exactly the configuration the training path
+    runs in — so the observed gather sizes are asserted too: more than one, and
+    every one within the cap.
+    """
+    import sisr.imresize as imresize
+
+    rng = np.random.default_rng(20260809 + axis)
+    img = rng.integers(0, 256, size=(40, 53, 3), dtype=np.uint8)
+    in_length = img.shape[axis]
+    out_length = in_length // 3
+    free_length = img.shape[1 if axis == 0 else 0]
+    weights, indices = _contributions(in_length, out_length, out_length / in_length)
+    bytes_per_column = out_length * weights.shape[1] * img.shape[2] * 8
+
+    sizes: list[int] = []
+    real_einsum = np.einsum
+
+    def spy_einsum(subscripts, *operands, **kwargs):
+        sizes.append(operands[1].nbytes)  # the gathered taps
+        return real_einsum(subscripts, *operands, **kwargs)
+
+    monkeypatch.setattr(imresize.np, "einsum", spy_einsum)
+
+    monkeypatch.setattr(imresize, "_GATHER_CHUNK_BYTES", free_length * bytes_per_column)
+    whole = _resize_axis(img, axis, weights, indices)
+    assert len(sizes) == 1, "the unsplit reference itself split -- cap chosen too small"
+
+    for columns in (3, 1):
+        sizes.clear()
+        cap = columns * bytes_per_column
+        monkeypatch.setattr(imresize, "_GATHER_CHUNK_BYTES", cap)
+        split = _resize_axis(img, axis, weights, indices)
+        assert len(sizes) == -(-free_length // columns), "the cap did not split the gather"
+        assert max(sizes) <= cap
+        assert np.array_equal(whole, split)
+
+
 def test_matlab_imresize_constant_image_is_invariant():
     """Weights always sum to 1, so resizing a constant-value image at any
     scale must reproduce that exact constant everywhere (up or down)."""

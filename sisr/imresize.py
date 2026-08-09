@@ -67,6 +67,12 @@ import numpy as np
 
 _KERNEL_WIDTH = 4.0  # bicubic support width; MATLAB's a=-0.5 coefficient (OpenCV uses a=-0.75)
 
+# Cap on one gather's float64 footprint in _resize_axis -- see its docstring. Sized
+# well above any training crop (a 96x96 crop at scale 4 gathers 0.84 MiB, so the
+# training path never splits) and well below a full-image validation gather (286.88
+# MiB for a 1536x2040 DIV2K image at the same scale).
+_GATHER_CHUNK_BYTES = 64 << 20
+
 
 def _cubic(x: np.ndarray) -> np.ndarray:
     """MATLAB's bicubic convolution kernel (Keys' family, a=-0.5)."""
@@ -152,6 +158,16 @@ def _resize_axis(
     the multiply and reduction, measured 1.77x per axis pass with
     bit-identical output.
 
+    ``gathered`` itself is then built in slices of the *free* axis (the one not
+    being resized) rather than whole. Whole, it is
+    ``(out_length, num_taps, free_length, C)`` float64 -- 286.88 MiB for a
+    1536x2040 DIV2K image at scale 4, per DataLoader worker per image, which is
+    what exhausted host RAM at the first full-image validation of a run using the
+    shipped worker counts. The contraction runs over the tap axis alone, so every
+    output element's summation is unchanged by where the free axis is cut: the
+    result is byte-identical, not merely close, and is asserted that way in
+    ``tests/test_imresize.py``.
+
     Args:
         image: uint8 array, ``(H, W, C)``.
         axis: ``0`` to resize height, ``1`` to resize width.
@@ -161,12 +177,37 @@ def _resize_axis(
     Returns:
         uint8 array with *axis* resized to ``out_length``.
     """
-    if axis == 0:
-        gathered = image[indices].astype(np.float64)  # (out_h, num_taps, W, C)
-        out = np.einsum("ij,ijkl->ikl", weights, gathered, optimize=True)
+    out_length, num_taps = weights.shape
+    channels = image.shape[2]
+    free_length = image.shape[1 if axis == 0 else 0]
+    step = max(1, _GATHER_CHUNK_BYTES // (out_length * num_taps * channels * 8))
+
+    def contract(start: int, stop: int) -> np.ndarray:
+        if axis == 0:
+            gathered = image[indices, start:stop].astype(np.float64)  # (out_h, taps, w, C)
+            return np.einsum("ij,ijkl->ikl", weights, gathered, optimize=True)
+        gathered = image[start:stop][:, indices].astype(np.float64)  # (h, out_w, taps, C)
+        return np.einsum("jk,ijkl->ijl", weights, gathered, optimize=True)
+
+    if step >= free_length:
+        # One slice covers the image, so skip the output buffer and the copy into
+        # it -- neither is free. Every training crop lands here (0.84 MiB gathered
+        # at 96x96, scale 4), and this branch is what keeps the cap off the hot
+        # path: without it the crop case measured +10.6% for a split it never does.
+        out = contract(0, free_length)
     else:
-        gathered = image[:, indices].astype(np.float64)  # (H, out_w, num_taps, C)
-        out = np.einsum("jk,ijkl->ijl", weights, gathered, optimize=True)
+        if axis == 0:
+            shape = (out_length, free_length, channels)
+        else:
+            shape = (free_length, out_length, channels)
+        out = np.empty(shape, dtype=np.float64)
+        for start in range(0, free_length, step):
+            stop = min(start + step, free_length)
+            if axis == 0:
+                out[:, start:stop] = contract(start, stop)
+            else:
+                out[start:stop] = contract(start, stop)
+
     return _round_half_away_from_zero(np.clip(out, 0.0, 255.0)).astype(np.uint8)
 
 
