@@ -451,9 +451,11 @@ def test_adversarial_weight_scales_the_generators_gradient():
 def test_global_step_counts_optimizer_steps_not_batches(k, n_batches, expected):
     """global_step counts optimizer steps and this module takes two per batch,
     so it is N + N//k — not the batch count. That is the unit max_steps,
-    val_check_interval and checkpoint filenames use, so a max_steps copied from
-    the SRResNet template trains for half the iterations. (Manual optimization
-    is not the cause: with a single optimizer it still equals the batch count.)
+    checkpoint filenames and every_n_train_steps use, so a max_steps copied from
+    the SRResNet template trains for half the iterations. (val_check_interval is
+    the exception: Lightning counts it in batches. Manual optimization is not the
+    cause of any of it: with a single optimizer global_step still equals the
+    batch count.)
     """
     trainer = fit_gan(build_gan_module(k=k), n_batches=n_batches)
 

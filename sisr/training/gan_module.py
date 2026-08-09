@@ -51,9 +51,12 @@ class SRGANLightning(SRLightning):
     :meth:`training_step`). One consequence is worth stating up front:
     ``trainer.global_step`` counts **optimizer** steps, and this module takes
     two per batch, so after ``N`` batches it reads ``N + N // k`` rather than
-    ``N``. Every step-denominated knob (``max_steps``, ``val_check_interval``,
-    checkpoint filenames) is in that unit — a ``max_steps`` copied from the
+    ``N``. Every global-step knob (``max_steps``, checkpoint filenames,
+    ``every_n_train_steps``) is in that unit — a ``max_steps`` copied from the
     SRResNet template therefore trains for roughly half the batches.
+    ``val_check_interval`` is *not*: Lightning counts it in batches whenever
+    ``check_val_every_n_epoch`` is ``None``, as does this module's own
+    scheduler stepping (:meth:`on_train_batch_end`).
 
     Args:
         model: The generator — an initialised :class:`SRModel` subclass,

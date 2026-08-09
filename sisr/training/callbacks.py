@@ -911,6 +911,13 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         release that adds or renames a key field is carried through here
         unchanged instead of silently dropping it.
 
+        Resuming a ``.ckpt`` written before this key gained its ``attribute``
+        suffix finds no state under the new key, so this callback's monitored
+        bookkeeping (``best_model_score``/``best_k_models``, i.e. what a
+        ``save_top_k`` run has already kept) restarts from empty for the rest of
+        that run. Rolling mode loses nothing — its window is recomputed from
+        the files on disk and was never persisted.
+
         Returns:
             A key unique per ``(monitor, mode, cadence, attribute)``.
         """
