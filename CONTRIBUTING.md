@@ -105,7 +105,10 @@ Conventional Commit types, with subjects that describe the effect:
 ## Adding a new architecture
 
 You don't write a Lightning module. `SRLightning` already composes an `SRModel` with an
-`SRProcessor`, fed by `SRDataModule`.
+`SRProcessor`, fed by `SRDataModule`. The one exception is a second optimizer: adversarial
+training drives two networks alternately, which Lightning's automatic loop cannot express,
+so `SRGANLightning` subclasses `SRLightning` and owns its own training step. Anything that
+trains one network needs no new module.
 
 1. Subclass `sisr.models.base.SRModel`: `forward`, `self._hparams`, and optionally
    `reset_parameters(**kwargs)` for a paper-faithful init.
