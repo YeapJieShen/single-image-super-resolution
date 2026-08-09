@@ -122,6 +122,10 @@ filterwarnings = [
     # stops calling torch's deprecated pytree API (track the next lightning/torch bump).
     # Upstream: https://github.com/Lightning-AI/pytorch-lightning (pytree LeafSpec deprecation)
     "ignore::FutureWarning:lightning.*",
+    # Manual optimization (SRGANLightning) + every_n_train_steps: Lightning warns
+    # that the saved state is post-optimization. That is exactly the state we
+    # want — a checkpoint should hold the weights the step produced.
+    "ignore:Using ModelCheckpoint with manual optimization:UserWarning",
 ]
 
 [tool.ruff]
