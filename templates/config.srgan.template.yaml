@@ -12,7 +12,12 @@ optimizer:
     lr: 1.0e-4
 
 # The generator's LR schedule, and the paper's second training phase: Ledig et al.
-# decay 1e-4 -> 1e-5 after 1e5 generator iterations, then train 1e5 more.
+# decay 1e-4 -> 1e-5 after 1e5 generator iterations, then train 1e5 more. The
+# discriminator_lr_scheduler nested under model.init_args below mirrors this
+# block exactly, so both networks decay together — Ledig's sentence describes
+# the SRGAN networks as a whole, not the generator alone, and a critic left at
+# 1e-4 for the whole second phase while the generator drops to 1e-5 is a
+# standard way to saturate the generator's adversarial gradient.
 # SRGANLightning steps its schedulers by hand in on_train_batch_end (manual
 # optimization does not step them), so milestones are counted in BATCHES — at the
 # default k=1 one batch is one generator iteration.
@@ -69,9 +74,19 @@ model:
         class_path: torch.optim.Adam
         init_args:
           lr: 1.0e-4
-      # discriminator_lr_scheduler: same shape, also nested. Unset, so the critic
-      # holds 1e-4 while the generator decays -- Ledig et al. give one schedule
-      # without splitting it per network.
+      # Same shape as the top-level lr_scheduler:, also nested, and set to the
+      # same milestone/gamma so both networks decay together. Ledig et al.'s
+      # sentence ("All SRGAN variants were trained with 1e5 update iterations
+      # at a learning rate of 1e-4 and another 1e5 iterations at a lower rate
+      # of 1e-5") describes the SRGAN networks as a whole; leaving this unset
+      # would hold the critic at 1e-4 for the entire second phase while the
+      # generator it scores drops to 1e-5 — 10x faster, a standard way to
+      # saturate the generator's adversarial gradient.
+      discriminator_lr_scheduler:
+        class_path: torch.optim.lr_scheduler.MultiStepLR
+        init_args:
+          milestones: [100000]   # BATCHES, not global steps
+          gamma: 0.1
       # adversarial_loss: unset means sisr.losses.AdversarialLoss — the
       # non-saturating objective over the discriminator's LOGITS. Do not pair it
       # with a sigmoid-terminated critic; SRDiscriminator deliberately emits logits.

@@ -288,6 +288,10 @@ def test_srgan_template_parses_and_builds(tmp_path: Path):
     # subclass mode, which is what carries the paper's second training phase.
     opt_g = m.optimizer(m.model.parameters())
     assert isinstance(m.lr_scheduler(opt_g), torch.optim.lr_scheduler.MultiStepLR)
+    # ...and the nested discriminator_lr_scheduler decays the critic in step with
+    # the generator — Ledig et al.'s one schedule describes the SRGAN networks as
+    # a whole, not the generator alone.
+    assert isinstance(m.discriminator_lr_scheduler(opt_d), torch.optim.lr_scheduler.MultiStepLR)
 
 
 def test_srgan_template_ships_the_papers_full_two_phase_schedule():
@@ -303,6 +307,11 @@ def test_srgan_template_ships_the_papers_full_two_phase_schedule():
     ``total_batch_idx`` whenever ``check_val_every_n_epoch`` is null, which this
     template sets), so 5000 there is the same 10000-global-step cadence the
     checkpoint callbacks fire on.
+
+    The discriminator must decay on the same schedule as the generator: Ledig et
+    al.'s sentence describes the SRGAN networks as a whole, and a critic left at
+    1e-4 for the whole second phase while the generator drops to 1e-5 is a
+    standard way to saturate the generator's adversarial gradient.
     """
     with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -313,6 +322,10 @@ def test_srgan_template_ships_the_papers_full_two_phase_schedule():
     assert data["lr_scheduler"]["class_path"].endswith("MultiStepLR")
     assert data["lr_scheduler"]["init_args"]["milestones"] == [100000]
     assert data["lr_scheduler"]["init_args"]["gamma"] == pytest.approx(0.1)
+    d_scheduler = data["model"]["init_args"]["discriminator_lr_scheduler"]
+    assert d_scheduler["class_path"].endswith("MultiStepLR")
+    assert d_scheduler["init_args"]["milestones"] == [100000]
+    assert d_scheduler["init_args"]["gamma"] == pytest.approx(0.1)
 
 
 @_ignore_random_vgg
