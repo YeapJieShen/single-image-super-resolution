@@ -2,16 +2,18 @@
 
 Everything but the optimization surface is inherited from
 :class:`~sisr.training.lightning_module.SRLightning`: the forward pipeline,
-the colorspace handling, validation metrics and checkpoint provenance are the
-generator's and are unchanged by training it adversarially. What this subclass
-adds is the second network, the second optimizer, and the alternating step that
-drives them.
+the colorspace handling and the validation metrics are the generator's and are
+unchanged by training it adversarially. What this subclass adds is the second
+network, the second optimizer, the alternating step that drives them, the
+generator's optional MSE initialisation, and the adversarial half of the
+checkpoint's provenance.
 
 Reference: Photo-Realistic Single Image Super-Resolution Using a Generative
 Adversarial Network (https://arxiv.org/pdf/1609.04802), Section 3.2; the
 alternation follows Goodfellow et al. (2014) Algorithm 1.
 """
 
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -24,6 +26,20 @@ from ..models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from ..processors import SRProcessor
 from .config import SREvalConfig
 from .lightning_module import SRLightning
+from .metadata import _class_path, build_metadata
+
+#: ``(section, key)`` of every ``build_metadata`` field ``init_from`` validates —
+#: the properties that decide whether one run's generator weights mean anything in
+#: another. Reported dotted (``io.scale``) so the message names the YAML the user
+#: has to change. Compared against ``build_metadata(self)``, the same builder that
+#: wrote the file, so the two sides cannot drift.
+_INIT_FROM_FIELDS: tuple[tuple[str, str], ...] = (
+    ("model", "class_path"),
+    ("model", "init_args"),
+    ("processor", "class_path"),
+    ("io", "output_range"),
+    ("io", "scale"),
+)
 
 
 class SRGANLightning(SRLightning):
@@ -53,7 +69,8 @@ class SRGANLightning(SRLightning):
             itself. Required.
         training_config: Defaults to :class:`SRGANTrainingConfig`, which
             supplies ``adversarial_weight`` and ``d_steps_per_g_step`` — both
-            read by :meth:`training_step` — and refuses ``cuda_graph``.
+            read by :meth:`training_step` — plus ``init_from`` (read here), and
+            refuses ``cuda_graph``.
         eval_config: Defaults to :class:`SRGANEvalConfig` (SRResNet's scoring
             plus perceptual metrics, which are the only metrics that track what
             an adversarial objective optimises).
@@ -76,7 +93,9 @@ class SRGANLightning(SRLightning):
 
     Raises:
         ValueError: If ``discriminator``'s ``in_channels`` disagrees with
-            ``processor.model_channels``.
+            ``processor.model_channels``, or if ``training_config.init_from``
+            names an artifact this run's generator cannot be initialised from
+            (see :meth:`_init_generator_from`).
         TypeError: Via :class:`SRLightning` if ``model`` / ``processor`` are
             not of the required base types.
     """
@@ -138,6 +157,78 @@ class SRGANLightning(SRLightning):
         self.discriminator_optimizer = discriminator_optimizer
         self.discriminator_lr_scheduler = discriminator_lr_scheduler
         self.automatic_optimization = False
+
+        # Last: after the base's own init_strategy pass, whose weights this
+        # deliberately overwrites, and after every refusal above — a load is the
+        # one step here that touches the filesystem.
+        if self.training_config.init_from is not None:
+            self._init_generator_from(self.training_config.init_from)
+
+    def _init_generator_from(self, init_from: str) -> None:
+        """Initialise the **generator only** from a bare-weights ``.pt``.
+
+        Ledig et al. scope the MSE-initialisation trick to "when training the
+        actual GAN", so a paper-faithful SRGAN run starts from an MSE-trained
+        SRResNet rather than from scratch. The discriminator is not in that file
+        and is not touched: the adversarial half starts fresh by design.
+
+        Every mismatch is refused rather than warned about. Weights trained
+        under a different architecture, processor, output range or scale load
+        into a model that then trains and scores without ever erroring — only
+        the numbers are wrong, which is indistinguishable from a bad run.
+
+        Args:
+            init_from: Path to a ``.pt`` written by
+                :class:`~sisr.training.callbacks.SRWeightsCheckpoint` with
+                ``attribute='model'`` — a ``{'state_dict', 'meta'}`` payload.
+
+        Raises:
+            ValueError: If ``init_from`` names a ``.ckpt``; if the payload
+                carries no ``meta`` to validate against; or if any of
+                :data:`_INIT_FROM_FIELDS` disagrees with this run.
+            RuntimeError: From ``load_state_dict(strict=True)`` if the metadata
+                matches but the tensors do not.
+        """
+        path = Path(init_from)
+        if path.suffix == ".ckpt":
+            raise ValueError(
+                f"init_from expects a bare-weights .pt, but got the resumable checkpoint "
+                f"{path.name!r}. A .ckpt holds the whole LightningModule under "
+                f"'model.'-prefixed keys (plus optimizer state, and no per-network "
+                f"provenance to validate), so loading it into the bare generator is an "
+                f"unreadable key dump at best. Point init_from at the sibling "
+                f"sr-weights-*.pt that SRWeightsCheckpoint writes alongside it, or resume "
+                f"the whole run with --ckpt_path instead."
+            )
+
+        payload = torch.load(path, weights_only=True, map_location="cpu")
+        meta = payload.get("meta") if isinstance(payload, dict) else None
+        if meta is None or "state_dict" not in payload:
+            raise ValueError(
+                f"init_from={path.name!r} is not a sisr weights file: it has no "
+                f"'state_dict'/'meta' pair. Without the meta block none of the checks "
+                f"that decide whether these weights mean anything in this run "
+                f"(architecture, processor, output range, upscaling factor) can run, so "
+                f"accepting it would reinstate exactly the silent mistraining they exist "
+                f"to prevent."
+            )
+
+        expected = build_metadata(self)
+        for section, key in _INIT_FROM_FIELDS:
+            want = expected[section][key]
+            got = meta.get(section, {}).get(key)
+            if got == want:
+                continue
+            raise ValueError(
+                f"init_from={path.name!r} was written by a run whose {section}.{key} is "
+                f"{got!r}, but this run's is {want!r}. A generator initialised from "
+                f"weights trained under a different architecture, processor, output range "
+                f"or upscaling factor trains and scores without ever erroring — only the "
+                f"numbers are wrong. Point init_from at a matching artifact, or align "
+                f"this run's config with the one that produced it."
+            )
+
+        self.model.load_state_dict(payload["state_dict"], strict=True)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build the generator and discriminator optimizers, in that order.
@@ -304,6 +395,31 @@ class SRGANLightning(SRLightning):
             )
         super().on_fit_start()
 
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Append the adversarial half of this run's provenance.
+
+        The base builds ``sisr_meta`` around ``module.model`` — still correct,
+        since the generator is the distributable artifact. These blocks are
+        added only to the ``.ckpt``: the bare ``.pt`` written by
+        :class:`~sisr.training.callbacks.SRWeightsCheckpoint` holds one
+        network's weights and gets metadata describing *that* network, not this
+        run's whole adversarial setup.
+
+        Args:
+            checkpoint: The checkpoint dict Lightning is about to write;
+                mutated in place.
+        """
+        super().on_save_checkpoint(checkpoint)
+        checkpoint["sisr_meta"]["discriminator"] = {
+            "class_path": _class_path(self.discriminator),
+            "init_args": dict(self.discriminator.hparams),
+        }
+        checkpoint["sisr_meta"]["adversarial"] = {
+            "loss": _class_path(self.adversarial_loss),
+            "weight": self.training_config.adversarial_weight,
+            "d_steps_per_g_step": self.training_config.d_steps_per_g_step,
+        }
+
     def _extra_probe(self, lr: torch.Tensor, hr: torch.Tensor, source: str) -> None:
         """Check the discriminator's declared input size against the HR crop it will score.
 
@@ -314,9 +430,22 @@ class SRGANLightning(SRLightning):
         emits exactly ``scale x lr``, which is an SRResNet property rather than
         anything this module requires.
 
-        The probe forward runs in ``eval`` mode under ``no_grad`` — a train-mode
-        forward would fold this sample into the generator's BatchNorm running
-        statistics before training has taken a single step.
+        Scoped to the **train** dataset. ``hr_input_size`` constrains the
+        training crop and nothing else — a ``validate``/``test`` run hands
+        :meth:`~sisr.training.lightning_module.SRLightning.setup` a full image,
+        which would both fail this check for no reason and pay a
+        full-resolution generator forward on CPU at setup.
+
+        The probe forward puts the **whole module** in ``eval`` mode under
+        ``no_grad``, not just ``self.model``: the forward selector reads
+        ``self.training`` (the LightningModule's flag), so ``self.model.eval()``
+        alone would still route a compiled run through ``self._compiled`` and
+        trigger a dynamo compile here — before, and at a different shape from,
+        the deliberate :meth:`on_fit_start` warm-up. ``self.eval()`` recurses
+        into ``self.model``, so the reason the eval-mode forward existed in the
+        first place still holds: a train-mode forward would fold this sample
+        into the generator's BatchNorm running statistics before training has
+        taken a single step.
 
         Args:
             lr: LR sample, ``(C, H, W)``.
@@ -327,14 +456,16 @@ class SRGANLightning(SRLightning):
             ValueError: If the cropped HR the discriminator would score is not
                 square at the declared ``hr_input_size``.
         """
+        if source != "train_dataset":
+            return
         declared = self.discriminator.hparams["hr_input_size"]
-        was_training = self.model.training
-        self.model.eval()
+        was_training = self.training
+        self.eval()
         try:
             with torch.no_grad():
                 _, _, hr_cropped = self._forward_sr(lr[None], hr[None], need_sr_rgb=False)
         finally:
-            self.model.train(was_training)
+            self.train(was_training)
         actual = tuple(self.processor.extract_target(hr_cropped).shape[-2:])
         if actual == (declared, declared):
             return

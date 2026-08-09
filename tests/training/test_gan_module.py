@@ -12,13 +12,14 @@ import lightning
 import pytest
 import torch
 
-from sisr.losses import AdversarialLoss
+from sisr.losses import AdversarialLoss, VGG19FeatureLoss
 from sisr.models.base import SRModel
 from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
-from sisr.models.srresnet import SRResNet
+from sisr.models.srresnet import SRResNet, SRResNetTrainingConfig
 from sisr.processors import RGBSignedOutputProcessor, YChannelProcessor
-from sisr.training import SRGANLightning
+from sisr.training import SRCheckpoint, SRGANLightning, SRLightning
 from sisr.training.config import SRTrainingConfig
+from sisr.training.metadata import build_component_metadata, build_metadata
 
 # Every fit below runs on CPU with a single-worker loader over a handful of
 # batches, which Lightning flags as three PossibleUserWarnings the strict global
@@ -49,6 +50,7 @@ def build_gan_module(
     criterion=None,
     adversarial_weight=SRGANTrainingConfig.adversarial_weight,
     layer_lrs=None,
+    init_from=None,
 ):
     """A minimal but real SRGANLightning — one residual block keeps it CPU-fast."""
     return cls(
@@ -62,6 +64,7 @@ def build_gan_module(
             example_input_shape=(3, 24, 24),
             adversarial_weight=adversarial_weight,
             layer_lrs=layer_lrs,
+            init_from=init_from,
         ),
         eval_config=SRGANEvalConfig(perceptual_metrics=[]),
         optimizer=lambda params: torch.optim.SGD(params, lr=0.1),
@@ -69,6 +72,35 @@ def build_gan_module(
         lr_scheduler=lr_scheduler,
         discriminator_lr_scheduler=discriminator_lr_scheduler,
     )
+
+
+def build_source_module():
+    """The realistic ``init_from`` source: a plain, MSE-trained SRResNet run.
+
+    Its generator and processor match :func:`build_gan_module`'s exactly, so a
+    ``.pt`` written from it is the one artifact ``init_from`` must accept.
+    """
+    return SRLightning(
+        model=SRResNet(scale=4, num_residual_blocks=1),
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(),
+    )
+
+
+def write_weights(tmp_path, **meta_overrides):
+    """A generator-weights ``.pt`` whose meta can be corrupted one field at a time.
+
+    Written with the same :func:`~sisr.training.metadata.build_metadata` that
+    ``SRWeightsCheckpoint`` uses, so what is exercised is the real payload shape.
+    """
+    source = build_source_module()
+    meta = build_metadata(source)
+    for dotted, value in meta_overrides.items():
+        section, key = dotted.split(".")
+        meta[section][key] = value
+    path = tmp_path / "sr-weights.pt"
+    torch.save({"state_dict": source.model.state_dict(), "meta": meta}, path)
+    return path, source
 
 
 def clone_params(module):
@@ -103,13 +135,15 @@ def gan_loader(n_batches, hr=96, scale=4):
     )
 
 
-def fit_gan(module, n_batches, callbacks=None, val_batches=0, **trainer_kwargs):
+def fit_gan(
+    module, n_batches, callbacks=None, val_batches=0, enable_checkpointing=False, **trainer_kwargs
+):
     """Run a real Trainer loop over ``module`` and hand back the trainer."""
     trainer = lightning.Trainer(
         max_epochs=1,
         accelerator="cpu",
         logger=False,
-        enable_checkpointing=False,
+        enable_checkpointing=enable_checkpointing,
         enable_progress_bar=False,
         enable_model_summary=False,
         num_sanity_val_steps=0,
@@ -155,6 +189,18 @@ class BackwardGradSpy(SRGANLightning):
     def manual_backward(self, loss, *args, **kwargs):
         self.d_grads_before_backward.append(grad_snapshot(self.discriminator))
         return super().manual_backward(loss, *args, **kwargs)
+
+
+class ProbeStateSpy(SRGANLightning):
+    """Records the module- and generator-level ``training`` flags at probe forward time."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.probe_flags = []
+
+    def _forward_sr(self, *args, **kwargs):
+        self.probe_flags.append((self.training, self.model.training))
+        return super()._forward_sr(*args, **kwargs)
 
 
 class ShrinkingGenerator(SRModel):
@@ -206,14 +252,31 @@ def generator_grads_after_one_seeded_batch(adversarial_weight):
     return {name: p.grad.detach().clone() for name, p in module.model.named_parameters()}
 
 
+def _pair_dataset(hr_size, scale):
+    lr_size = hr_size // scale
+    return torch.utils.data.TensorDataset(
+        torch.rand(1, 3, lr_size, lr_size), torch.rand(1, 3, hr_size, hr_size)
+    )
+
+
 def fake_datamodule(hr_crop_size=96, scale=4):
     """Minimal stand-in exposing the read accessors SRLightning.setup probes."""
-    lr_size = hr_crop_size // scale
     return SimpleNamespace(
-        train_dataset=torch.utils.data.TensorDataset(
-            torch.rand(1, 3, lr_size, lr_size), torch.rand(1, 3, hr_crop_size, hr_crop_size)
-        ),
+        train_dataset=_pair_dataset(hr_crop_size, scale),
         val_dataset=None,
+        test_datasets=None,
+    )
+
+
+def val_only_datamodule(hr_size=128, scale=4):
+    """A ``validate``-style datamodule: no train dataset, and full-image samples.
+
+    ``hr_size`` is deliberately not the discriminator's ``hr_input_size`` —
+    validation images are whole pictures, never the training crop.
+    """
+    return SimpleNamespace(
+        train_dataset=None,
+        val_dataset=_pair_dataset(hr_size, scale),
         test_datasets=None,
     )
 
@@ -531,6 +594,42 @@ def test_the_probe_keys_on_the_hr_crop_the_discriminator_scores():
     module.setup("fit")  # must not raise: the 112x112 patch is cropped to the 96x96 output
 
 
+def test_the_size_check_is_scoped_to_the_train_dataset():
+    """``hr_input_size`` constrains the TRAINING crop, and nothing else.
+
+    ``setup`` probes whichever dataset the live stage instantiated, so a bare
+    ``validate``/``test`` run hands the probe a **full image**. Ungated, that
+    both refuses a perfectly valid run and does a full-resolution generator
+    forward on CPU at setup.
+    """
+    module = build_gan_module(hr_input_size=96)
+    module.trainer = SimpleNamespace(datamodule=val_only_datamodule(hr_size=128))
+
+    module.setup("validate")  # must not raise: 128 != 96 is not a training crop
+
+
+def test_the_probe_forward_runs_with_the_whole_module_in_eval_mode():
+    """``self.model.eval()`` is not enough: the forward selector reads the
+    LightningModule's own ``training`` flag (``self.training and self._compiled
+    is not None``), which ``self.model.eval()`` leaves True. On a compiled run
+    the probe would therefore go through ``self._compiled`` and trigger a dynamo
+    compile at setup — before, and at a different shape from, the deliberate
+    ``on_fit_start`` warm-up that exists to surface toolchain failures at a
+    predictable point.
+
+    The generator's own flag must stay False regardless: a train-mode probe
+    forward folds the sample into its BatchNorm running statistics before
+    training has taken a step.
+    """
+    module = build_gan_module(cls=ProbeStateSpy)
+    module.trainer = SimpleNamespace(datamodule=fake_datamodule(hr_crop_size=96))
+
+    module.setup("fit")
+
+    assert module.probe_flags == [(False, False)], "probe forward ran in training mode"
+    assert module.training and module.model.training, "training mode was not restored"
+
+
 def test_layer_lrs_refused():
     """Inherited through SRResNetTrainingConfig, so YAML can set it — and this
     override never reads it, which would silently give both networks uniform LRs
@@ -553,3 +652,174 @@ def test_a_base_training_config_is_refused():
             discriminator=SRDiscriminator(),
             training_config=SRTrainingConfig(cuda_graph=True),
         )
+
+
+# ---------------------------------------------------------------------------
+# init_from — MSE initialisation of the generator
+# ---------------------------------------------------------------------------
+
+#: Every meta field init_from validates, in the message form it reports them.
+INIT_FROM_FIELDS = (
+    "model.class_path",
+    "model.init_args",
+    "processor.class_path",
+    "io.output_range",
+    "io.scale",
+)
+
+
+def test_init_from_loads_generator_weights_bit_exactly(tmp_path):
+    """Ledig scopes the MSE-init trick to "when training the actual GAN", so a
+    paper-faithful run starts from an MSE-trained SRResNet rather than scratch.
+
+    Bit-exactly, not approximately: the two modules are built independently, so
+    an ignored ``init_from`` leaves two unrelated random initialisations here.
+    """
+    path, source = write_weights(tmp_path)
+
+    gan = build_gan_module(init_from=str(path))
+
+    loaded, original = gan.model.state_dict(), source.model.state_dict()
+    assert loaded.keys() == original.keys()
+    for key, value in original.items():
+        assert torch.equal(loaded[key], value), key
+    # Only the generator: the discriminator is not in that file at all, and the
+    # adversarial half of the run starts from scratch by design.
+    assert not any(k.startswith("discriminator.") for k in loaded)
+
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    [
+        ({"model.class_path": "sisr.models.srcnn.model.SRCNN"}, "model.class_path"),
+        (
+            {
+                "model.init_args": {
+                    "scale": 4,
+                    "in_out_channels": 3,
+                    "hidden_channel": 64,
+                    "kernel_sizes": [9, 3, 9],
+                    "num_residual_blocks": 16,
+                    "padding": "same",
+                }
+            },
+            "model.init_args",
+        ),
+        ({"processor.class_path": "sisr.processors.rgb.RGBProcessor"}, "processor.class_path"),
+        ({"io.output_range": [0.0, 1.0]}, "io.output_range"),
+        ({"io.scale": 2}, "io.scale"),
+    ],
+)
+def test_init_from_refuses_a_mismatched_artifact(tmp_path, override, field):
+    """Silently initialising from weights trained under a different processor,
+    scale or architecture produces a model that trains and scores without ever
+    erroring — only the numbers are wrong.
+
+    Each field is refused on its own: a single generic "metadata mismatch" would
+    satisfy a substring match on any one field name, so the message is asserted
+    to name the offending field and *only* that one.
+    """
+    path, _ = write_weights(tmp_path, **override)
+
+    with pytest.raises(ValueError) as excinfo:
+        build_gan_module(init_from=str(path))
+
+    message = str(excinfo.value)
+    assert [name for name in INIT_FROM_FIELDS if name in message] == [field]
+
+
+def test_init_from_accepts_an_artifact_whose_unvalidated_fields_differ(tmp_path):
+    """The check must key on the five fields that make weights transferable, not
+    refuse every artifact: a criterion or eval_config recorded by the source run
+    says nothing about whether its weights fit this generator."""
+    path, _ = write_weights(tmp_path, **{"eval_config.crop_border": 99})
+
+    build_gan_module(init_from=str(path))  # must not raise
+
+
+def test_init_from_rejects_a_ckpt_and_names_the_pt(tmp_path):
+    """A ``.ckpt`` holds the whole module under ``model.``-prefixed keys, so a
+    strict load into the bare generator fails with an unreadable key dump —
+    and it carries no ``meta`` to validate against either."""
+    path = tmp_path / "sr-42.ckpt"
+    torch.save({"state_dict": {}}, path)
+
+    with pytest.raises(ValueError) as excinfo:
+        build_gan_module(init_from=str(path))
+
+    message = str(excinfo.value)
+    assert "sr-42.ckpt" in message
+    assert ".pt" in message, "the message must point at the sibling weights file"
+
+
+def test_init_from_refuses_a_pt_with_no_metadata(tmp_path):
+    """Without ``meta`` there is nothing to validate against, so accepting the
+    file would silently reinstate every mismatch the checks above refuse."""
+    path = tmp_path / "sr-weights.pt"
+    torch.save({"state_dict": build_source_module().model.state_dict()}, path)
+
+    with pytest.raises(ValueError, match="meta"):
+        build_gan_module(init_from=str(path))
+
+
+# ---------------------------------------------------------------------------
+# checkpoint provenance
+# ---------------------------------------------------------------------------
+
+
+@_ignore_cpu_fit_warnings
+def test_checkpoint_carries_both_networks_and_their_optimizers(tmp_path):
+    """The adversarial half of a run must be recoverable from its own ``.ckpt``.
+
+    Driven by a real fit with checkpointing on, because everything asserted here
+    is written by Lightning's save path rather than by any one method: the
+    second optimizer's state, the discriminator's parameters, and the two
+    ``sisr_meta`` blocks this module appends.
+
+    The VGG criterion is what makes the final assertion non-vacuous — a
+    perceptual criterion holds its frozen VGG outside the module tree precisely
+    so up to 20M frozen parameters stay out of every checkpoint.
+    """
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        criterion = VGG19FeatureLoss(layer="vgg22", weights=None)
+    module = build_gan_module(criterion=criterion)
+
+    fit_gan(
+        module,
+        n_batches=2,
+        enable_checkpointing=True,
+        callbacks=[SRCheckpoint(monitor_metric=None, dirpath=str(tmp_path), every_n_train_steps=1)],
+    )
+    ckpt = torch.load(next(tmp_path.glob("*.ckpt")), weights_only=False)
+
+    assert any(k.startswith("model.") for k in ckpt["state_dict"])
+    assert any(k.startswith("discriminator.") for k in ckpt["state_dict"])
+    assert len(ckpt["optimizer_states"]) == 2
+    assert ckpt["sisr_meta"]["discriminator"]["class_path"].endswith("SRDiscriminator")
+    assert ckpt["sisr_meta"]["discriminator"]["init_args"]["hr_input_size"] == 96
+    assert ckpt["sisr_meta"]["adversarial"]["loss"].endswith("AdversarialLoss")
+    assert ckpt["sisr_meta"]["adversarial"]["weight"] == pytest.approx(1e-3)
+    assert ckpt["sisr_meta"]["adversarial"]["d_steps_per_g_step"] == 1
+    # The base's generator-scoped provenance survives — the generator is still
+    # the distributable artifact.
+    assert ckpt["sisr_meta"]["model"]["class_path"].endswith("SRResNet")
+    assert not any("vgg" in k.lower() for k in ckpt["state_dict"])
+
+
+def test_the_bare_weights_sink_stays_component_scoped():
+    """``on_save_checkpoint`` is a ``.ckpt`` hook only.
+
+    ``SRWeightsCheckpoint`` writes one network's weights and describes exactly
+    that network; adding this run's whole adversarial setup to a discriminator's
+    (or a generator's) ``.pt`` would describe things the file does not contain.
+    """
+    module = build_gan_module()
+
+    checkpoint = {"global_step": 7, "epoch": 0}
+    module.on_save_checkpoint(checkpoint)
+
+    assert set(checkpoint["sisr_meta"]) >= {"discriminator", "adversarial"}
+    assert set(build_component_metadata(module, "discriminator")).isdisjoint(
+        {"discriminator", "adversarial"}
+    )
+    assert set(build_metadata(module)).isdisjoint({"discriminator", "adversarial"})
