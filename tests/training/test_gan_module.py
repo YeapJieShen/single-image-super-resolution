@@ -17,7 +17,7 @@ from sisr.models.base import SRModel
 from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from sisr.models.srresnet import SRResNet, SRResNetTrainingConfig
 from sisr.processors import RGBSignedOutputProcessor, YChannelProcessor
-from sisr.training import SRCheckpoint, SRGANLightning, SRLightning
+from sisr.training import SRCheckpoint, SRGANLightning, SRLightning, SRWeightsCheckpoint
 from sisr.training.config import SRTrainingConfig
 from sisr.training.metadata import build_component_metadata, build_metadata
 
@@ -906,23 +906,42 @@ def test_checkpoint_carries_both_networks_and_their_optimizers(tmp_path):
     # The base's generator-scoped provenance survives — the generator is still
     # the distributable artifact.
     assert ckpt["sisr_meta"]["model"]["class_path"].endswith("SRResNet")
-    assert not any("vgg" in k.lower() for k in ckpt["state_dict"])
+    # Structural, not a name match: `not any("vgg" in k)` would stay green if the
+    # criterion's frozen backbone were ever renamed, and 20M parameters would land
+    # in every checkpoint unnoticed.
+    assert all(k.startswith(("model.", "discriminator.")) for k in ckpt["state_dict"])
 
 
-def test_the_bare_weights_sink_stays_component_scoped():
+@_ignore_cpu_fit_warnings
+def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
     """``on_save_checkpoint`` is a ``.ckpt`` hook only.
 
     ``SRWeightsCheckpoint`` writes one network's weights and describes exactly
     that network; adding this run's whole adversarial setup to a discriminator's
     (or a generator's) ``.pt`` would describe things the file does not contain.
+
+    Driven by a real fit, and asserted on the file that fit wrote: the property is
+    about which metadata builder the save path reaches, so inspecting the builders
+    directly cannot show it — neither has ever carried these keys.
     """
     module = build_gan_module()
 
-    checkpoint = {"global_step": 7, "epoch": 0}
-    module.on_save_checkpoint(checkpoint)
-
-    assert set(checkpoint["sisr_meta"]) >= {"discriminator", "adversarial"}
-    assert set(build_component_metadata(module, "discriminator")).isdisjoint(
-        {"discriminator", "adversarial"}
+    fit_gan(
+        module,
+        n_batches=2,
+        enable_checkpointing=True,
+        callbacks=[
+            SRWeightsCheckpoint(
+                monitor_metric=None,
+                dirpath=str(tmp_path),
+                every_n_train_steps=1,
+                attribute="discriminator",
+                filename_prefix="d-weights",
+            )
+        ],
     )
-    assert set(build_metadata(module)).isdisjoint({"discriminator", "adversarial"})
+    meta = torch.load(next(tmp_path.glob("d-weights-*.pt")), weights_only=True)["meta"]
+
+    assert set(meta).isdisjoint({"discriminator", "adversarial"})
+    assert meta["kind"] == "component"
+    assert meta["component"]["name"] == "discriminator"
