@@ -19,6 +19,46 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
+SRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.srgan.template.yaml"
+
+_ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*:UserWarning")
+
+
+def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
+    """Extra ``--config`` overlay a template needs to resolve off a training box.
+
+    Only the SRGAN template needs one; every other template resolves as shipped.
+    Written as an overlay rather than ``--key=null`` because jsonargparse coerces
+    a ``null`` CLI value for a ``str | None`` field to the *string* ``'None'``,
+    which is exactly the silent-wrong-value class these two settings guard.
+
+    ``init_from`` points at a golden ``.pt`` under the gitignored ``experiments/``
+    tree — present on a training box, absent in CI and in every worktree.
+    ``criterion.weights`` would otherwise download ~548 MB of VGG19 weights just
+    to resolve a config; ``null`` builds a random VGG (and warns).
+    """
+    if template_path.name != SRGAN_TEMPLATE.name:
+        return []
+    overlay = tmp_path / "srgan_offline_overlay.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {"init_args": {"init_from": None}},
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return ["--config", str(overlay)]
+
 
 SUBCLASS_MODE_CONFIG = """
 optimizer:
@@ -196,6 +236,67 @@ def test_srresnet_config_resolves_in_process():
     # The removed model_colorspace field must not reappear anywhere.
     assert not hasattr(m, "model_colorspace")
     assert not hasattr(m.eval_config, "model_colorspace")
+
+
+@_ignore_random_vgg
+def test_srgan_template_parses_and_builds(tmp_path: Path):
+    """The YAML path is the whole point; constructing the module in Python proves
+    nothing about it. A prior arc shipped a composite-loss feature whose only
+    tests built it in Python, leaving the YAML wiring — the deliverable —
+    unguarded.
+
+    The nested discriminator/discriminator_optimizer blocks are the part most
+    likely to break: they are nested under ``model.init_args`` rather than
+    top-level precisely because a second ``add_optimizer_args(link_to=...)``
+    would target an argument ``SRLightning`` does not have, so nothing else in
+    the repo exercises that shape.
+    """
+    from sisr.losses import AdversarialLoss, VGG19FeatureLoss
+    from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
+    from sisr.models.srresnet import SRResNet
+    from sisr.processors import RGBSignedOutputProcessor
+    from sisr.training import SRGANLightning
+
+    cli = _resolve("--config", str(SRGAN_TEMPLATE), *_offline_args(SRGAN_TEMPLATE, tmp_path))
+
+    m = cli.model
+    assert isinstance(m, SRGANLightning)
+    assert isinstance(m.model, SRResNet)
+    assert isinstance(m.processor, RGBSignedOutputProcessor)
+    assert isinstance(m.discriminator, SRDiscriminator)
+    assert isinstance(m.adversarial_loss, AdversarialLoss)
+    assert isinstance(m.training_config, SRGANTrainingConfig)
+    assert isinstance(m.eval_config, SRGANEvalConfig)
+    # Ledig's phi_5,4 content loss, with no total-variation term: TV at 2e-8 is
+    # scoped in the paper to SRResNet-VGG22, not to the GAN variants.
+    assert isinstance(m.criterion, VGG19FeatureLoss)
+    assert m.criterion.layer == "vgg54"
+    assert m.training_config.adversarial_weight == pytest.approx(1e-3)
+    # The discriminator's dense head fixes its input size, so the train crop has
+    # to agree with it or the first step is a raw Linear shape error.
+    assert m.discriminator.hparams["hr_input_size"] == 96
+    assert cli.config.data.train_dataset["init_args"]["hr_crop_size"] == 96
+    # The nested optimizer block really produces a discriminator optimizer —
+    # OptimizerCallable resolution off a nested key, not off a linked top-level one.
+    opt_d = m.discriminator_optimizer(m.discriminator.parameters())
+    assert isinstance(opt_d, torch.optim.Adam)
+    assert opt_d.param_groups[0]["lr"] == pytest.approx(1e-4)
+    assert {id(p) for group in opt_d.param_groups for p in group["params"]} == {
+        id(p) for p in m.discriminator.parameters()
+    }
+
+
+def test_srgan_template_ships_a_real_init_from_path():
+    """The template's own init_from is exercised nowhere else — the test above
+    overrides it to null so it can run without the gitignored experiments/ tree.
+    Assert the shipped value at least names a bare-weights .pt, which is the one
+    thing SRGANLightning refuses at construction time."""
+    with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    init_from = data["model"]["init_args"]["training_config"]["init_args"]["init_from"]
+    assert init_from.endswith(".pt")
+    assert "sr-weights" in init_from
 
 
 def test_composite_criterion_resolves_through_the_real_cli(tmp_path: Path):
@@ -513,14 +614,15 @@ def test_template_yaml_parses(template_path: Path):
     assert "trainer" in data and "model" in data and "data" in data
 
 
+@_ignore_random_vgg
 @pytest.mark.parametrize("template_path", TEMPLATE_PATHS, ids=[p.name for p in TEMPLATE_PATHS])
-def test_template_disables_default_hp_metric(template_path: Path):
+def test_template_disables_default_hp_metric(template_path: Path, tmp_path: Path):
     """Each shipped template must disable TensorBoard's hp_metric: -1 placeholder.
 
     Resolved in-process: cli.config is the same merged config --print_config would
     dump, so an inherited/overridden default is honored (checking the raw YAML
     would miss that)."""
-    cli = _resolve("--config", str(template_path))
+    cli = _resolve("--config", str(template_path), *_offline_args(template_path, tmp_path))
     loggers = cli.config.trainer.logger
     tb = next(logger for logger in loggers if str(logger.class_path).endswith("TensorBoardLogger"))
     assert tb.init_args.default_hp_metric is False, (
