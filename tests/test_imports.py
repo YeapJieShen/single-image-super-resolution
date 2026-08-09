@@ -18,6 +18,7 @@ def test_public_exports():
         SRCheckpoint,
         SRDataModule,
         SREvalConfig,
+        SRGANLightning,
         SRLightning,
         SRTrainingConfig,
         SRWeightsCheckpoint,

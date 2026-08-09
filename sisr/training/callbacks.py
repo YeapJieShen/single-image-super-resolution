@@ -11,6 +11,7 @@ training signals; :class:`SRCheckpoint` is a thin
 output to disk as PNGs.
 """
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -664,13 +665,58 @@ class _RollingSaveMixin:
     would be shadowed by that override and silently never run. Each
     subclass's ``_save_checkpoint`` calls :meth:`_enforce_rolling_window`
     explicitly instead.
+
+    The window itself is never persisted in ``state_dict`` — it is rebuilt from
+    the files already on disk when a run resumes (:meth:`on_train_start`), which
+    is what keeps ``fit --ckpt_path`` from orphaning the pre-resume saves.
     """
 
-    def _init_rolling(self, keep_last: int) -> None:
+    def _init_rolling(self, keep_last: int, filename_prefix: str) -> None:
         if keep_last < 1:
             raise ValueError(f"keep_last must be >= 1; got {keep_last}")
         self.keep_last = keep_last
         self._rolling: list[str] = []
+        # Rolling filenames are exactly f"{filename_prefix}-{step}{FILE_EXTENSION}",
+        # so this matches every file THIS callback writes and nothing else: a
+        # sibling callback in the same dirpath differs in prefix or extension, and
+        # `last.ckpt`/a monitored callback's metric-bearing name never match.
+        self._rolling_pattern = re.compile(
+            rf"{re.escape(filename_prefix)}-(\d+){re.escape(self.FILE_EXTENSION)}"
+        )
+
+    def on_train_start(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
+        """Seed the rolling window from disk when this run is resuming.
+
+        Nothing persists the window: ``ModelCheckpoint.state_dict`` carries
+        ``monitor``/``best_*``/``kth_*``/``dirpath``/``last_model_path`` only. So
+        without this, a ``fit --ckpt_path`` resume starts with an empty window and
+        every pre-resume file is orphaned — never counted, never deleted, up to
+        ``keep_last`` per callback per resume (three rolling callbacks run in the
+        shipped adversarial template).
+
+        Only a resume seeds. A fresh run into a populated ``dirpath`` leaves those
+        files alone rather than adopting — and eventually deleting — checkpoints it
+        did not write.
+
+        Runs here rather than in ``setup`` because ``trainer.ckpt_path`` is not
+        assigned until the checkpoint connector restores state, which is after
+        every ``setup`` hook.
+
+        Args:
+            trainer: The active trainer — supplies ``ckpt_path``.
+            pl_module: Unused; part of the hook signature.
+        """
+        super().on_train_start(trainer, pl_module)
+        if self.monitor is not None or not trainer.ckpt_path or not self.dirpath:
+            return
+        found = sorted(
+            (int(match.group(1)), str(path))
+            for path in Path(self.dirpath).iterdir()
+            if (match := self._rolling_pattern.fullmatch(path.name))
+        )
+        self._rolling = [path for _, path in found]
 
     def _enforce_rolling_window(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Track *filepath* and drop the oldest save(s) beyond ``keep_last``.
@@ -758,7 +804,7 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             auto_insert_metric_name=False,
             **kwargs,
         )
-        self._init_rolling(keep_last)
+        self._init_rolling(keep_last, filename_prefix)
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Save via :class:`~lightning.pytorch.callbacks.ModelCheckpoint`, then enforce rolling.
@@ -892,8 +938,37 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             auto_insert_metric_name=False,
             **kwargs,
         )
-        self._init_rolling(keep_last)
+        self._init_rolling(keep_last, filename_prefix)
         self.attribute = attribute
+
+    @property
+    def state_key(self) -> str:
+        """Lightning's callback-state key, widened by ``attribute``.
+
+        ``ModelCheckpoint``'s own key is built from ``monitor``/``mode`` and the
+        cadence fields only — not from ``attribute``, ``dirpath`` or
+        ``filename``. Lightning refuses two stateful callbacks that share a key
+        (``_validate_callbacks_list``), so without this, one generator and one
+        discriminator weights callback on the same monitor and cadence — the
+        configuration ``attribute`` exists for, and the one the SRGAN template
+        ships — cannot be constructed at all.
+
+        Appended to ``super()``'s key rather than rebuilding it, so a Lightning
+        release that adds or renames a key field is carried through here
+        unchanged instead of silently dropping it.
+
+        Resuming a ``.ckpt`` written before this key gained its ``attribute``
+        suffix finds no state under the new key, so this callback's monitored
+        bookkeeping (``best_model_score``/``best_k_models``, i.e. what a
+        ``save_top_k`` run has already kept) restarts from empty for the rest of
+        that run. Rolling mode loses nothing — its window was never persisted
+        under any key, and :meth:`_RollingSaveMixin.on_train_start` rebuilds it
+        from this callback's own files on disk before the first save.
+
+        Returns:
+            A key unique per ``(monitor, mode, cadence, attribute)``.
+        """
+        return f"{super().state_key}[attribute={self.attribute}]"
 
     def setup(
         self,
@@ -901,28 +976,44 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         pl_module: lightning.LightningModule,
         stage: str,
     ) -> None:
-        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+        """Validate ``monitor`` against the metrics ``SRLightning`` will log, and ``attribute``.
 
-        Same check as :meth:`SRCheckpoint.setup` (via the shared
-        ``_validate_monitor_metric`` helper — the two classes are siblings, not
-        parent/child, so the check can't be reused via ``super()`` across them).
+        The ``monitor`` check is the same as :meth:`SRCheckpoint.setup` (via the
+        shared ``_validate_monitor_metric`` helper — the two classes are siblings,
+        not parent/child, so the check can't be reused via ``super()`` across them).
+
+        ``attribute`` is otherwise only read when a checkpoint is written, so a
+        typo — or ``attribute='discriminator'`` on a plain
+        :class:`~sisr.training.SRLightning` — would cost a whole checkpoint
+        interval before dying with a bare ``AttributeError`` from deep inside the
+        save path. Same reasoning as moving the monitor check to startup.
 
         Args:
             trainer: The active trainer.
-            pl_module: The model being trained; must expose ``eval_config``.
+            pl_module: The model being trained; must expose ``eval_config`` and
+                the component named by ``attribute``.
             stage: Lightning trainer stage. Only ``"fit"`` is checked — see
                 ``SRCheckpoint.setup``.
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a metric
-                ``SRLightning`` will log during ``fit``, or if ``mode``
+                ``SRLightning`` will log during ``fit``, if ``mode``
                 disagrees with that metric's direction (PSNR/SSIM are
-                higher-is-better; LPIPS/DISTS are lower-is-better).
+                higher-is-better; LPIPS/DISTS are lower-is-better), or if
+                ``pl_module`` has no attribute named ``attribute``.
         """
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
         _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module, mode=self.mode)
+        if not hasattr(pl_module, self.attribute):
+            raise MisconfigurationException(
+                f"`SRWeightsCheckpoint(attribute={self.attribute!r})` has nothing to save: "
+                f"{type(pl_module).__name__} has no attribute {self.attribute!r}. Name a "
+                f"component the module actually defines — 'model' (the generator, the "
+                f"default) on any SRLightning, 'discriminator' only on an adversarial "
+                f"module. Fix the callback's `attribute` in your YAML."
+            )
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Write one component's bare weights + matching provenance metadata.

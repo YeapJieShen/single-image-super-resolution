@@ -41,8 +41,10 @@ dependencies = [
     "torch>=2.6",
     "torchvision>=0.21",
     "lightning>=2.4",
-    # 1.9 is the version DISTS was verified present in on this project
-    # (torchmetrics.functional.image.deep_image_structure_and_texture_similarity).
+    # 1.9 is the version DISTS was verified present in on this project. sisr/perceptual.py
+    # caches the backbones directly (torchmetrics.functional.image.dists.DISTSNetwork and
+    # torchmetrics.image.lpip.LearnedPerceptualImagePatchSimilarity.net), so the pin covers
+    # those, not just the functional entry points.
     # Lowering it means testing the lower version, not guessing.
     "torchmetrics>=1.9",
     "jsonargparse[signatures]>=4.27",

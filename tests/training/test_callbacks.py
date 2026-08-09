@@ -447,6 +447,32 @@ def test_sr_weights_checkpoint_setup_rejects_unknown_monitor(tmp_path: Path):
         ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
 
 
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_setup_rejects_unknown_attribute(tmp_path: Path):
+    """A component this module does not have must fail at startup, not at the
+    first save.
+
+    ``attribute`` is read nowhere else, so a typo — or ``discriminator`` on a
+    plain ``SRLightning``, which is a one-line YAML mistake — otherwise survives
+    a whole ``every_n_train_steps`` interval and then dies with a bare
+    ``AttributeError`` from inside the save path.
+    """
+    ckpt = SRWeightsCheckpoint(
+        monitor_metric=None, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    with pytest.raises(MisconfigurationException, match=r"discriminator"):
+        ckpt.setup(_make_bare_trainer(), build_module(), stage="fit")
+
+
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_setup_accepts_a_present_component(tmp_path: Path):
+    """The refusal above must not reject the configuration ``attribute`` exists for."""
+    ckpt = SRWeightsCheckpoint(
+        monitor_metric=None, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    ckpt.setup(_make_bare_trainer(), build_module_with_component(), stage="fit")  # must not raise
+
+
 def test_sr_weights_checkpoint_save_checkpoint_is_actually_overridden():
     """Cheap static guard: the override must exist as a distinct method, not
     silently inherit ModelCheckpoint's (which would write full, optimizer-bearing
@@ -512,6 +538,27 @@ def test_weights_checkpoint_can_save_a_named_component(tmp_path):
         "generator weights must not appear in a discriminator file"
     )
     assert saved["meta"]["kind"] == "component"
+
+
+def test_two_weights_checkpoints_can_watch_different_components():
+    """Generator and discriminator side by side is the whole reason ``attribute``
+    exists, and it is unconstructable without this.
+
+    Lightning refuses two stateful callbacks sharing a ``state_key``, and
+    ``ModelCheckpoint``'s key is built from ``monitor``/``mode``/the cadence
+    fields only — not from ``attribute``, ``dirpath`` or ``filename``. Two
+    rolling weights callbacks differing only in which network they save
+    therefore collide at ``Trainer`` construction, which is where the shipped
+    SRGAN template puts them.
+    """
+    generator = SRWeightsCheckpoint(monitor_metric=None, attribute="model")
+    discriminator = SRWeightsCheckpoint(monitor_metric=None, attribute="discriminator")
+
+    assert generator.state_key != discriminator.state_key
+    # Same config still keys the same, or saved callback state stops round-tripping.
+    assert generator.state_key == SRWeightsCheckpoint(monitor_metric=None).state_key
+    # The real failure path: Trainer validates the callback list on construction.
+    lightning.Trainer(callbacks=[generator, discriminator], logger=False)
 
 
 def _make_srcnn_datamodule(image_dir: Path):
@@ -622,7 +669,9 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
 # ---------------------------------------------------------------------------
 
 
-def _run_tiny_fit(callbacks: list, n_batches: int) -> lightning.Trainer:
+def _run_tiny_fit(
+    callbacks: list, n_batches: int, ckpt_path: str | None = None
+) -> lightning.Trainer:
     """Real `Trainer.fit` for `n_batches` steps, driving `callbacks`'s real save path.
 
     Rolling-mode retention depends on Lightning's actual save cadence, filename
@@ -662,7 +711,7 @@ def _run_tiny_fit(callbacks: list, n_batches: int) -> lightning.Trainer:
             enable_model_summary=False,
             callbacks=callbacks,
         )
-        trainer.fit(module, datamodule=_make_srcnn_datamodule(image_dir))
+        trainer.fit(module, datamodule=_make_srcnn_datamodule(image_dir), ckpt_path=ckpt_path)
         return trainer
     finally:
         shutil.rmtree(image_dir, ignore_errors=True)
@@ -786,6 +835,125 @@ def test_enforce_rolling_window_is_noop_when_monitor_is_set(cls, tmp_path: Path)
         ckpt._enforce_rolling_window(trainer, f"fake-{i}{ckpt.FILE_EXTENSION}")
     assert ckpt._rolling == []
     trainer.strategy.remove_checkpoint.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Rolling window seeding on resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("cls", "prefix"), [(SRCheckpoint, "sr"), (SRWeightsCheckpoint, "sr-weights")]
+)
+def test_rolling_window_is_seeded_from_disk_on_resume(cls, prefix, tmp_path: Path):
+    """A resumed run must adopt its own pre-resume files, not orphan them.
+
+    Nothing persists the window (``ModelCheckpoint.state_dict`` carries
+    ``monitor``/``best_*``/``kth_*``/``dirpath``/``last_model_path`` only), so
+    without seeding every file written before the resume is never counted and
+    never deleted — up to ``keep_last`` leaked per callback per resume, and the
+    shipped adversarial template runs three rolling callbacks over a run long
+    enough to be resumed repeatedly.
+
+    ``dirpath`` is passed explicitly so the hook can be exercised without
+    ``setup``'s dirpath resolution (which also warns on a non-empty directory,
+    an error under this suite's strict filter).
+    """
+    for step in (4, 20, 12):
+        (tmp_path / f"{prefix}-{step}{cls.FILE_EXTENSION}").touch()
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+
+    cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
+
+    # Ordered by step, not lexicographically -- "12" sorts before "4" as text,
+    # and deletion is oldest-first, so a string sort would evict the newest file.
+    assert cb._rolling == [
+        str(tmp_path / f"{prefix}-{step}{cls.FILE_EXTENSION}") for step in (4, 12, 20)
+    ]
+
+
+def test_rolling_seed_only_adopts_this_callbacks_own_files(tmp_path: Path):
+    """Seeding must not let one rolling callback delete another's files.
+
+    The shipped adversarial template puts three rolling callbacks in one
+    ``dirpath`` (``sr-*.ckpt``, ``sr-weights-*.pt``, ``d-weights-*.pt``), and
+    ``sr-weights`` is a strict prefix extension of ``sr`` — a prefix-only or
+    extension-only filter adopts a sibling's files and eventually deletes them.
+    """
+    for name in ("sr-weights-2.pt", "d-weights-2.pt", "sr-2.ckpt", "last.ckpt", "sr-weights-x.pt"):
+        (tmp_path / name).touch()
+    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=3, dirpath=str(tmp_path))
+
+    cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
+
+    assert cb._rolling == [str(tmp_path / "sr-weights-2.pt")]
+
+
+def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
+    """A fresh run must leave a populated dirpath alone.
+
+    Seeding unconditionally would make a from-scratch run adopt — and, on its
+    third save, silently delete — checkpoints a previous run wrote.
+    """
+    (tmp_path / "sr-weights-2.pt").touch()
+    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+
+    cb.on_train_start(MagicMock(ckpt_path=None), MagicMock())
+
+    assert cb._rolling == []
+
+
+def test_rolling_seed_is_noop_when_monitor_is_set(tmp_path: Path):
+    """With a monitor, Lightning's top-k owns retention — seeding would evict
+    files top-k still wants, exactly as ``_enforce_rolling_window`` must not."""
+    (tmp_path / "sr-weights-2.pt").touch()
+    cb = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(tmp_path))
+
+    cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
+
+    assert cb._rolling == []
+
+
+def test_seeded_window_deletes_the_oldest_pre_resume_file(tmp_path: Path):
+    """Seeding is only worth anything if the next save then evicts a pre-resume
+    file — the orphaning this fixes is a deletion that never happens."""
+    for step in (2, 4):
+        (tmp_path / f"sr-weights-{step}.pt").touch()
+    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    trainer = MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt"))
+
+    cb.on_train_start(trainer, MagicMock())
+    cb._enforce_rolling_window(trainer, str(tmp_path / "sr-weights-6.pt"))
+
+    trainer.strategy.remove_checkpoint.assert_called_once_with(str(tmp_path / "sr-weights-2.pt"))
+
+
+@_ignore_gpu_warning
+@pytest.mark.filterwarnings("ignore:Checkpoint directory .* exists and is not empty.:UserWarning")
+def test_real_resume_keeps_the_window_at_keep_last(tmp_path: Path):
+    """End-to-end: the hook fires with ``trainer.ckpt_path`` already assigned.
+
+    The seeding gate reads ``trainer.ckpt_path``, which the checkpoint connector
+    does not assign until it restores state — after every ``setup`` hook, which
+    is why seeding lives in ``on_train_start``. Only a real resume proves the
+    ordering; the hook-level tests above cannot.
+
+    First fit saves at steps 2/4/6 and keeps 4/6. Resuming to step 12 saves at
+    8/10/12. With the window seeded, four deletions leave exactly ``keep_last``
+    files; unseeded, steps 4 and 6 are orphaned and six files survive.
+    """
+    ckpt_cb = SRCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[ckpt_cb], n_batches=6)
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-4.ckpt", "sr-6.ckpt"]
+
+    resumed_cb = SRCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[resumed_cb], n_batches=12, ckpt_path=str(tmp_path / "sr-6.ckpt"))
+
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-10.ckpt", "sr-12.ckpt"]
 
 
 # ---------------------------------------------------------------------------

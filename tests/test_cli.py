@@ -19,6 +19,46 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
+SRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.srgan.template.yaml"
+
+_ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*:UserWarning")
+
+
+def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
+    """Extra ``--config`` overlay a template needs to resolve off a training box.
+
+    Only the SRGAN template needs one; every other template resolves as shipped.
+    Written as an overlay rather than ``--key=null`` because jsonargparse coerces
+    a ``null`` CLI value for a ``str | None`` field to the *string* ``'None'``,
+    which is exactly the silent-wrong-value class these two settings guard.
+
+    ``init_from`` points at a golden ``.pt`` under the gitignored ``experiments/``
+    tree — present on a training box, absent in CI and in every worktree.
+    ``criterion.weights`` would otherwise download ~548 MB of VGG19 weights just
+    to resolve a config; ``null`` builds a random VGG (and warns).
+    """
+    if template_path.name != SRGAN_TEMPLATE.name:
+        return []
+    overlay = tmp_path / "srgan_offline_overlay.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {"init_args": {"init_from": None}},
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return ["--config", str(overlay)]
+
 
 SUBCLASS_MODE_CONFIG = """
 optimizer:
@@ -196,6 +236,207 @@ def test_srresnet_config_resolves_in_process():
     # The removed model_colorspace field must not reappear anywhere.
     assert not hasattr(m, "model_colorspace")
     assert not hasattr(m.eval_config, "model_colorspace")
+
+
+@_ignore_random_vgg
+def test_srgan_template_parses_and_builds(tmp_path: Path):
+    """The YAML path is the whole point; constructing the module in Python proves
+    nothing about it. A prior arc shipped a composite-loss feature whose only
+    tests built it in Python, leaving the YAML wiring — the deliverable —
+    unguarded.
+
+    The nested discriminator/discriminator_optimizer blocks are the part most
+    likely to break: they are nested under ``model.init_args`` rather than
+    top-level precisely because a second ``add_optimizer_args(link_to=...)``
+    would target an argument ``SRLightning`` does not have, so nothing else in
+    the repo exercises that shape.
+    """
+    from sisr.losses import AdversarialLoss, VGG19FeatureLoss
+    from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
+    from sisr.models.srresnet import SRResNet
+    from sisr.processors import RGBSignedOutputProcessor
+    from sisr.training import SRGANLightning
+
+    cli = _resolve("--config", str(SRGAN_TEMPLATE), *_offline_args(SRGAN_TEMPLATE, tmp_path))
+
+    m = cli.model
+    assert isinstance(m, SRGANLightning)
+    assert isinstance(m.model, SRResNet)
+    assert isinstance(m.processor, RGBSignedOutputProcessor)
+    assert isinstance(m.discriminator, SRDiscriminator)
+    assert isinstance(m.adversarial_loss, AdversarialLoss)
+    assert isinstance(m.training_config, SRGANTrainingConfig)
+    assert isinstance(m.eval_config, SRGANEvalConfig)
+    # Ledig's phi_5,4 content loss, with no total-variation term: TV at 2e-8 is
+    # scoped in the paper to SRResNet-VGG22, not to the GAN variants.
+    assert isinstance(m.criterion, VGG19FeatureLoss)
+    assert m.criterion.layer == "vgg54"
+    assert m.training_config.adversarial_weight == pytest.approx(1e-3)
+    # The discriminator's dense head fixes its input size, so the train crop has
+    # to agree with it or the first step is a raw Linear shape error.
+    assert m.discriminator.hparams["hr_input_size"] == 96
+    assert cli.config.data.train_dataset["init_args"]["hr_crop_size"] == 96
+    # The nested optimizer block really produces a discriminator optimizer —
+    # OptimizerCallable resolution off a nested key, not off a linked top-level one.
+    opt_d = m.discriminator_optimizer(m.discriminator.parameters())
+    assert isinstance(opt_d, torch.optim.Adam)
+    assert opt_d.param_groups[0]["lr"] == pytest.approx(1e-4)
+    assert {id(p) for group in opt_d.param_groups for p in group["params"]} == {
+        id(p) for p in m.discriminator.parameters()
+    }
+    # ...and the top-level lr_scheduler: key still links into the GAN module under
+    # subclass mode, which is what carries the paper's second training phase.
+    opt_g = m.optimizer(m.model.parameters())
+    assert isinstance(m.lr_scheduler(opt_g), torch.optim.lr_scheduler.MultiStepLR)
+    # ...and the nested discriminator_lr_scheduler decays the critic in step with
+    # the generator — Ledig et al.'s one schedule describes the SRGAN networks as
+    # a whole, not the generator alone.
+    assert isinstance(m.discriminator_lr_scheduler(opt_d), torch.optim.lr_scheduler.MultiStepLR)
+
+
+def test_srgan_template_ships_the_papers_full_two_phase_schedule():
+    """Ledig trains 1e5 generator iterations at 1e-4, then 1e5 more at 1e-5.
+
+    This module takes two optimizer steps per batch, so 2e5 iterations is
+    ``max_steps: 400000`` *global steps*, while the decay milestone is in BATCHES —
+    ``SRGANLightning`` steps its schedulers by hand, once per batch. Shipping half
+    the schedule, or the full length with the scheduler commented out, reproduces
+    neither phase of the paper.
+
+    ``val_check_interval`` is in batches too (Lightning keys it on
+    ``total_batch_idx`` whenever ``check_val_every_n_epoch`` is null, which this
+    template sets), so 5000 there is the same 10000-global-step cadence the
+    checkpoint callbacks fire on.
+
+    The discriminator must decay on the same schedule as the generator: Ledig et
+    al.'s sentence describes the SRGAN networks as a whole, and a critic left at
+    1e-4 for the whole second phase while the generator drops to 1e-5 is a
+    standard way to saturate the generator's adversarial gradient.
+    """
+    with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    assert data["trainer"]["max_steps"] == 400000
+    assert data["trainer"]["check_val_every_n_epoch"] is None
+    assert data["trainer"]["val_check_interval"] == 5000
+    assert data["lr_scheduler"]["class_path"].endswith("MultiStepLR")
+    assert data["lr_scheduler"]["init_args"]["milestones"] == [100000]
+    assert data["lr_scheduler"]["init_args"]["gamma"] == pytest.approx(0.1)
+    d_scheduler = data["model"]["init_args"]["discriminator_lr_scheduler"]
+    assert d_scheduler["class_path"].endswith("MultiStepLR")
+    assert d_scheduler["init_args"]["milestones"] == [100000]
+    assert d_scheduler["init_args"]["gamma"] == pytest.approx(0.1)
+
+
+@_ignore_random_vgg
+def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
+    """Instantiating the model is what every subcommand does — ``validate``/``test``/
+    ``export --ckpt_path`` included — so reading ``init_from`` at construction made
+    all of them depend on the gitignored golden ``.pt``. This resolves the shipped
+    template with ``init_from`` pointed at a file that does not exist: it must build,
+    because nothing here is fitting.
+    """
+    overlay = tmp_path / "missing_init_from.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {
+                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                        },
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cli = _resolve("--config", str(SRGAN_TEMPLATE), "--config", str(overlay))
+
+    assert cli.model.training_config.init_from == str(tmp_path / "absent.pt")
+
+
+def test_srgan_template_ships_a_real_init_from_path():
+    """The template's own init_from is exercised nowhere else — the test above
+    overrides it to a missing path so it can run without the gitignored
+    experiments/ tree. Assert the shipped value at least names a bare-weights
+    .pt, which is one of the artifacts SRGANLightning's setup refuses."""
+    with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    init_from = data["model"]["init_args"]["training_config"]["init_args"]["init_from"]
+    assert init_from.endswith(".pt")
+    assert "sr-weights" in init_from
+
+
+@_ignore_random_vgg
+def test_dotted_override_reverts_eval_config_but_not_training_config(tmp_path: Path):
+    """Characterisation: a dotted CLI override of one nested field is not neutral.
+
+    jsonargparse rebuilds the whole subclass field from its *bare annotation*
+    when a dotted override touches it, so the outcome depends on how the
+    module's ``__init__`` types that argument:
+
+    * ``training_config`` is annotated ``SRGANTrainingConfig | None`` — the bare
+      annotation already **is** the subclass, so nothing is lost.
+    * ``eval_config`` is annotated ``SREvalConfig | None`` on the base module, so
+      overriding any field on it silently drops back to the base class and every
+      subclass-only default with it: ``perceptual_metrics`` empties (the only
+      metric family an adversarial run can be judged by) and ``ssim_impl`` flips
+      from ``'daala'`` to ``'wang'``, renumbering SSIM against a different
+      convention. Nothing is logged.
+
+    **The second half is a known open defect, not desired behaviour.** It is
+    pinned here so a jsonargparse release that changes the merge — in either
+    direction — shows up as a failing test rather than as a silently different
+    experiment. The same annotation-dependence governs the checkpoint-reload
+    merge in ``_parse_ckpt_path``.
+    """
+    from sisr.models.srgan import SRGANEvalConfig, SRGANTrainingConfig
+    from sisr.training import SREvalConfig
+
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {
+                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                        },
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    args = ["--config", str(SRGAN_TEMPLATE), "--config", str(overlay)]
+
+    kept = _resolve(*args, "--model.init_args.training_config.adversarial_weight=0.5").model
+    assert isinstance(kept.training_config, SRGANTrainingConfig)
+    assert kept.training_config.adversarial_weight == pytest.approx(0.5)
+    # Both are absent from the base class or default differently there, so their
+    # survival is what says no rebuild happened.
+    assert kept.training_config.init_from == str(tmp_path / "absent.pt")
+    assert kept.training_config.example_input_shape == (3, 24, 24)
+
+    reverted = _resolve(*args, "--model.init_args.eval_config.crop_border=0").model
+    assert not isinstance(reverted.eval_config, SRGANEvalConfig)
+    assert type(reverted.eval_config) is SREvalConfig
+    assert reverted.eval_config.crop_border == 0
+    assert reverted.eval_config.perceptual_metrics == []
+    assert reverted.eval_config.ssim_impl == "wang"
 
 
 def test_composite_criterion_resolves_through_the_real_cli(tmp_path: Path):
@@ -513,14 +754,15 @@ def test_template_yaml_parses(template_path: Path):
     assert "trainer" in data and "model" in data and "data" in data
 
 
+@_ignore_random_vgg
 @pytest.mark.parametrize("template_path", TEMPLATE_PATHS, ids=[p.name for p in TEMPLATE_PATHS])
-def test_template_disables_default_hp_metric(template_path: Path):
+def test_template_disables_default_hp_metric(template_path: Path, tmp_path: Path):
     """Each shipped template must disable TensorBoard's hp_metric: -1 placeholder.
 
     Resolved in-process: cli.config is the same merged config --print_config would
     dump, so an inherited/overridden default is honored (checking the raw YAML
     would miss that)."""
-    cli = _resolve("--config", str(template_path))
+    cli = _resolve("--config", str(template_path), *_offline_args(template_path, tmp_path))
     loggers = cli.config.trainer.logger
     tb = next(logger for logger in loggers if str(logger.class_path).endswith("TensorBoardLogger"))
     assert tb.init_args.default_hp_metric is False, (
@@ -660,7 +902,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
     Mirrors ``_build_srcnn_checkpoint``, but over SRResNet's native-LR pipeline
     and its ``SRResNetEvalConfig`` — the only shipped eval_config subclass with
     a subclass-only default (``ssim_impl='daala'``), which is what
-    ``test_ckpt_path_loses_subclass_only_eval_defaults`` needs to observe.
+    ``test_ckpt_path_preserves_eval_config_subclass_identity`` needs to observe.
     """
     ckpt_dir = tmp_path / "checkpoints"
     config = {
@@ -806,8 +1048,15 @@ def test_ckpt_path_preserves_eval_config_subclass_identity(
     type (base ``SREvalConfig``) from the checkpoint's stored dict instead of
     merging onto the class the config file already selected
     (``SRResNetEvalConfig``) — the two assertions below can fail independently:
-    the reloaded object's *class*, and a subclass-only *default* the checkpoint's
-    stored dict never mentions at all.
+    the reloaded object's *class*, a subclass-only *default* the checkpoint's
+    stored dict never mentions at all, and a stored value that differs from the
+    one ``--config`` resolves to.
+
+    That third assertion is what makes the other two non-vacuous: ``--config``
+    alone already selects ``SRResNetEvalConfig`` and already yields
+    ``ssim_impl='daala'``, so both checkpoints below have their stored
+    ``crop_border`` rewritten to 7 — a value nothing in the config produces (the
+    class default is 4). Deleting the merge entirely leaves 4 behind and fails.
 
     ``_parse_ckpt_path`` merges the reconstructed ``training_config``/
     ``eval_config`` dict through the *subcommand's own* parser
@@ -835,22 +1084,30 @@ def test_ckpt_path_preserves_eval_config_subclass_identity(
     # ssim_impl='daala' default must still apply on reload, not the base's
     # 'wang'.
     raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
-    legacy_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
+    current_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
+    current_hparams["eval_config"]["crop_border"] = 7
+    legacy_hparams = {k: dict(v) for k, v in current_hparams.items()}
     del legacy_hparams["eval_config"]["ssim_impl"]
-    raw["hyper_parameters"] = legacy_hparams
+
     legacy_ckpt_path = tmp_path / "legacy.ckpt"
-    torch.save(raw, legacy_ckpt_path)
+    torch.save({**raw, "hyper_parameters": legacy_hparams}, legacy_ckpt_path)
+    current_ckpt_path = tmp_path / "current.ckpt"
+    torch.save({**raw, "hyper_parameters": current_hparams}, current_ckpt_path)
 
     cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(legacy_ckpt_path)])
     assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
     assert cli.model.eval_config.ssim_impl == "daala"
+    assert cli.model.eval_config.crop_border == 7
 
     # A checkpoint saved by the current code carries `ssim_impl` explicitly
     # (dataclasses.asdict includes every current field) — confirms identity
     # holds for the ordinary round trip too, not just the missing-key case above.
-    cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
+    cli = _run_cli(
+        ["validate", "--config", str(config_path), "--ckpt_path", str(current_ckpt_path)]
+    )
     assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
     assert cli.model.eval_config.ssim_impl == "daala"
+    assert cli.model.eval_config.crop_border == 7
 
 
 def test_reconstruct_ckpt_hparams_unflattens_legacy_keys():
@@ -961,12 +1218,17 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(lightning.pytorch.Trainer, "validate", _noop_validate)
 
+    # Every stored value here is one the resolved config does NOT produce:
+    # SUBCLASS_MODE_CONFIG sets example_input_shape [3, 24, 24] and selects
+    # SRResNetEvalConfig, whose crop_border default is 4. Storing the config's
+    # own values instead would make the assertions below pass with the whole
+    # merge deleted.
     ckpt = tmp_path / "fake.ckpt"
     torch.save(
         {
             "hyper_parameters": {
-                "training_config": {"example_input_shape": [3, 24, 24]},
-                "eval_config": {"crop_border": 4},
+                "training_config": {"example_input_shape": [3, 32, 32]},
+                "eval_config": {"crop_border": 7},
             }
         },
         ckpt,
@@ -997,4 +1259,8 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
             )
     finally:
         sys.argv = saved_argv
-    assert cli.model.eval_config.crop_border == 4
+    assert cli.model.eval_config.crop_border == 7
+    # A tuple, not the stored list: the merge lands on the dataclass field, whose
+    # annotation coerces it — more evidence the value came through the config
+    # machinery rather than being read off the checkpoint dict directly.
+    assert cli.model.training_config.example_input_shape == (3, 32, 32)

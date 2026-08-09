@@ -1718,6 +1718,42 @@ def test_setup_gracefully_reprobes_dataset_already_opened_by_real_training(
 
 
 # ---------------------------------------------------------------------------
+# _extra_probe — subclass hook fed setup()'s already-sampled (lr, hr) pair
+# ---------------------------------------------------------------------------
+
+
+def test_setup_calls_extra_probe_with_the_sampled_pair(tiny_rgb_image_dir: Path, tmp_path: Path):
+    """A subclass hook must receive the exact (lr, hr) pair setup() already
+    sampled from the real train dataset — not just any call. Asserting only
+    "was called" can't tell a correct pair from an empty or wrong one, so
+    this checks the actual shapes and their scale relationship."""
+    seen = {}
+
+    class Probing(SRLightning):
+        def _extra_probe(self, lr, hr, source):
+            seen["lr_shape"] = tuple(lr.shape)
+            seen["hr_shape"] = tuple(hr.shape)
+            seen["source"] = source
+
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = Probing(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+
+    assert seen["source"] == "train_dataset"
+    assert seen["hr_shape"][-1] == seen["lr_shape"][-1] * 2
+
+
+# ---------------------------------------------------------------------------
 # cuda_graph — full-step CUDA-graph capture of the training step
 # ---------------------------------------------------------------------------
 
