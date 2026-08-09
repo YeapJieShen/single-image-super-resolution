@@ -375,6 +375,70 @@ def test_srgan_template_ships_a_real_init_from_path():
     assert "sr-weights" in init_from
 
 
+@_ignore_random_vgg
+def test_dotted_override_reverts_eval_config_but_not_training_config(tmp_path: Path):
+    """Characterisation: a dotted CLI override of one nested field is not neutral.
+
+    jsonargparse rebuilds the whole subclass field from its *bare annotation*
+    when a dotted override touches it, so the outcome depends on how the
+    module's ``__init__`` types that argument:
+
+    * ``training_config`` is annotated ``SRGANTrainingConfig | None`` — the bare
+      annotation already **is** the subclass, so nothing is lost.
+    * ``eval_config`` is annotated ``SREvalConfig | None`` on the base module, so
+      overriding any field on it silently drops back to the base class and every
+      subclass-only default with it: ``perceptual_metrics`` empties (the only
+      metric family an adversarial run can be judged by) and ``ssim_impl`` flips
+      from ``'daala'`` to ``'wang'``, renumbering SSIM against a different
+      convention. Nothing is logged.
+
+    **The second half is a known open defect, not desired behaviour.** It is
+    pinned here so a jsonargparse release that changes the merge — in either
+    direction — shows up as a failing test rather than as a silently different
+    experiment. The same annotation-dependence governs the checkpoint-reload
+    merge in ``_parse_ckpt_path``.
+    """
+    from sisr.models.srgan import SRGANEvalConfig, SRGANTrainingConfig
+    from sisr.training import SREvalConfig
+
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "init_args": {
+                        "training_config": {
+                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                        },
+                        "criterion": {
+                            "class_path": "sisr.losses.VGG19FeatureLoss",
+                            "init_args": {"layer": "vgg54", "weights": None},
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    args = ["--config", str(SRGAN_TEMPLATE), "--config", str(overlay)]
+
+    kept = _resolve(*args, "--model.init_args.training_config.adversarial_weight=0.5").model
+    assert isinstance(kept.training_config, SRGANTrainingConfig)
+    assert kept.training_config.adversarial_weight == pytest.approx(0.5)
+    # Both are absent from the base class or default differently there, so their
+    # survival is what says no rebuild happened.
+    assert kept.training_config.init_from == str(tmp_path / "absent.pt")
+    assert kept.training_config.example_input_shape == (3, 24, 24)
+
+    reverted = _resolve(*args, "--model.init_args.eval_config.crop_border=0").model
+    assert not isinstance(reverted.eval_config, SRGANEvalConfig)
+    assert type(reverted.eval_config) is SREvalConfig
+    assert reverted.eval_config.crop_border == 0
+    assert reverted.eval_config.perceptual_metrics == []
+    assert reverted.eval_config.ssim_impl == "wang"
+
+
 def test_composite_criterion_resolves_through_the_real_cli(tmp_path: Path):
     """The paper's SRResNet-VGG22 recipe (Ledig et al. §3.4: a VGG22 content
     term plus total variation at 2e-8, no pixel term) resolved from YAML through
