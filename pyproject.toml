@@ -47,7 +47,11 @@ dependencies = [
     # those, not just the functional entry points.
     # Lowering it means testing the lower version, not guessing.
     "torchmetrics>=1.9",
-    "jsonargparse[signatures]>=4.27",
+    # sisr/cli.py calls set_parsing_settings(subclasses_enabled=...) so a dotted CLI
+    # override of a dataclass config field keeps the architecture's subclass. That
+    # keyword does not exist below 4.50, and 4.50 is the version it was verified on
+    # here. Lowering it means testing the lower version, not guessing.
+    "jsonargparse[signatures]>=4.50",
     "lmdb>=1.4",
     "pillow>=10",
     "numpy>=1.26",

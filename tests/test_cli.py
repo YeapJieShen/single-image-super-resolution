@@ -376,27 +376,29 @@ def test_srgan_template_ships_a_real_init_from_path():
 
 
 @_ignore_random_vgg
-def test_dotted_override_reverts_eval_config_but_not_training_config(tmp_path: Path):
-    """Characterisation: a dotted CLI override of one nested field is not neutral.
+def test_dotted_override_keeps_the_config_subclass(tmp_path: Path):
+    """A dotted CLI override sets its field and changes nothing else.
 
-    jsonargparse rebuilds the whole subclass field from its *bare annotation*
-    when a dotted override touches it, so the outcome depends on how the
-    module's ``__init__`` types that argument:
+    jsonargparse treats a pure dataclass as a *closed* type by default, which
+    made a dotted override rebuild the whole field from its **bare annotation**.
+    The outcome then depended on how the module's ``__init__`` typed the
+    argument, which is not a distinction any user could predict:
 
     * ``training_config`` is annotated ``SRGANTrainingConfig | None`` — the bare
-      annotation already **is** the subclass, so nothing is lost.
+      annotation already **is** the subclass, so nothing was lost.
     * ``eval_config`` is annotated ``SREvalConfig | None`` on the base module, so
-      overriding any field on it silently drops back to the base class and every
-      subclass-only default with it: ``perceptual_metrics`` empties (the only
-      metric family an adversarial run can be judged by) and ``ssim_impl`` flips
-      from ``'daala'`` to ``'wang'``, renumbering SSIM against a different
-      convention. Nothing is logged.
+      overriding any field on it dropped back to the base class and took every
+      subclass-only default with it: ``perceptual_metrics`` emptied (the only
+      metric family an adversarial run can be judged by) and ``ssim_impl``
+      flipped ``'daala'`` → ``'wang'``, renumbering SSIM against a different
+      convention with nothing logged.
 
-    **The second half is a known open defect, not desired behaviour.** It is
-    pinned here so a jsonargparse release that changes the merge — in either
-    direction — shows up as a failing test rather than as a silently different
-    experiment. The same annotation-dependence governs the checkpoint-reload
-    merge in ``_parse_ckpt_path``.
+    ``SRLightningCLI.__init__`` now re-enables subclasses for both config
+    families, so both halves behave the same way. Each half is asserted on a
+    field the base class either lacks or defaults differently — that, not the
+    overridden value, is what says no rebuild happened. A jsonargparse release
+    that changes the merge in either direction fails this test rather than
+    silently producing a differently-scored experiment.
     """
     from sisr.models.srgan import SRGANEvalConfig, SRGANTrainingConfig
     from sisr.training import SREvalConfig
@@ -431,12 +433,40 @@ def test_dotted_override_reverts_eval_config_but_not_training_config(tmp_path: P
     assert kept.training_config.init_from == str(tmp_path / "absent.pt")
     assert kept.training_config.example_input_shape == (3, 24, 24)
 
-    reverted = _resolve(*args, "--model.init_args.eval_config.crop_border=0").model
-    assert not isinstance(reverted.eval_config, SRGANEvalConfig)
-    assert type(reverted.eval_config) is SREvalConfig
-    assert reverted.eval_config.crop_border == 0
-    assert reverted.eval_config.perceptual_metrics == []
-    assert reverted.eval_config.ssim_impl == "wang"
+    kept_eval = _resolve(*args, "--model.init_args.eval_config.crop_border=0").model
+    assert isinstance(kept_eval.eval_config, SRGANEvalConfig)
+    assert type(kept_eval.eval_config) is not SREvalConfig
+    assert kept_eval.eval_config.crop_border == 0
+    # Both are subclass-only defaults the override never names: on the base class
+    # they are [] and 'wang', so their survival is what says no rebuild happened.
+    assert kept_eval.eval_config.perceptual_metrics == ["lpips", "dists"]
+    assert kept_eval.eval_config.ssim_impl == "daala"
+
+
+def test_dotted_override_keeps_a_base_annotated_training_config_subclass():
+    """The ``training_config`` half of the same fix, on a template that can see it.
+
+    SRGAN annotates ``training_config`` with its own subclass, so rebuilding the
+    field from the annotation is a no-op there and that template cannot tell
+    whether the fix applies to ``SRTrainingConfig`` at all. ``SRLightning``
+    annotates it ``SRTrainingConfig | None``, and the SRResNet template fills it
+    with ``SRResNetTrainingConfig``, so this is the configuration where the
+    second entry in ``subclasses_enabled`` is load-bearing.
+
+    ``scale`` and ``init_strategy`` exist only on the subclass — on a rebuilt
+    base ``SRTrainingConfig`` the attribute access itself would raise.
+    """
+    from sisr.models.srresnet import SRResNetTrainingConfig
+
+    m = _resolve(
+        "--config",
+        str(SRRESNET_TEMPLATE),
+        "--model.init_args.training_config.example_input_shape=[3,32,32]",
+    ).model
+    assert isinstance(m.training_config, SRResNetTrainingConfig)
+    assert m.training_config.example_input_shape == (3, 32, 32)
+    assert m.training_config.scale == 4
+    assert m.training_config.init_strategy == "default"
 
 
 def test_composite_criterion_resolves_through_the_real_cli(tmp_path: Path):
