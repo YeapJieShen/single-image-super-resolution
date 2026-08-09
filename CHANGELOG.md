@@ -13,6 +13,33 @@ notice.
 
 - **SRResNet** and **SRCNN**, both fully wired — model, dataset pipeline, config
   dataclasses, and an experiment template each.
+- **SRGAN** (`sisr/models/srgan/`, `sisr/training/gan_module.py`) — the SRResNet
+  generator trained adversarially against an `SRDiscriminator` critic. `SRGANLightning`
+  drives both optimizers under manual optimization, `AdversarialLoss` supplies the
+  non-saturating objective over the critic's logits, and the shipped template reproduces
+  SRGAN-VGG54. The generator initialises from an MSE-trained SRResNet's bare weights, the
+  paper's recipe, and refuses any weights file whose architecture, processor, output
+  range or scale disagrees with the run loading it. `trainer.global_step` counts
+  optimizer steps, so it advances twice per batch here and nowhere else — see the README.
+- **Subclass-mode CLI** — the top-level `model:` block may now name its Lightning module
+  with `class_path`/`init_args`, which is how a config selects `SRGANLightning` instead
+  of `SRLightning`. Existing configs that set `model:` fields directly keep resolving
+  against the default `SRLightning`; the shipped templates were re-nested to match the
+  new form.
+- **Perceptual metrics** (`sisr/perceptual.py`) — LPIPS and DISTS, selected by
+  `SREvalConfig.perceptual_metrics` and logged as `lpips/val` / `dists/val` and per
+  benchmark set. Empty by default, so every existing architecture logs exactly the tags
+  it logged before. They exist because an adversarial objective makes PSNR and SSIM worse
+  by design; neither substitutes for the paper's MOS study. `lpips_net` selects the LPIPS
+  backbone, and a figure is comparable only to one computed under the same backbone.
+- **`[perceptual]` extra** — `pip install '.[perceptual]'` for LPIPS, which torchmetrics
+  gates on the `lpips` package. DISTS needs nothing beyond torchvision and ships in core.
+- **Rolling last-N checkpoints** — `SRCheckpoint` and `SRWeightsCheckpoint` with
+  `monitor_metric: null` keep the last `keep_last` saves by step, which Lightning cannot
+  express through `save_top_k` alone. A metric-monitored "best" is the wrong artifact for
+  an adversarial run. When a monitor *is* set, its direction is now validated too, so a
+  lower-is-better metric left at the default `mode='max'` is refused at setup instead of
+  keeping the worst model of the run.
 - **`sisr` console script** over a single `LightningCLI` entrypoint, with `fit`, `test`,
   `predict` and `export` subcommands. One self-contained YAML drives an experiment.
 - **Pluggable losses** (`sisr/losses/`): `CharbonnierLoss`, `TotalVariationLoss`,
@@ -29,7 +56,9 @@ notice.
 - **Provenance metadata** (`sisr/training/metadata.py`) — one builder feeding checkpoints,
   bare weight files, and ONNX exports, so the three cannot drift.
 - **`SRWeightsCheckpoint`** — distributable optimizer-free `.pt` weights, roughly a third
-  the size of a full checkpoint.
+  the size of a full checkpoint. `attribute` picks which component gets saved, with
+  matching provenance, so a GAN run can hand out the generator and retain the critic in
+  separate files.
 - **Opt-in full-step CUDA-graph capture** (`SRTrainingConfig.cuda_graph`), which refuses
   configurations it cannot capture soundly rather than capturing them anyway.
 - **LR-only prediction path** — `PredictDataset`, `predict_step`, and `SRPredictionWriter`.
@@ -46,6 +75,8 @@ notice.
   stride needs no rebuild, and caching a dataset for one architecture serves the other.
 - **Colorspace is chosen by composing an `SRProcessor`**, replacing a config string field.
 - **Google-style docstrings are enforced** via ruff's pydocstyle rules.
+- **`torchmetrics>=1.9` floor** (was `>=1.4`) — the version DISTS was verified present in
+  on this project. Lowering it means testing the lower version, not guessing.
 
 ### Fixed
 
@@ -53,6 +84,14 @@ notice.
   `zero_grad(set_to_none=True)` severed a live CUDA graph's gradient tensors from the
   optimizer, so weights stopped updating while the reported loss kept moving.
 - **`--ckpt_path` could not reload any checkpoint this project had ever saved.**
+- **`--ckpt_path` rebuilt an architecture's `eval_config` as the base class**, so every
+  default the subclass had overridden reverted on reload — a resumed SRResNet run could
+  monitor a different SSIM convention than a fresh run from the same YAML. The
+  checkpoint's stored fields are now merged onto the class the config already selected,
+  so subclass identity and subclass-only defaults both survive, including from
+  checkpoints saved before a field existed. A dotted *command-line* override of such a
+  field still reverts the object to its base class — a separate, open defect; see the
+  README.
 - **The LMDB cache could delete another process's in-progress build.** Deletion is now
   restricted to proven corruption; environmental failures raise instead.
 - **SRCNN's paper weight-init std** corrected to the published `0.001`.

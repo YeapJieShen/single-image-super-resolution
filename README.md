@@ -74,6 +74,9 @@ means writing a network and a config dataclass, not a new Lightning module. See
 |---|---|---|---|
 | SRCNN | [Dong et al. 2015](https://arxiv.org/pdf/1501.00092) | pre-upsampled to HR size | none, same-resolution refinement |
 | SRResNet | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | true low-resolution | ×scale sub-pixel convolution |
+| SRGAN | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | true low-resolution | ×scale sub-pixel convolution |
+
+SRGAN's network *is* SRResNet — only how it is trained differs. See [SRGAN](#srgan).
 
 ## Losses
 
@@ -83,8 +86,9 @@ class of ours:
 
 ```yaml
 model:
-  criterion:
-    class_path: torch.nn.L1Loss
+  init_args:
+    criterion:
+      class_path: torch.nn.L1Loss
 ```
 
 | Class | What it is |
@@ -102,17 +106,18 @@ Combining them logs each term separately as `loss/train/{name}` and
 
 ```yaml
 model:
-  criterion:
-    class_path: sisr.losses.WeightedSumLoss
-    init_args:
-      terms:
-        vgg22:
-          class_path: sisr.losses.VGG19FeatureLoss
-          init_args:
-            layer: vgg22
-        tv:
-          class_path: sisr.losses.TotalVariationLoss
-      weights: {vgg22: 1.0, tv: 2.0e-8}
+  init_args:
+    criterion:
+      class_path: sisr.losses.WeightedSumLoss
+      init_args:
+        terms:
+          vgg22:
+            class_path: sisr.losses.VGG19FeatureLoss
+            init_args:
+              layer: vgg22
+          tv:
+            class_path: sisr.losses.TotalVariationLoss
+        weights: {vgg22: 1.0, tv: 2.0e-8}
 ```
 
 That is Ledig et al.'s SRResNet-VGG22 recipe: a VGG22 content loss plus total
@@ -137,6 +142,69 @@ and it refuses a 3-channel non-RGB processor (`YCbCrProcessor`) unless you set
 trains on features that mean nothing. The frozen VGG is deliberately excluded
 from checkpoints, so a `.ckpt` trained under one criterion loads into a module
 configured with another.
+
+## SRGAN
+
+[`templates/config.srgan.template.yaml`](templates/config.srgan.template.yaml)
+reproduces **SRGAN-VGG54**, the paper's headline variant: the SRResNet generator, a
+VGG19 `φ_{5,4}` content loss, and `sisr.losses.AdversarialLoss` (non-saturating, over
+the critic's logits) weighted `1e-3`, alternating one `sisr.models.srgan.SRDiscriminator`
+update per generator update. `sisr.training.SRGANLightning` owns both optimizers under
+manual optimization; the YAML selects it by `class_path` on the top-level `model:` block,
+which is what that block's `class_path`/`init_args` nesting is for.
+
+```bash
+pip install '.[perceptual]'   # LPIPS. DISTS needs no extra.
+sisr fit --config templates/config.srgan.template.yaml
+```
+
+**The generator starts from an MSE-trained SRResNet.** Ledig et al. scope the
+MSE-initialisation trick to "when training the actual GAN", so a paper-faithful run
+points `training_config.init_from` at a finished SRResNet run's bare-weights `.pt` —
+never the sibling `.ckpt`, which holds the whole LightningModule. That file's own
+provenance metadata is checked against this run's generator, processor, output range and
+scale, and refused on any mismatch: weights trained under a different one produce a model
+that trains and scores without ever erroring. Set `init_from: null` in the YAML to train
+from scratch, which is not the paper's recipe (`--...init_from=null` on the command line
+does not work — jsonargparse coerces it to the string `'None'`).
+
+**`global_step` runs ahead of the batch count here, and only here.** It counts optimizer
+steps, and this module takes two per batch, so after `N` batches it reads `N + N // k` —
+twice `N` at the default `k = 1`. This is unchanged Lightning behaviour, not a quirk of
+manual optimization: manual optimization with a *single* optimizer still gives
+`global_step == batches`, measured. No other architecture here is affected. Two knobs
+that read alike are in different units, so check which before copying a number between
+templates:
+
+| Counted in global steps | Counted in batches |
+|---|---|
+| `trainer.max_steps`, `every_n_train_steps`, the `{step}` in checkpoint filenames | `val_check_interval`, `log_every_n_steps`, LR-scheduler milestones |
+
+TensorBoard's default x-axis is the batch counter, so a curve and the checkpoint pulled
+off it are a factor of 2 apart.
+
+**PSNR and SSIM get worse by design.** An adversarial objective buys perceptual detail by
+spending distortion, which is what those two measure. The template's checkpoints are
+therefore rolling rather than monitored — `monitor_metric: null` with `keep_last: 3`
+keeps the last three saves by step — because a `save_top_k` on `psnr/val/RGB` or
+`ssim/val/RGB` selects the *least* adversarial state of the run, typically one from its
+first few thousand steps. `SRWeightsCheckpoint` does the same for distributable weights,
+once per network via `attribute: model` and `attribute: discriminator`.
+
+**Perceptual metrics are what track the objective instead.** `SRGANEvalConfig` adds
+`lpips` and `dists` on top of SRResNet's scoring, logged as `lpips/val` and `dists/val`
+during validation and as `lpips/{set}` / `dists/{set}` per benchmark set. Both are
+lower-is-better, so a checkpoint monitoring one needs `mode: min`; `SRCheckpoint` refuses
+the wrong direction at setup rather than quietly keeping the worst model of the run.
+
+**MOS is not reproduced.** Ledig et al.'s headline result is a human mean-opinion-score
+study, and nothing here stands in for one. LPIPS and DISTS correlate with human judgement
+better than PSNR does — that is the entire claim being made for them, not that they are a
+substitute.
+
+The template also records a host-RAM OOM in the validation dataloader workers, hit at the
+first validation rather than at step 0; read the comment beside its
+`val_dataloader_kwargs` before choosing worker counts.
 
 ## Comparability
 
@@ -177,73 +245,72 @@ both are pinned:
   SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
   (the EDSR/RCAN/SwinIR/BasicSR lineage); always say which convention a number came
   from.
+- **An LPIPS figure is comparable only to one computed under the same backbone**, and
+  the discipline is the same as SSIM's. `SREvalConfig.lpips_net` selects `'alex'` (the
+  default, and what the SR literature usually reports), `'vgg'` or `'squeeze'`; these
+  are three different learned networks, not three reductions of one number, so they do
+  not agree on the same image. As with `ssim_impl`, the tag (`lpips/val`) and the
+  checkpoint filename carry the bare value and nothing about how it was produced — the
+  backbone is recorded in `hparams` and in every artifact's `sisr_meta`. DISTS has no
+  such knob.
 
-## `--ckpt_path` silently drops subclass-only `eval_config` defaults
+## Config overrides and subclass defaults
 
-Checkpoints saved before `ssim_impl` existed do not pick up its new default when
-reloaded — and the mechanism is not "the checkpoint overrides the CLI"; it is more
-structural than that. `SRLightning` saves `eval_config` in `hparams` as
-`dataclasses.asdict(self.eval_config)` — a bare dict with no `class_path`
-([`sisr/training/lightning_module.py`](sisr/training/lightning_module.py)).
-`SRLightningCLI._parse_ckpt_path` rebuilds that dict via `_reconstruct_ckpt_hparams`
-and hands it to jsonargparse as the `model.eval_config` value
-([`sisr/cli.py`](sisr/cli.py)). Because the dict carries no class identity,
-jsonargparse instantiates the field's **annotation type** — the base `SREvalConfig`
-— never the subclass (`SRResNetEvalConfig`) that actually produced the value, and it
-does this whether or not a CLI override was also given, since the replacement runs
-after argument parsing. Keys the dict happens to carry survive as explicit values;
-any key it is missing falls back to `SREvalConfig`'s own default, not the subclass's.
-A checkpoint saved before `ssim_impl` existed simply has no such key, so nothing
-"overrides" anything — the field falls to the base default, `wang`. `crop_border=4`
-and `psnr_channels=['RGB', 'Y']` survive reload only because `dataclasses.asdict`
-happened to record them explicitly at save time, not because the subclass identity
-is preserved.
+**`--ckpt_path` preserves subclass identity.** `SRLightning` saves `eval_config` in
+`hparams` as `dataclasses.asdict(self.eval_config)` — a bare dict with no `class_path`
+([`sisr/training/lightning_module.py`](sisr/training/lightning_module.py)) —
+and `SRLightningCLI._parse_ckpt_path` merges that dict, through the *subcommand's own*
+parser, onto the class `--config` has already selected
+([`sisr/cli.py`](sisr/cli.py)). The stored keys land as `init_args` overrides on
+`SRResNetEvalConfig`; every key the dict does not mention keeps the subclass's own
+default, not the base class's. So a checkpoint saved before `ssim_impl` existed still
+reloads as an `SRResNetEvalConfig` scoring `daala`, and `crop_border=4` /
+`psnr_channels=['RGB', 'Y']` survive because the class does, not because
+`dataclasses.asdict` happened to record them. This holds on every subcommand that
+accepts `--ckpt_path`, `fit` resume included, and is locked by
+`test_ckpt_path_preserves_eval_config_subclass_identity` in
+[`tests/test_cli.py`](tests/test_cli.py), which asserts both the reloaded object's class
+and a subclass-only default absent from the checkpoint's stored dict. Earlier versions
+of this README described patching a copy of a checkpoint's `hyper_parameters` before
+re-scoring; that recipe existed for this failure only, and is obsolete.
 
-**This generalises past `ssim_impl`.** Any `SREvalConfig` field an architecture
-subclass overrides is equally at risk the moment a checkpoint predates that field, on
-**every** subcommand that accepts `--ckpt_path` — `fit` resume included, not just
-`validate`/`test`. That makes resume the more damaging case: resuming a pre-change
-SRResNet run from an old checkpoint trains and checkpoints on `wang` `ssim/val/RGB`
-for the rest of the run, while a fresh `fit` from the identical YAML uses `daala` —
-two runs of "the same config" whose monitored metric means different things,
-distinguishable only by reading `hparams`, not by anything in the logs or filenames.
-This behaviour is locked in (deliberately not fixed) by
-`test_ckpt_path_loses_subclass_only_eval_defaults` in
-[`tests/test_cli.py`](tests/test_cli.py) — read it for the exact mechanics, including
-why a CLI override alongside `--ckpt_path` doesn't help.
-
-For example:
+**A dotted command-line override still resets the config it touches.** This is a
+separate defect with a separate cause — no checkpoint is involved, and it is not fixed.
+Setting one field of a subclass-typed config from the CLI applies that field but
+rebuilds the object as its bare annotation type, so every *other* default the subclass
+had overridden silently reverts with it:
 
 ```bash
-sisr validate --config my.yaml --ckpt_path old.ckpt --model.eval_config.ssim_impl=daala
+sisr validate --config templates/config.srresnet.template.yaml \
+              --model.init_args.eval_config.ssim_impl=wang
 ```
 
-silently scores with `wang`: the emitted config confirms `wang`, and the SSIM values
-come back bit-identical to a pre-upgrade run. This is a one-time migration issue per
-field, not an ongoing bug — a checkpoint written after a given field was added
-carries it explicitly and restores it correctly; it is only checkpoints predating
-that field that fall back.
+resolves `eval_config` to the base `SREvalConfig`. `ssim_impl` is `wang` as asked, but
+`crop_border` drops `4` → `0` and `psnr_channels` drops `['RGB', 'Y']` → `['RGB']`, and
+nothing in the logs says so. The same happens to `training_config`, and to any field
+whose annotation has subclasses. Naming the class in a separate argument does not help;
+the dotted override that follows resets it again.
 
-Workaround: patch a **copy** of the checkpoint and re-score (or resume) from the
-copy. Handle both hparams formats the codebase supports — current checkpoints nest
-`eval_config` as a dict, but checkpoints from before `SRLightning` stopped
-flattening `self.hparams` store `'/'`-joined keys instead (e.g.
-`"eval_config/ssim_impl"`; see `_reconstruct_ckpt_hparams` in
-[`sisr/cli.py`](sisr/cli.py) and the legacy-flattened-checkpoint test in
-[`tests/test_cli.py`](tests/test_cli.py)) — and old checkpoints are exactly the
-population this section targets:
+Two forms do work. Set the field in YAML — in the config itself, or in an overlay passed
+as a second `--config`:
 
-```python
-import torch
-
-ckpt = torch.load("old.ckpt", weights_only=True, map_location="cpu")
-hp = ckpt["hyper_parameters"]
-if "eval_config" in hp and isinstance(hp["eval_config"], dict):
-    hp["eval_config"]["ssim_impl"] = "daala"  # current nested format
-else:
-    hp["eval_config/ssim_impl"] = "daala"  # legacy '/'-flattened format
-torch.save(ckpt, "old_daala.ckpt")
+```yaml
+model:
+  init_args:
+    eval_config:
+      init_args:
+        ssim_impl: wang
 ```
+
+or pass the whole object as one JSON argument, `class_path` included:
+
+```bash
+sisr validate --config templates/config.srresnet.template.yaml \
+  --model.init_args.eval_config='{"class_path": "sisr.models.srresnet.SRResNetEvalConfig", "init_args": {"ssim_impl": "wang"}}'
+```
+
+`--print_config` tells the two apart at a glance: the resolved `eval_config` shows a
+`class_path` when the subclass survived, and a bare key/value mapping when it did not.
 
 ## ONNX export
 
