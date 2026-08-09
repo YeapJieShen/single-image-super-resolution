@@ -223,13 +223,14 @@ class SRLightningCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
-        Non-subclass mode (``model_class=SRLightning`` fixed) means
-        ``SRLightning``'s init args land at ``model.<arg>``, not
-        ``model.init_args.<arg>`` — that's why the link targets omit
-        ``init_args``.
+        Subclass mode (``subclass_mode_model=True``) means the module's init args
+        live under ``model.init_args.<arg>``, which is what these links must
+        target. Subclass mode exists so a YAML can name its Lightning module by
+        ``class_path`` — without it ``model_class`` is fixed and no config can
+        select :class:`~sisr.training.SRGANLightning`.
         """
-        parser.add_optimizer_args(link_to="model.optimizer")
-        parser.add_lr_scheduler_args(link_to="model.lr_scheduler")
+        parser.add_optimizer_args(link_to="model.init_args.optimizer")
+        parser.add_lr_scheduler_args(link_to="model.init_args.lr_scheduler")
         parser.add_argument(
             "--matmul_precision",
             type=Literal["highest", "high", "medium"] | None,
@@ -253,25 +254,62 @@ class SRLightningCLI(LightningCLI):
         """Reload ``--ckpt_path`` hyperparameters via ``_reconstruct_ckpt_hparams`` first.
 
         Duplicates ``LightningCLI._parse_ckpt_path`` (``lightning/pytorch/cli.py``)
-        with one substitution: the raw ``hyper_parameters`` dict is rebuilt through
-        :func:`_reconstruct_ckpt_hparams` before being handed to
-        ``parser.parse_object``, so both the current nested format and checkpoints
-        saved before that fix (which reload with a jsonargparse ``SystemExit``
-        otherwise — see that function's docstring) work through every subcommand
-        that accepts ``--ckpt_path`` (``fit`` resume, ``validate``, ``test``, ``export``).
+        with two substitutions. First, the raw ``hyper_parameters`` dict is rebuilt
+        through :func:`_reconstruct_ckpt_hparams` before being handed to
+        ``parse_object``, so both the current nested format and checkpoints saved
+        before that fix (which reload with a jsonargparse ``SystemExit`` otherwise —
+        see that function's docstring) work through every subcommand that accepts
+        ``--ckpt_path`` (``fit`` resume, ``validate``, ``test``, ``export``).
+
+        Second, under ``subclass_mode_model=True`` the module's fields are options
+        at ``model.init_args.<key>``, not ``model.<key>``, so the reconstructed
+        hparams are nested one level deeper — and that nested override MUST be
+        parsed through the *subcommand's own* parser/config branch
+        (``self._parser(subcommand)``, ``self.config[subcommand]``), never through
+        the top-level subcommand-dispatching one (``self.parser``, ``self.config``),
+        even though both expose the same ``model.init_args.<key>`` option path.
+        The top-level route parses without a syntax error, but per-field the
+        outcome is either a hard ``SystemExit`` (``model``, ``processor``: no
+        default, required) or a silent revert to the bare-annotation default
+        (any nested subclass field with a fallback, e.g. ``eval_config``) — see
+        below for which and why.
+
+        The reason: jsonargparse's subclass-merge machinery
+        (``ActionTypeHint._check_type``) looks up the field's *previous* value as
+        ``cfg.get(self.dest)`` — ``self.dest`` is the action's bare name (``"model"``),
+        not a subcommand-qualified one. Reached through the subcommand's own
+        parser, ``cfg`` is already scoped to that subcommand, so ``cfg.get("model")``
+        finds the real, already-resolved value and merges our override's keys onto
+        it, preserving every sibling key we don't mention (``model``, ``processor``,
+        nested ``class_path`` identities) and any subclass-only default our override
+        never names. Reached through the top-level parser, ``cfg`` is the
+        *unscoped* full config, so the same ``cfg.get("model")`` misses the value
+        (it actually lives at ``cfg["validate"]["model"]``) and silently gets
+        "no previous value" instead of a lookup error — jsonargparse then rebuilds
+        the field from schema defaults, which are ``None`` for ``model``/
+        ``processor`` (no default; required) and the bare annotation type for any
+        nested subclass field (``eval_config`` reverts to base ``SREvalConfig``).
+        A resumed run would then either hit that "arguments are required"
+        ``SystemExit`` outright, or — for a field with a valid bare-default
+        fallback — silently drop back to the config file's/annotation's values with
+        nothing in the logs to say so. Re-inlining this as ``self.parser`` "for
+        simplicity" reintroduces exactly that.
         """
         if not self.config.get("subcommand"):
             return
-        ckpt_path = self.config[self.config.subcommand].get("ckpt_path")
+        subcommand = self.config.subcommand
+        ckpt_path = self.config[subcommand].get("ckpt_path")
         if not (ckpt_path and Path(ckpt_path).is_file()):
             return
         ckpt = torch.load(ckpt_path, weights_only=True, map_location="cpu")
         hparams = _reconstruct_ckpt_hparams(ckpt.get("hyper_parameters", {}))
         if not hparams:
             return
-        hparams = {self.config.subcommand: {"model": hparams}}
+        hparams = {"model": {"init_args": hparams}}
         try:
-            self.config = self.parser.parse_object(hparams, self.config)
+            self.config[subcommand] = self._parser(subcommand).parse_object(
+                hparams, self.config[subcommand]
+            )
         except SystemExit:
             sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
             raise
@@ -306,6 +344,7 @@ def main() -> None:
     SRLightningCLI(
         model_class=SRLightning,
         datamodule_class=SRDataModule,
+        subclass_mode_model=True,
         save_config_kwargs={"overwrite": True},
         auto_configure_optimizers=False,
     )
