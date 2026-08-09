@@ -921,8 +921,10 @@ def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
     ``SRWeightsCheckpoint`` writes one network's weights and describes exactly
     that network; adding this run's whole adversarial setup to a discriminator's
     (or a generator's) ``.pt`` would describe things the file does not contain.
+    Both sinks are checked — the template runs one of each side by side, and the
+    generator's is the distributable artifact ``init_from`` consumes.
 
-    Driven by a real fit, and asserted on the file that fit wrote: the property is
+    Driven by a real fit, and asserted on the files that fit wrote: the property is
     about which metadata builder the save path reaches, so inspecting the builders
     directly cannot show it — neither has ever carried these keys.
     """
@@ -939,11 +941,21 @@ def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
                 every_n_train_steps=1,
                 attribute="discriminator",
                 filename_prefix="d-weights",
-            )
+            ),
+            SRWeightsCheckpoint(
+                monitor_metric=None,
+                dirpath=str(tmp_path),
+                every_n_train_steps=1,
+                attribute="model",
+                filename_prefix="sr-weights",
+            ),
         ],
     )
-    meta = torch.load(next(tmp_path.glob("d-weights-*.pt")), weights_only=True)["meta"]
+    d_meta = torch.load(next(tmp_path.glob("d-weights-*.pt")), weights_only=True)["meta"]
+    g_meta = torch.load(next(tmp_path.glob("sr-weights-*.pt")), weights_only=True)["meta"]
 
-    assert set(meta).isdisjoint({"discriminator", "adversarial"})
-    assert meta["kind"] == "component"
-    assert meta["component"]["name"] == "discriminator"
+    assert set(d_meta).isdisjoint({"discriminator", "adversarial"})
+    assert d_meta["kind"] == "component"
+    assert d_meta["component"]["name"] == "discriminator"
+    assert set(g_meta).isdisjoint({"discriminator", "adversarial"})
+    assert g_meta["kind"] == "sr_model"
