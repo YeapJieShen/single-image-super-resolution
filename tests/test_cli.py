@@ -838,7 +838,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
     Mirrors ``_build_srcnn_checkpoint``, but over SRResNet's native-LR pipeline
     and its ``SRResNetEvalConfig`` — the only shipped eval_config subclass with
     a subclass-only default (``ssim_impl='daala'``), which is what
-    ``test_ckpt_path_loses_subclass_only_eval_defaults`` needs to observe.
+    ``test_ckpt_path_preserves_eval_config_subclass_identity`` needs to observe.
     """
     ckpt_dir = tmp_path / "checkpoints"
     config = {
@@ -984,8 +984,15 @@ def test_ckpt_path_preserves_eval_config_subclass_identity(
     type (base ``SREvalConfig``) from the checkpoint's stored dict instead of
     merging onto the class the config file already selected
     (``SRResNetEvalConfig``) — the two assertions below can fail independently:
-    the reloaded object's *class*, and a subclass-only *default* the checkpoint's
-    stored dict never mentions at all.
+    the reloaded object's *class*, a subclass-only *default* the checkpoint's
+    stored dict never mentions at all, and a stored value that differs from the
+    one ``--config`` resolves to.
+
+    That third assertion is what makes the other two non-vacuous: ``--config``
+    alone already selects ``SRResNetEvalConfig`` and already yields
+    ``ssim_impl='daala'``, so both checkpoints below have their stored
+    ``crop_border`` rewritten to 7 — a value nothing in the config produces (the
+    class default is 4). Deleting the merge entirely leaves 4 behind and fails.
 
     ``_parse_ckpt_path`` merges the reconstructed ``training_config``/
     ``eval_config`` dict through the *subcommand's own* parser
@@ -1013,22 +1020,30 @@ def test_ckpt_path_preserves_eval_config_subclass_identity(
     # ssim_impl='daala' default must still apply on reload, not the base's
     # 'wang'.
     raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
-    legacy_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
+    current_hparams = {k: dict(v) for k, v in raw["hyper_parameters"].items()}
+    current_hparams["eval_config"]["crop_border"] = 7
+    legacy_hparams = {k: dict(v) for k, v in current_hparams.items()}
     del legacy_hparams["eval_config"]["ssim_impl"]
-    raw["hyper_parameters"] = legacy_hparams
+
     legacy_ckpt_path = tmp_path / "legacy.ckpt"
-    torch.save(raw, legacy_ckpt_path)
+    torch.save({**raw, "hyper_parameters": legacy_hparams}, legacy_ckpt_path)
+    current_ckpt_path = tmp_path / "current.ckpt"
+    torch.save({**raw, "hyper_parameters": current_hparams}, current_ckpt_path)
 
     cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(legacy_ckpt_path)])
     assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
     assert cli.model.eval_config.ssim_impl == "daala"
+    assert cli.model.eval_config.crop_border == 7
 
     # A checkpoint saved by the current code carries `ssim_impl` explicitly
     # (dataclasses.asdict includes every current field) — confirms identity
     # holds for the ordinary round trip too, not just the missing-key case above.
-    cli = _run_cli(["validate", "--config", str(config_path), "--ckpt_path", str(ckpt_path)])
+    cli = _run_cli(
+        ["validate", "--config", str(config_path), "--ckpt_path", str(current_ckpt_path)]
+    )
     assert isinstance(cli.model.eval_config, SRResNetEvalConfig)
     assert cli.model.eval_config.ssim_impl == "daala"
+    assert cli.model.eval_config.crop_border == 7
 
 
 def test_reconstruct_ckpt_hparams_unflattens_legacy_keys():
@@ -1139,12 +1154,17 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(lightning.pytorch.Trainer, "validate", _noop_validate)
 
+    # Every stored value here is one the resolved config does NOT produce:
+    # SUBCLASS_MODE_CONFIG sets example_input_shape [3, 24, 24] and selects
+    # SRResNetEvalConfig, whose crop_border default is 4. Storing the config's
+    # own values instead would make the assertions below pass with the whole
+    # merge deleted.
     ckpt = tmp_path / "fake.ckpt"
     torch.save(
         {
             "hyper_parameters": {
-                "training_config": {"example_input_shape": [3, 24, 24]},
-                "eval_config": {"crop_border": 4},
+                "training_config": {"example_input_shape": [3, 32, 32]},
+                "eval_config": {"crop_border": 7},
             }
         },
         ckpt,
@@ -1175,4 +1195,8 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
             )
     finally:
         sys.argv = saved_argv
-    assert cli.model.eval_config.crop_border == 4
+    assert cli.model.eval_config.crop_border == 7
+    # A tuple, not the stored list: the merge lands on the dataclass field, whose
+    # annotation coerces it — more evidence the value came through the config
+    # machinery rather than being read off the checkpoint dict directly.
+    assert cli.model.training_config.example_input_shape == (3, 32, 32)
