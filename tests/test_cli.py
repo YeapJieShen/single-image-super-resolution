@@ -364,9 +364,9 @@ def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
 
 def test_srgan_template_ships_a_real_init_from_path():
     """The template's own init_from is exercised nowhere else — the test above
-    overrides it to null so it can run without the gitignored experiments/ tree.
-    Assert the shipped value at least names a bare-weights .pt, which is the one
-    thing SRGANLightning refuses at construction time."""
+    overrides it to a missing path so it can run without the gitignored
+    experiments/ tree. Assert the shipped value at least names a bare-weights
+    .pt, which is one of the artifacts SRGANLightning's setup refuses."""
     with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 

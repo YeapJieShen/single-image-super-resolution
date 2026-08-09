@@ -175,6 +175,17 @@ class SRGANLightning(SRLightning):
         pretrained weights and silently restart it, while the discriminator and
         the optimizer state carried on from where they were.
 
+        On a ``fit --ckpt_path`` resume, this runs (``Trainer._run`` calls the
+        setup hook at line 1039) *before* the resume restores the module's own
+        state (line 1046), so the resumed generator wins and the final model
+        state is correct either way. The costs are one wasted weights read and
+        a hard dependency on ``init_from``'s artifact existing on the resuming
+        box, even though its result is about to be discarded. The upside: the
+        five metadata refusals below still run on every resume, so a config
+        that has drifted from the run being resumed (a changed architecture,
+        processor, or scale) is still caught rather than only checked on a
+        fresh ``fit``.
+
         Args:
             stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
                 ``'test'`` or ``'predict'``. Only ``'fit'`` loads.

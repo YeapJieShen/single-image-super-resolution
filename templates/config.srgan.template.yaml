@@ -180,17 +180,25 @@ trainer:
   # gives global_step == batches. Every other architecture here is unaffected.
   # The units differ, so read this before changing any of them. max_steps,
   # checkpoint filenames and every_n_train_steps are in GLOBAL STEPS;
-  # val_check_interval and the hand-stepped LR scheduler's milestones are in
-  # BATCHES (Lightning keys val_check_interval on total_batch_idx whenever
-  # check_val_every_n_epoch is null, as it is below). every_n_train_steps' own
-  # condition is checked once per batch, so an EVEN value halves the batch cadence
-  # (10000 -> every 5000 batches) while an odd one does not (5 -> still every 5).
+  # val_check_interval, log_every_n_steps and the hand-stepped LR scheduler's
+  # milestones are in BATCHES (Lightning keys val_check_interval on
+  # total_batch_idx whenever check_val_every_n_epoch is null, as it is below;
+  # log_every_n_steps tests the same _batches_that_stepped counter unconditionally
+  # -- logger_connector.py:59,64). every_n_train_steps' own condition is checked
+  # once per batch, so an EVEN value halves the batch cadence (10000 -> every
+  # 5000 batches) while an odd one does not (5 -> still every 5).
+  # _batches_that_stepped is also the DEFAULT X-AXIS every logged metric is
+  # plotted against, so TensorBoard shows this run in batches while checkpoint
+  # filenames carry global_step: sr-weights-10000.pt is the state at
+  # TensorBoard x=5000, not x=10000 -- a 2x offset between a curve and the
+  # checkpoint pulled off it.
   # 400000 here = the paper's 2e5 generator iterations (1e5 at 1e-4 + 1e5 at 1e-5).
   max_steps: 400000
   # 5000 batches = every 10000 global steps: the checkpoint cadence below.
   val_check_interval: 5000
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
+  # BATCHES too -- see the units comment above.
   log_every_n_steps: 1000
   deterministic: false
   # cuDNN autotunes a conv algorithm per input shape and caches it — free here since
@@ -219,10 +227,12 @@ trainer:
         monitor_metric: null
         keep_last: 3
         every_n_train_steps: 10000
-    # Distributable, optimizer-free weights (.pt) for BOTH networks. The generator
-    # is what gets handed out; the discriminator's is what makes a run resumable
-    # as a GAN from bare weights alone. Distinct filename_prefix keeps each
-    # callback's rolling deletion off the other's files in a shared dirpath.
+    # Distributable, optimizer-free weights (.pt) for BOTH networks. The generator's
+    # is what gets handed out, and is what init_from above consumes. The
+    # discriminator's is kept so the critic can be restored by hand, or by a
+    # future run that accepts one -- nothing shipped consumes a d-weights-*.pt
+    # today; there is no init_discriminator_from. Distinct filename_prefix keeps
+    # each callback's rolling deletion off the other's files in a shared dirpath.
     - class_path: sisr.training.SRWeightsCheckpoint
       init_args:
         monitor_metric: null
