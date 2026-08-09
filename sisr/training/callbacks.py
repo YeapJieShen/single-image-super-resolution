@@ -11,6 +11,7 @@ training signals; :class:`SRCheckpoint` is a thin
 output to disk as PNGs.
 """
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -664,13 +665,58 @@ class _RollingSaveMixin:
     would be shadowed by that override and silently never run. Each
     subclass's ``_save_checkpoint`` calls :meth:`_enforce_rolling_window`
     explicitly instead.
+
+    The window itself is never persisted in ``state_dict`` — it is rebuilt from
+    the files already on disk when a run resumes (:meth:`on_train_start`), which
+    is what keeps ``fit --ckpt_path`` from orphaning the pre-resume saves.
     """
 
-    def _init_rolling(self, keep_last: int) -> None:
+    def _init_rolling(self, keep_last: int, filename_prefix: str) -> None:
         if keep_last < 1:
             raise ValueError(f"keep_last must be >= 1; got {keep_last}")
         self.keep_last = keep_last
         self._rolling: list[str] = []
+        # Rolling filenames are exactly f"{filename_prefix}-{step}{FILE_EXTENSION}",
+        # so this matches every file THIS callback writes and nothing else: a
+        # sibling callback in the same dirpath differs in prefix or extension, and
+        # `last.ckpt`/a monitored callback's metric-bearing name never match.
+        self._rolling_pattern = re.compile(
+            rf"{re.escape(filename_prefix)}-(\d+){re.escape(self.FILE_EXTENSION)}"
+        )
+
+    def on_train_start(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
+        """Seed the rolling window from disk when this run is resuming.
+
+        Nothing persists the window: ``ModelCheckpoint.state_dict`` carries
+        ``monitor``/``best_*``/``kth_*``/``dirpath``/``last_model_path`` only. So
+        without this, a ``fit --ckpt_path`` resume starts with an empty window and
+        every pre-resume file is orphaned — never counted, never deleted, up to
+        ``keep_last`` per callback per resume (three rolling callbacks run in the
+        shipped adversarial template).
+
+        Only a resume seeds. A fresh run into a populated ``dirpath`` leaves those
+        files alone rather than adopting — and eventually deleting — checkpoints it
+        did not write.
+
+        Runs here rather than in ``setup`` because ``trainer.ckpt_path`` is not
+        assigned until the checkpoint connector restores state, which is after
+        every ``setup`` hook.
+
+        Args:
+            trainer: The active trainer — supplies ``ckpt_path``.
+            pl_module: Unused; part of the hook signature.
+        """
+        super().on_train_start(trainer, pl_module)
+        if self.monitor is not None or not trainer.ckpt_path or not self.dirpath:
+            return
+        found = sorted(
+            (int(match.group(1)), str(path))
+            for path in Path(self.dirpath).iterdir()
+            if (match := self._rolling_pattern.fullmatch(path.name))
+        )
+        self._rolling = [path for _, path in found]
 
     def _enforce_rolling_window(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Track *filepath* and drop the oldest save(s) beyond ``keep_last``.
@@ -758,7 +804,7 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             auto_insert_metric_name=False,
             **kwargs,
         )
-        self._init_rolling(keep_last)
+        self._init_rolling(keep_last, filename_prefix)
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Save via :class:`~lightning.pytorch.callbacks.ModelCheckpoint`, then enforce rolling.
@@ -892,7 +938,7 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             auto_insert_metric_name=False,
             **kwargs,
         )
-        self._init_rolling(keep_last)
+        self._init_rolling(keep_last, filename_prefix)
         self.attribute = attribute
 
     @property
@@ -915,8 +961,9 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         suffix finds no state under the new key, so this callback's monitored
         bookkeeping (``best_model_score``/``best_k_models``, i.e. what a
         ``save_top_k`` run has already kept) restarts from empty for the rest of
-        that run. Rolling mode loses nothing — its window is recomputed from
-        the files on disk and was never persisted.
+        that run. Rolling mode loses nothing — its window was never persisted
+        under any key, and :meth:`_RollingSaveMixin.on_train_start` rebuilds it
+        from this callback's own files on disk before the first save.
 
         Returns:
             A key unique per ``(monitor, mode, cadence, attribute)``.
