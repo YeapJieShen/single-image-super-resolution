@@ -976,28 +976,44 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         pl_module: lightning.LightningModule,
         stage: str,
     ) -> None:
-        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+        """Validate ``monitor`` against the metrics ``SRLightning`` will log, and ``attribute``.
 
-        Same check as :meth:`SRCheckpoint.setup` (via the shared
-        ``_validate_monitor_metric`` helper — the two classes are siblings, not
-        parent/child, so the check can't be reused via ``super()`` across them).
+        The ``monitor`` check is the same as :meth:`SRCheckpoint.setup` (via the
+        shared ``_validate_monitor_metric`` helper — the two classes are siblings,
+        not parent/child, so the check can't be reused via ``super()`` across them).
+
+        ``attribute`` is otherwise only read when a checkpoint is written, so a
+        typo — or ``attribute='discriminator'`` on a plain
+        :class:`~sisr.training.SRLightning` — would cost a whole checkpoint
+        interval before dying with a bare ``AttributeError`` from deep inside the
+        save path. Same reasoning as moving the monitor check to startup.
 
         Args:
             trainer: The active trainer.
-            pl_module: The model being trained; must expose ``eval_config``.
+            pl_module: The model being trained; must expose ``eval_config`` and
+                the component named by ``attribute``.
             stage: Lightning trainer stage. Only ``"fit"`` is checked — see
                 ``SRCheckpoint.setup``.
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a metric
-                ``SRLightning`` will log during ``fit``, or if ``mode``
+                ``SRLightning`` will log during ``fit``, if ``mode``
                 disagrees with that metric's direction (PSNR/SSIM are
-                higher-is-better; LPIPS/DISTS are lower-is-better).
+                higher-is-better; LPIPS/DISTS are lower-is-better), or if
+                ``pl_module`` has no attribute named ``attribute``.
         """
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
         _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module, mode=self.mode)
+        if not hasattr(pl_module, self.attribute):
+            raise MisconfigurationException(
+                f"`SRWeightsCheckpoint(attribute={self.attribute!r})` has nothing to save: "
+                f"{type(pl_module).__name__} has no attribute {self.attribute!r}. Name a "
+                f"component the module actually defines — 'model' (the generator, the "
+                f"default) on any SRLightning, 'discriminator' only on an adversarial "
+                f"module. Fix the callback's `attribute` in your YAML."
+            )
 
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Write one component's bare weights + matching provenance metadata.

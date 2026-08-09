@@ -447,6 +447,32 @@ def test_sr_weights_checkpoint_setup_rejects_unknown_monitor(tmp_path: Path):
         ckpt.setup(_make_bare_trainer(), pl_module, stage="fit")
 
 
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_setup_rejects_unknown_attribute(tmp_path: Path):
+    """A component this module does not have must fail at startup, not at the
+    first save.
+
+    ``attribute`` is read nowhere else, so a typo — or ``discriminator`` on a
+    plain ``SRLightning``, which is a one-line YAML mistake — otherwise survives
+    a whole ``every_n_train_steps`` interval and then dies with a bare
+    ``AttributeError`` from inside the save path.
+    """
+    ckpt = SRWeightsCheckpoint(
+        monitor_metric=None, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    with pytest.raises(MisconfigurationException, match=r"discriminator"):
+        ckpt.setup(_make_bare_trainer(), build_module(), stage="fit")
+
+
+@_ignore_gpu_warning
+def test_sr_weights_checkpoint_setup_accepts_a_present_component(tmp_path: Path):
+    """The refusal above must not reject the configuration ``attribute`` exists for."""
+    ckpt = SRWeightsCheckpoint(
+        monitor_metric=None, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    ckpt.setup(_make_bare_trainer(), build_module_with_component(), stage="fit")  # must not raise
+
+
 def test_sr_weights_checkpoint_save_checkpoint_is_actually_overridden():
     """Cheap static guard: the override must exist as a distinct method, not
     silently inherit ModelCheckpoint's (which would write full, optimizer-bearing
