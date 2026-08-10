@@ -35,11 +35,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
+from jsonargparse import set_parsing_settings
 from lightning.pytorch import Trainer
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
 from .export import to_onnx
-from .training import SRDataModule, SRLightning
+from .training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
 
 # Checkpoints saved before SRLightning.__init__ stopped flattening self.hparams for
 # TensorBoard display (see its docstring) stored ONLY these two dataclasses' fields —
@@ -171,6 +172,16 @@ class SRLightningCLI(LightningCLI):
                 f"for every subcommand at construction. Subclass _ExportTrainer, or add "
                 f"an `export` method with the same signature."
             )
+        # Must precede super().__init__(), which builds every subcommand's parser.
+        # jsonargparse treats a pure dataclass as a *closed* type by default (its
+        # `is_pure_dataclass` selector), so a dotted override such as
+        # --model.init_args.eval_config.crop_border=0 arrives as a NestedArg and
+        # rebuilds the whole field from the bare annotation, discarding the
+        # architecture's subclass and every subclass-only default with it. Naming
+        # the two base classes re-enables subclasses for all their descendants;
+        # disabling the selector by name instead would change parsing for every
+        # dataclass-typed field in Lightning and jsonargparse too.
+        set_parsing_settings(subclasses_enabled=[SREvalConfig, SRTrainingConfig])
         super().__init__(*args, trainer_class=trainer_class, **kwargs)
 
     def parse_arguments(self, parser: LightningArgumentParser, args: ArgsType) -> None:
