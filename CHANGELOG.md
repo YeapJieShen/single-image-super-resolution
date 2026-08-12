@@ -111,3 +111,5 @@ notice.
   (GHSA-53q9-r3pm-6pq6 / CVE-2025-32434). See [SECURITY.md](SECURITY.md).
 
 [Unreleased]: https://github.com/YeapJieShen/single-image-super-resolution/commits/main
+
+<!-- verification-only: confirms the doc-only CI skip gate; this branch is temporary and will be deleted. -->
