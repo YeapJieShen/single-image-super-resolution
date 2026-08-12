@@ -22,7 +22,12 @@ described in the [README](README.md#install).
 ```bash
 pytest                                  # full suite
 pytest --cov=sisr --cov-report=term     # with coverage, as CI runs it
+mypy sisr                               # type-check, as CI runs it
 ```
+
+`mypy` only checks the modules `[tool.mypy]`'s overrides don't blanket-ignore — Lightning's
+hook system and jsonargparse's dynamic CLI/subclass resolution make `sisr/training/` and
+`sisr/cli.py` resist useful static typing without a much larger, separate effort.
 
 `tests/` mirrors `sisr/`, so `sisr/training/lightning_module.py` maps to
 `tests/training/test_lightning_module.py`.
@@ -40,9 +45,10 @@ subprocesses where breakpoints never fire. Run with
 
 ## Making a change
 
-Branch off `main`, add tests with your change, run `pytest`, open a PR. Three checks have
-to pass: **test** (pytest + coverage), **build** (`pip install .` and imports work), and
-**lint** (`ruff check` + `ruff format --check`). `main` keeps linear history.
+Branch off `main`, add tests with your change, run `pytest`, open a PR. Four checks have
+to pass: **test** (pytest + coverage), **build** (`pip install .` and imports work),
+**lint** (`ruff check` + `ruff format --check`), and **typecheck** (`mypy sisr`, over the
+modules it doesn't blanket-ignore). `main` keeps linear history.
 
 The path a change takes:
 
