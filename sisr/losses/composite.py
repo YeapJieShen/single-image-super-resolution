@@ -96,6 +96,7 @@ class WeightedSumLoss(SRLoss):
             else:
                 prior.copy_(value)
             total = contribution if total is None else total + contribution
+        assert total is not None  # __init__ requires terms to be non-empty
         return total
 
     def describe(self) -> str:

@@ -157,14 +157,14 @@ class SRResNet(SRModel):
             hidden_channel, in_out_channels, kernel_size=kernel_sizes[2], padding=padding
         )
 
-    def _check_scale(self, scale: int):
+    def _check_scale(self, scale: int) -> None:
         """Validates that scale is a positive power of 2."""
         if not isinstance(scale, int) or scale < 1:
             raise ValueError(f"scale must be a positive integer. Got {scale}.")
         if (scale & (scale - 1)) != 0:
             raise ValueError(f"scale must be a power of 2. Got {scale}.")
 
-    def _check_architecture(self, kernel_sizes: tuple[int, ...], num_residual_blocks: int):
+    def _check_architecture(self, kernel_sizes: tuple[int, ...], num_residual_blocks: int) -> None:
         """Validates kernel_sizes (length-3, positive ints) and num_residual_blocks (positive)."""
         if not isinstance(kernel_sizes, tuple):
             raise ValueError(f"kernel_sizes must be a tuple. Got {type(kernel_sizes)}.")

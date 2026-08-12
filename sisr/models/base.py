@@ -1,7 +1,7 @@
 """Abstract base class for single-image super-resolution architectures."""
 
 import abc
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import torch
 import torch.nn as nn
@@ -36,7 +36,7 @@ class SRModel(nn.Module, abc.ABC):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the model on input ``x`` and return the SR output tensor."""
 
-    def reset_parameters(self, **kwargs) -> None:
+    def reset_parameters(self, **kwargs: Any) -> None:
         """Optional paper-style weight init. Default: no-op (kwargs ignored).
 
         Subclasses may declare specific kwargs (e.g. ``SRCNN``'s ``mean`` /

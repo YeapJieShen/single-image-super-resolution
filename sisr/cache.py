@@ -73,6 +73,7 @@ def _pid_alive_windows(pid: int) -> bool:
     STILL_ACTIVE = 259
     ERROR_ACCESS_DENIED = 5
 
+    assert _kernel32 is not None  # only called when sys.platform == "win32"
     handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return ctypes.get_last_error() == ERROR_ACCESS_DENIED
@@ -190,7 +191,7 @@ class LMDBCacheBuildContext:
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             pending: set[Future] = set()
 
-            def _submit():
+            def _submit() -> None:
                 nonlocal next_submit
                 if next_submit < n_items:
                     args = (items[next_submit],)
@@ -639,6 +640,7 @@ class LMDBCache:
         """
         if self._heartbeat_stop is None:
             return
+        assert self._heartbeat_thread is not None  # set together in _start_heartbeat
         self._heartbeat_stop.set()
         try:
             self._heartbeat_thread.join(timeout=1.0)
