@@ -18,7 +18,33 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Cheap gate: skips the expensive matrices below on a doc-only PR. Deliberately
+  # an allowlist, not a denylist — anything not explicitly listed here (including
+  # this workflow file itself) is treated as code and runs the full matrix.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+
   build-matrix:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -50,6 +76,8 @@ jobs:
   # CONTRIBUTING.md gives contributors who skip uv exactly that command. One
   # OS/Python leg is enough — this checks build-backend behaviour, not the matrix.
   editable-install:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -65,13 +93,14 @@ jobs:
         run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
 
   # Stable required-check context: green only if every build-matrix leg and the
-  # editable-install check passed (see the equivalent gate in test.yml).
+  # editable-install check passed, or were skipped because `changes` found a
+  # doc-only PR (see the equivalent gate in test.yml).
   build:
     needs: [build-matrix, editable-install]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all matrix legs to pass
+      - name: Require all matrix legs to pass or be skipped (doc-only PR)
         run: |
-          [ "${{ needs.build-matrix.result }}" = "success" ]
-          [ "${{ needs.editable-install.result }}" = "success" ]
+          [ "${{ needs.build-matrix.result }}" = "success" ] || [ "${{ needs.build-matrix.result }}" = "skipped" ]
+          [ "${{ needs.editable-install.result }}" = "success" ] || [ "${{ needs.editable-install.result }}" = "skipped" ]

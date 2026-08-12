@@ -18,6 +18,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Cheap gate: skips the expensive matrices below on a doc-only PR. Deliberately
+  # an allowlist, not a denylist — anything not explicitly listed here (including
+  # this workflow file itself) is treated as code and runs the full matrix.
+  # lint stays ungated: it's a single cheap job, not a matrix, and isn't part of
+  # the `test` required-check's own dependency chain.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -40,6 +66,8 @@ jobs:
         run: ruff format --check .
 
   test-matrix:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
@@ -98,6 +126,8 @@ jobs:
   # matrix. Installs the `export` extra explicitly since test-matrix's `.[dev]`
   # deliberately excludes it (onnx/onnxruntime stay opt-in for contributors).
   onnx-export:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -114,14 +144,15 @@ jobs:
       - name: ONNX export parity tests
         run: pytest tests/test_export.py tests/test_cli.py -k export -v
 
-  # Stable required-check context: green only if every matrix leg passed
-  # (legs report as "test-matrix (os, ver)", which are not fixed contexts).
+  # Stable required-check context: green only if every matrix leg passed, or
+  # were skipped because `changes` found a doc-only PR (legs report as
+  # "test-matrix (os, ver)", which are not fixed contexts).
   test:
     needs: [test-matrix, onnx-export]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all matrix legs to pass
+      - name: Require all matrix legs to pass or be skipped (doc-only PR)
         run: |
-          [ "${{ needs.test-matrix.result }}" = "success" ]
-          [ "${{ needs.onnx-export.result }}" = "success" ]
+          [ "${{ needs.test-matrix.result }}" = "success" ] || [ "${{ needs.test-matrix.result }}" = "skipped" ]
+          [ "${{ needs.onnx-export.result }}" = "success" ] || [ "${{ needs.onnx-export.result }}" = "skipped" ]
