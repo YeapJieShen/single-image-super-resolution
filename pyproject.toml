@@ -70,6 +70,12 @@ dev = [
     "pyyaml>=6",
     "ruff>=0.9",
     "mypy>=1.11",
+    # tests/test_packaging.py builds a real wheel via hatchling's PEP 517
+    # build_wheel() hook to check py.typed actually ships in it, rather than
+    # only asserting the pyproject.toml config that's supposed to include it.
+    # Already a [build-system] requirement; declared again here so it's
+    # present outside pip's ephemeral build-isolation environment too.
+    "hatchling>=1.27",
 ]
 # Opt-in: sisr/export.py gates the actual `import onnx` inside to_onnx(),
 # so plain `pip install .` stays onnx-free. onnxruntime is the CI numeric-parity
