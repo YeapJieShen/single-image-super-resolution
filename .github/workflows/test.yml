@@ -2,7 +2,7 @@ name: test
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, ci/skip-doc-only-matrices] # TEMP verification-only, reverted before finalizing
   push:
     branches: [main]
   workflow_dispatch:
