@@ -7,6 +7,9 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
+That `test` badge isn't decorative: `test` is a required status check, so a pull
+request cannot merge without the full suite passing.
+
 Reproduce single-image super-resolution papers without rewriting a training loop each
 time. Every architecture runs through one `LightningCLI` entrypoint, and an experiment is
 one self-contained YAML file.
@@ -271,6 +274,40 @@ both are pinned:
   checkpoint filename carry the bare value and nothing about how it was produced — the
   backbone is recorded in `hparams` and in every artifact's `sisr_meta`. DISTS has no
   such knob.
+- **These are not idiosyncrasies of this project — two peer-reviewed surveys document
+  the same field-wide inconsistencies.** Keleş, Yılmaz, Tekalp, Korkmaz and Doğan,
+  ["On the Computation of PSNR for a Set of Images or Video"](https://arxiv.org/abs/2104.14868)
+  (Picture Coding Symposium 2021, arXiv:2104.14868), find no agreed convention for
+  aggregating PSNR across a set of images — arithmetic mean of independently-computed
+  per-image PSNR values versus a single PSNR from pooled MSE — with the two diverging by
+  up to ~2.5 dB on the same data. This project uses the former (their convention (a), not
+  MSE-pooling): PSNR is computed one image at a time and the per-image values are then
+  averaged (`sisr/training/callbacks.py:365-370` computes each image's PSNR, `:440-442`
+  takes the arithmetic mean over them), independently confirmed by
+  [`SRLightning._mean_psnr`](sisr/training/lightning_module.py)
+  (`sisr/training/lightning_module.py:504-515`), whose own docstring names and rejects
+  MSE-pooling as the alternative. Wang, Chen and Hoi's
+  ["Deep Learning for Image Super-resolution: A Survey"](https://arxiv.org/abs/1902.06068)
+  (IEEE TPAMI 2020, arXiv:1902.06068, §II-D "Operating Channels") likewise finds no
+  accepted best practice for which color space or channels to score SR on, with reported
+  results differing by up to 44 dB depending on the choice — the same studio-range-vs-full
+  and Y-vs-RGB distinctions this project names and pins above.
+- **Benchmark images are the EDSR authors' own benchmark distribution.** The Set5/Set14/
+  BSD100 HR images and MATLAB-`imresize`-generated LR pairs behind every PSNR/SSIM figure
+  in this project come from Lim et al., "Enhanced Deep Residual Networks for Single Image
+  Super-Resolution" (CVPRW 2017), downloaded from
+  `https://cv.snu.ac.kr/research/EDSR/benchmark.tar`, SHA-256
+  `80c21c333bbf6ceb5308b7243761f8284478274413a97b96f1d63e9045fd93e8` (recorded and checked
+  in [`tests/test_imresize.py`](tests/test_imresize.py)). This project's Set14 is the full
+  14-image variant from that distribution — published SR papers' "Set14" numbers have been
+  reported over 11-, 12- and 14-image subsets depending on source, so this count is worth
+  stating explicitly for anyone comparing numbers against this project's own.
+- **`pyiqa` (IQA-PyTorch) does not default to these conventions.** Its PSNR metric
+  defaults to full RGB (`test_y_channel=False`), and its SSIM defaults to Y-channel but in
+  full-range YIQ (`color_space='yiq'`) — not the studio-range BT.601 YCbCr that MATLAB's
+  own `rgb2ycbcr.m` and this project's Y-channel figures use. To reproduce this project's
+  Y-channel PSNR/SSIM using `pyiqa`, pass `color_space='ycbcr'` explicitly; the library's
+  own default will not match.
 
 ## Config overrides and subclass defaults
 
@@ -352,6 +389,15 @@ pytest
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Model weights
+
+No pretrained checkpoint is released yet. When one is, it will be MIT-licensed by
+default, matching the code. One caveat worth stating up front: training data such as
+DIV2K carries an "academic research purpose only" restriction, and whether that kind of
+training-data restriction legally propagates to a derivative model's weights is a
+genuinely unsettled question in ML/copyright practice today — a prospective commercial
+user of a future checkpoint should treat that as an open question, not a resolved one.
 
 ## License
 
