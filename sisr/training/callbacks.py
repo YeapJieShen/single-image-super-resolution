@@ -513,8 +513,11 @@ class GradNormLogger(Callback):
     after the backward pass and logs it as the ``"diag/grad_norm"`` scalar.
 
     Args:
-        log_every_n_steps (int): Compute and log every *n* training steps.
-            Defaults to ``100``.
+        log_every_n_steps (int): Compute and log every *n* **batches**.
+            Defaults to ``100``. The unit is batches, not optimizer steps, so
+            the configured cadence means the same thing under automatic and
+            manual optimization — and matches the axis the emitted scalar is
+            plotted on. See :func:`_logger_step`.
     """
 
     def __init__(self, log_every_n_steps: int = 100):
@@ -533,7 +536,7 @@ class GradNormLogger(Callback):
             trainer: The trainer instance.
             pl_module: The model being trained.
         """
-        if trainer.global_step % self.log_every_n_steps != 0:
+        if _logger_step(trainer) % self.log_every_n_steps != 0:
             return
 
         grad_norms = [p.grad.detach().norm(2) for p in pl_module.parameters() if p.grad is not None]
@@ -550,7 +553,9 @@ class WeightHistogramLogger(Callback):
     Groups by prefix, e.g. ``model.feat``, ``model.mapping``, ``model.recon``.
 
     Args:
-        log_every_n_steps (int): Log histograms every *n* training steps.
+        log_every_n_steps (int): Log histograms every *n* **batches**.
+            The unit is batches, not optimizer steps, matching the axis the
+            histograms are written on — see :func:`_logger_step`.
             Defaults to ``10000``. Histograms dominate event-file size, and
             one is written per tracked parameter on every cadence hit — at
             the templates' 1M-step schedule the old default of ``100`` was
@@ -582,7 +587,8 @@ class WeightHistogramLogger(Callback):
             batch: Unused.
             batch_idx: Unused.
         """
-        if trainer.global_step % self.log_every_n_steps != 0:
+        step = _logger_step(trainer)
+        if step % self.log_every_n_steps != 0:
             return
 
         tb_logger = next(
@@ -602,7 +608,7 @@ class WeightHistogramLogger(Callback):
             if param.requires_grad and name.startswith("model."):
                 parts = name.split(".", 2)
                 tb_name = parts[0] + "." + "/".join(parts[1:])
-                experiment.add_histogram(tb_name, param, global_step=trainer.global_step)
+                experiment.add_histogram(tb_name, param, global_step=step)
 
 
 def _validate_monitor_metric(
