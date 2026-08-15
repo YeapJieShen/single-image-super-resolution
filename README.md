@@ -292,27 +292,26 @@ and a subclass-only default absent from the checkpoint's stored dict. Earlier ve
 of this README described patching a copy of a checkpoint's `hyper_parameters` before
 re-scoring; that recipe existed for this failure only, and is obsolete.
 
-**A dotted command-line override still resets the config it touches.** This is a
-separate defect with a separate cause — no checkpoint is involved, and it is not fixed.
-Setting one field of a subclass-typed config from the CLI applies that field but
-rebuilds the object as its bare annotation type, so every *other* default the subclass
-had overridden silently reverts with it:
+**A dotted command-line override used to reset the config it touched — fixed.** This was a
+separate defect from the checkpoint issue above, with a separate cause: jsonargparse treats a
+pure dataclass as a *closed* type by default, so setting one field of a subclass-typed config
+from the CLI rebuilt the whole object from its **bare annotation**, and every *other* default
+the subclass had overridden silently reverted with it. `SRLightningCLI.__init__` now calls
+`set_parsing_settings(subclasses_enabled=[SREvalConfig, SRTrainingConfig])` before the parser
+builds, so a dotted override applies its field without rebuilding the rest:
 
 ```bash
 sisr validate --config templates/config.srresnet.template.yaml \
               --model.init_args.eval_config.ssim_impl=wang
 ```
 
-resolves `eval_config` to the base `SREvalConfig`. `ssim_impl` is `wang` as asked, but
-`crop_border` drops `4` → `0` and `psnr_channels` drops `['RGB', 'Y']` → `['RGB']`, and
-nothing in the logs says so. The same happens to `training_config` — these two
-dataclass-typed config fields are the affected shape, not subclass-typed fields
-generally: `model` itself has subclasses (`SRResNet` among them) and survives a dotted
-override of one of its own scalar fields with every other value intact. Naming the class
-in a separate argument does not help; the dotted override that follows resets it again.
+correctly keeps `eval_config` as `SRResNetEvalConfig`. `ssim_impl` is `wang` as asked, and
+`crop_border` stays `4` and `psnr_channels` stays `['RGB', 'Y']` — nothing else reverts. The
+same now holds for `training_config`. Naming the class in a separate argument was never
+necessary and still isn't; the dotted override applies cleanly on its own.
 
-Two forms do work. Set the field in YAML — in the config itself, or in an overlay passed
-as a second `--config`:
+Two forms also work, and remain useful when overriding more than one field at once. Set the
+field in YAML — in the config itself, or in an overlay passed as a second `--config`:
 
 ```yaml
 model:
@@ -329,7 +328,7 @@ sisr validate --config templates/config.srresnet.template.yaml \
   --model.init_args.eval_config='{"class_path": "sisr.models.srresnet.SRResNetEvalConfig", "init_args": {"ssim_impl": "wang"}}'
 ```
 
-`--print_config` tells the two apart at a glance: the resolved `eval_config` shows a
+`--print_config` confirms the subclass survived either way: the resolved `eval_config` shows a
 `class_path` when the subclass survived, and a bare key/value mapping when it did not.
 
 ## ONNX export
