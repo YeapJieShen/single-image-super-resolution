@@ -67,7 +67,9 @@ def test_benchmark_setup_datamodule_without_test_names_is_safe():
     assert cb.dataset_names == []
 
 
-def _make_step_axis_trainer(global_step: int, batches_that_stepped: int) -> SimpleNamespace:
+def _make_step_axis_trainer(
+    global_step: int, batches_that_stepped: int, loggers: list | None = None
+) -> SimpleNamespace:
     """Trainer stub whose two step axes disagree, as they do under manual optimization.
 
     SRGAN steps D and G per batch, so ``global_step`` is 2x the batch count while
@@ -81,6 +83,7 @@ def _make_step_axis_trainer(global_step: int, batches_that_stepped: int) -> Simp
         fit_loop=SimpleNamespace(
             epoch_loop=SimpleNamespace(_batches_that_stepped=batches_that_stepped)
         ),
+        loggers=[] if loggers is None else loggers,
     )
 
 
@@ -222,7 +225,8 @@ def _make_gradnorm_pl_module():
 
 def test_grad_norm_logger_logs_on_cadence():
     cb = GradNormLogger(log_every_n_steps=10)
-    trainer = SimpleNamespace(global_step=10)
+    # batch axis ON cadence, optimizer axis OFF -- the gate must read the former.
+    trainer = _make_step_axis_trainer(global_step=17, batches_that_stepped=10)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(trainer, pl_module)
     pl_module.log.assert_called_once()
@@ -233,7 +237,8 @@ def test_grad_norm_logger_logs_on_cadence():
 
 def test_grad_norm_logger_skips_off_cadence():
     cb = GradNormLogger(log_every_n_steps=10)
-    trainer = SimpleNamespace(global_step=7)
+    # batch axis OFF cadence, optimizer axis ON.
+    trainer = _make_step_axis_trainer(global_step=20, batches_that_stepped=7)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(trainer, pl_module)
     pl_module.log.assert_not_called()
@@ -245,7 +250,7 @@ def test_grad_norm_logger_handles_none_grads():
     p = torch.zeros(4, requires_grad=True)
     p.grad = None
     pl_module.parameters = MagicMock(return_value=[p])
-    trainer = SimpleNamespace(global_step=1)
+    trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1)
     cb.on_after_backward(trainer, pl_module)
     args, _ = pl_module.log.call_args
     assert args[1] == 0.0
@@ -265,7 +270,7 @@ def test_grad_norm_logger_uses_grad_detach_not_grad_data():
     assert "p.grad.detach()" in src
 
     cb = GradNormLogger(log_every_n_steps=1)
-    trainer = SimpleNamespace(global_step=1)
+    trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(trainer, pl_module)
     args, _ = pl_module.log.call_args
@@ -273,14 +278,102 @@ def test_grad_norm_logger_uses_grad_detach_not_grad_data():
     assert args[1] == pytest.approx(10.0)
 
 
+def test_grad_norm_logger_cadence_counts_batches_not_optimizer_steps():
+    """``log_every_n_steps`` must gate on the axis ``self.log`` writes to.
+
+    ``trainer.global_step`` counts *optimizer* steps, so under manual
+    optimization gating on it makes the configured cadence mean a different
+    number of batches per training paradigm, and leaves ``diag/grad_norm``
+    sampled against one counter while plotted against another.
+
+    Both directions are asserted deliberately: a stub whose two axes agree, or a
+    single direction, passes under a gate reading either axis.
+    """
+    # global_step ON cadence, batch count OFF -> must not fire.
+    cb = GradNormLogger(log_every_n_steps=10)
+    pl_module = _make_gradnorm_pl_module()
+    cb.on_after_backward(_make_step_axis_trainer(global_step=10, batches_that_stepped=7), pl_module)
+    pl_module.log.assert_not_called()
+
+    # global_step OFF cadence, batch count ON -> must fire.
+    cb = GradNormLogger(log_every_n_steps=10)
+    pl_module = _make_gradnorm_pl_module()
+    cb.on_after_backward(
+        _make_step_axis_trainer(global_step=14, batches_that_stepped=10), pl_module
+    )
+    pl_module.log.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # WeightHistogramLogger
 # ---------------------------------------------------------------------------
 
 
+def _make_histogram_probe(tmp_path: Path, monkeypatch):
+    """Real ``TensorBoardLogger`` with ``add_histogram`` spied, plus a stub module.
+
+    A real logger, not a mock: the callback reaches ``tb_logger.experiment``
+    through an ``isinstance`` check on ``trainer.loggers``, so a bare mock would
+    be filtered out and every assertion below would pass vacuously.
+    """
+    import lightning.pytorch.loggers as pl_loggers
+
+    pl_module = MagicMock()
+    pl_module.named_parameters = MagicMock(
+        return_value=[("model.feat.0.weight", torch.nn.Parameter(torch.rand(4, 3, 3, 3)))]
+    )
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
+    add_histogram = MagicMock(wraps=tb_logger.experiment.add_histogram)
+    monkeypatch.setattr(tb_logger.experiment, "add_histogram", add_histogram)
+    return pl_module, tb_logger, add_histogram
+
+
+def test_weight_histogram_logger_cadence_counts_batches_not_optimizer_steps(
+    tmp_path: Path, monkeypatch
+):
+    """Same gate, same reason as the ``GradNormLogger`` case above."""
+    pl_module, tb_logger, add_histogram = _make_histogram_probe(tmp_path, monkeypatch)
+    cb = WeightHistogramLogger(log_every_n_steps=10)
+
+    # global_step ON cadence, batch count OFF -> must not fire.
+    trainer = _make_step_axis_trainer(global_step=10, batches_that_stepped=7)
+    trainer.loggers = [tb_logger]
+    cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+    add_histogram.assert_not_called()
+
+    # global_step OFF cadence, batch count ON -> must fire.
+    trainer = _make_step_axis_trainer(global_step=14, batches_that_stepped=10)
+    trainer.loggers = [tb_logger]
+    cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+    add_histogram.assert_called_once()
+    tb_logger.finalize("success")
+
+
+def test_weight_histogram_logger_writes_on_the_batch_counted_axis_not_global_step(
+    tmp_path: Path, monkeypatch
+):
+    """Histograms go to the raw TB experiment, so they must carry the batch axis.
+
+    This is the same defect fixed for benchmark images: writing at
+    ``trainer.global_step`` puts every histogram at twice the step of the loss
+    curves it is read against, for any module under manual optimization with two
+    optimizers.
+    """
+    pl_module, tb_logger, add_histogram = _make_histogram_probe(tmp_path, monkeypatch)
+    cb = WeightHistogramLogger(log_every_n_steps=1)
+
+    trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
+    trainer.loggers = [tb_logger]
+    cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
+    tb_logger.finalize("success")
+
+    add_histogram.assert_called_once()
+    assert add_histogram.call_args.kwargs["global_step"] == 200
+
+
 def test_weight_histogram_logger_skips_off_cadence():
     cb = WeightHistogramLogger(log_every_n_steps=10)
-    trainer = SimpleNamespace(global_step=7, loggers=[])
+    trainer = _make_step_axis_trainer(global_step=20, batches_that_stepped=7)
     pl_module = MagicMock()
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
     pl_module.named_parameters.assert_not_called()
@@ -288,7 +381,7 @@ def test_weight_histogram_logger_skips_off_cadence():
 
 def test_weight_histogram_logger_skips_when_no_tb_logger():
     cb = WeightHistogramLogger(log_every_n_steps=1)
-    trainer = SimpleNamespace(global_step=1, loggers=[])
+    trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1)
     pl_module = MagicMock()
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
     pl_module.named_parameters.assert_not_called()
@@ -1664,7 +1757,7 @@ def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(
     add_histogram = MagicMock(wraps=experiment.add_histogram)
     monkeypatch.setattr(experiment, "add_histogram", add_histogram)
 
-    trainer = SimpleNamespace(global_step=1, loggers=[tb_logger])
+    trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1, loggers=[tb_logger])
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
     tb_logger.finalize("success")
 
