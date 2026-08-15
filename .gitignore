@@ -11,6 +11,10 @@ templates/*
 # LLM agentic coding artifacts (brainstorming specs, implementation plans).
 docs/superpowers/
 
+# mattpocock-skills engineering-skill config (dev/personal tooling only, not tracked)
+/docs/agents/
+/.scratch/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
