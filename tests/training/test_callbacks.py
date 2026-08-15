@@ -67,6 +67,62 @@ def test_benchmark_setup_datamodule_without_test_names_is_safe():
     assert cb.dataset_names == []
 
 
+def _make_step_axis_trainer(global_step: int, batches_that_stepped: int) -> SimpleNamespace:
+    """Trainer stub whose two step axes disagree, as they do under manual optimization.
+
+    SRGAN steps D and G per batch, so ``global_step`` is 2x the batch count while
+    Lightning keeps ``_batches_that_stepped`` batch-counted "disregarding multiple
+    optimizers on purpose for loggers" (``loops/training_epoch_loop.py``). A stub
+    where the two agree passes whichever axis the callback reads, so it observes
+    nothing — the disagreement is the entire point of this fixture.
+    """
+    return SimpleNamespace(
+        global_step=global_step,
+        fit_loop=SimpleNamespace(
+            epoch_loop=SimpleNamespace(_batches_that_stepped=batches_that_stepped)
+        ),
+    )
+
+
+def _make_benchmark_pl_module() -> MagicMock:
+    """Stub module exercising only ``_collect_batch``'s PSNR path."""
+    pl_module = MagicMock()
+    pl_module.eval_config = SimpleNamespace(
+        crop_border=0, psnr_keys=["RGB"], ssim_keys=[], perceptual_keys=[]
+    )
+    pl_module.predict_rgb = MagicMock(return_value=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)))
+    pl_module._build_metric_tensors = MagicMock(side_effect=lambda s, h: {"RGB": (s, h)})
+    return pl_module
+
+
+def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
+    """Image strips and per-image scalars must share the axis ``self.log`` uses.
+
+    Logging at ``trainer.global_step`` puts every benchmark image at twice the
+    step of the loss curves it is read against, for any module training under
+    manual optimization with two optimizers.
+    """
+    cb = BenchmarkImageLogger(log_per_image_metrics=True)
+    cb._buffer["Set5"] = []
+    cb._tb_experiment = MagicMock()
+    trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
+    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+
+    cb._collect_batch(
+        trainer,
+        _make_benchmark_pl_module(),
+        batch=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)),
+        batch_idx=0,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=True,
+    )
+
+    assert cb._tb_experiment.add_image.call_args.kwargs["global_step"] == 200
+    assert cb._tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
+
+
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger._bicubic_to
 # ---------------------------------------------------------------------------
@@ -1215,7 +1271,14 @@ def test_benchmark_collect_batch_emits_add_image_and_add_scalar(tmp_path: Path, 
     cb = BenchmarkImageLogger(
         dataset_names=["Set5"], log_every_n_val_runs=1, log_per_image_metrics=True
     )
-    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    trainer = SimpleNamespace(
+        datamodule=None,
+        loggers=[tb_logger],
+        # Two axes, deliberately unequal: emission must follow the batch-counted
+        # one, so a stub where they agree could not observe a regression here.
+        global_step=42,
+        fit_loop=SimpleNamespace(epoch_loop=SimpleNamespace(_batches_that_stepped=21)),
+    )
     cb.setup(trainer, pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()  # SRCNN + RGBProcessor: LR/SR/HR all 16x16
     cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
@@ -1263,7 +1326,14 @@ def test_benchmark_collect_batch_default_omits_per_image_scalars_but_keeps_image
 
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     assert cb.log_per_image_metrics is False
-    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    trainer = SimpleNamespace(
+        datamodule=None,
+        loggers=[tb_logger],
+        # Two axes, deliberately unequal: emission must follow the batch-counted
+        # one, so a stub where they agree could not observe a regression here.
+        global_step=42,
+        fit_loop=SimpleNamespace(epoch_loop=SimpleNamespace(_batches_that_stepped=21)),
+    )
     cb.setup(trainer, pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
     cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
@@ -1303,7 +1373,14 @@ def test_benchmark_collect_batch_log_per_image_metrics_decoupled_from_image_stri
     cb = BenchmarkImageLogger(
         dataset_names=["Set5"], log_every_n_val_runs=99, log_per_image_metrics=True
     )
-    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    trainer = SimpleNamespace(
+        datamodule=None,
+        loggers=[tb_logger],
+        # Two axes, deliberately unequal: emission must follow the batch-counted
+        # one, so a stub where they agree could not observe a regression here.
+        global_step=42,
+        fit_loop=SimpleNamespace(epoch_loop=SimpleNamespace(_batches_that_stepped=21)),
+    )
     cb.setup(trainer, pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
     cb.on_validation_epoch_start(trainer=trainer, pl_module=pl_module)
@@ -1350,7 +1427,14 @@ def test_benchmark_collect_batch_image_strip_first_panel_is_bicubic_at_hr_size(
 
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
-    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    trainer = SimpleNamespace(
+        datamodule=None,
+        loggers=[tb_logger],
+        # Two axes, deliberately unequal: emission must follow the batch-counted
+        # one, so a stub where they agree could not observe a regression here.
+        global_step=42,
+        fit_loop=SimpleNamespace(epoch_loop=SimpleNamespace(_batches_that_stepped=21)),
+    )
     cb.setup(trainer, pl_module=None, stage="fit")
 
     pl_module = _make_real_pl_module()
@@ -1400,7 +1484,14 @@ def test_benchmark_collect_batch_image_strip_upsamples_lr_to_hr_size(tmp_path: P
     monkeypatch.setattr(experiment, "add_image", add_image)
 
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
-    trainer = SimpleNamespace(datamodule=None, loggers=[tb_logger], global_step=42)
+    trainer = SimpleNamespace(
+        datamodule=None,
+        loggers=[tb_logger],
+        # Two axes, deliberately unequal: emission must follow the batch-counted
+        # one, so a stub where they agree could not observe a regression here.
+        global_step=42,
+        fit_loop=SimpleNamespace(epoch_loop=SimpleNamespace(_batches_that_stepped=21)),
+    )
     cb.setup(trainer, pl_module=None, stage="fit")
 
     pl_module = _make_real_pl_module()
