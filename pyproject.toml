@@ -222,3 +222,10 @@ ignore_errors = true
 # versions in dev's environment: torchvision 0.28, tqdm 4.70).
 module = ["torchvision.*", "tqdm.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# onnx is the optional [export] extra, deliberately not part of the default
+# dev install (see test.yml's onnx-export job) — the typecheck job installs
+# only [dev], so the import is unresolved there regardless of stub coverage.
+module = ["onnx"]
+ignore_missing_imports = true
