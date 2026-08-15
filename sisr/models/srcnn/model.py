@@ -4,7 +4,7 @@ Reference: Image Super-Resolution Using Deep Convolutional Networks
 (https://arxiv.org/pdf/1501.00092).
 """
 
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import torch
 
@@ -75,7 +75,9 @@ class SRCNN(SRModel):
             num_filters[-1], num_channels, kernel_size=kernel_sizes[-1], padding=padding
         )
 
-    def _check_architecture(self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]):
+    def _check_architecture(
+        self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]
+    ) -> None:
         """Validates num_filters/kernel_sizes are same-length positive-int tuples."""
         for i, name in zip(
             [num_filters, kernel_sizes], ["num_filters", "kernel_sizes"], strict=False
@@ -104,17 +106,21 @@ class SRCNN(SRModel):
                 f"Got num_filters={num_filters} and kernel_sizes={kernel_sizes}."
             )
 
-    def reset_parameters(self, mean: float = 0.0, std: float = 0.001):
+    def reset_parameters(self, mean: float = 0.0, std: float = 0.001, **kwargs: Any) -> None:
         """Gaussian weight init + zero biases, per the SRCNN paper (https://arxiv.org/pdf/1501.00092).
 
         Args:
             mean: Mean of the weight-init normal distribution.
             std: Standard deviation of the weight-init normal distribution.
+            **kwargs: Unused; absorbed so callers can invoke this
+                polymorphically across architectures (see
+                :meth:`SRModel.reset_parameters`).
         """
         for module in self.modules():
             if isinstance(module, torch.nn.Conv2d):
                 torch.nn.init.normal_(module.weight, mean=mean, std=std)
-                torch.nn.init.constant_(module.bias, 0.0)
+                if module.bias is not None:
+                    torch.nn.init.constant_(module.bias, 0.0)
 
     def forward(
         self,

@@ -69,6 +69,13 @@ dev = [
     # resolves only transitively (via jsonargparse/lightning), which is fragile.
     "pyyaml>=6",
     "ruff>=0.9",
+    "mypy>=1.11",
+    # tests/test_packaging.py builds a real wheel via hatchling's PEP 517
+    # build_wheel() hook to check py.typed actually ships in it, rather than
+    # only asserting the pyproject.toml config that's supposed to include it.
+    # Already a [build-system] requirement; declared again here so it's
+    # present outside pip's ephemeral build-isolation environment too.
+    "hatchling>=1.27",
 ]
 # Opt-in: sisr/export.py gates the actual `import onnx` inside to_onnx(),
 # so plain `pip install .` stays onnx-free. onnxruntime is the CI numeric-parity
@@ -181,3 +188,44 @@ convention = "google"
 # Test *names* are the documentation here; writing hundreds of docstrings to
 # satisfy a linter is churn, not clarity.
 "tests/**" = ["D"]
+
+[tool.mypy]
+# Checks that the "modern type hints" style rule (PEP 585/604) is a checked
+# promise, not just convention. Runs over the whole `sisr` package; the
+# overrides below blanket-ignore the modules whose dynamism (Lightning's hook
+# system, jsonargparse's dynamic CLI/subclass resolution) resists useful
+# static typing without a large, separate effort. The mypy CI job is green
+# only because of those overrides -- it is not exercising those modules.
+python_version = "3.12"
+# Pinned rather than left to infer from the host: sisr/cache.py's Windows
+# liveness check uses ctypes.WinDLL, which typeshed only exposes under this
+# platform. Without pinning it, the exact same code type-checks clean on a
+# Windows dev machine and fails with attr-defined errors on Linux/macOS one
+# -- see the typecheck CI job (windows-latest) for the other half of this.
+platform = "win32"
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Lightning's hook system (dynamic **kwargs call signatures, callback
+# protocol) and jsonargparse's dynamic CLI/subclass resolution (dotted
+# overrides, class_path dispatch) make these fight a type checker rather than
+# benefit from one. Ignored wholesale rather than annotated around.
+module = ["sisr.training.*", "sisr.cli"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Neither ships inline types or a py.typed marker (checked against the
+# versions in dev's environment: torchvision 0.28, tqdm 4.70).
+module = ["torchvision.*", "tqdm.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# onnx is the optional [export] extra, deliberately not part of the default
+# dev install (see test.yml's onnx-export job) — the typecheck job installs
+# only [dev], so the import is unresolved there regardless of stub coverage.
+module = ["onnx"]
+ignore_missing_imports = true

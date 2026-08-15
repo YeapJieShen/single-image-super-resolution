@@ -65,6 +65,36 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+  # Type-checks only the modules [tool.mypy]'s overrides don't blanket-ignore
+  # (Lightning's hook system and jsonargparse's dynamic CLI/subclass
+  # resolution make sisr/training/, sisr/cli.py resist useful static typing
+  # without a large, separate effort). Installs the dev extra rather than a
+  # bare `mypy` so it type-checks against the same third-party stubs/versions
+  # the rest of CI runs against.
+  # windows-latest, not ubuntu-latest: sisr/cache.py's ctypes.WinDLL Windows
+  # liveness check is genuine platform-specific code, guarded by a runtime
+  # sys.platform == "win32" check -- but typeshed's ctypes stubs only expose
+  # WinDLL under that same platform, so mypy raises attr-defined errors for it
+  # when its own --platform is anything else. test-matrix already treats
+  # windows-latest as first-class, so this matches, not adds, a supported OS.
+  typecheck:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # See the lint job for why this pins an exact patch version.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-suffix: typecheck
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+      - name: Mypy
+        run: mypy sisr
+
   test-matrix:
     needs: changes
     if: needs.changes.outputs.code == 'true'

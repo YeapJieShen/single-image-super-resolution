@@ -121,6 +121,14 @@ class _VGGFeatureLoss(SRLoss):
     #: Name of the ``torchvision.models`` builder for this depth.
     MODEL_NAME: ClassVar[str]
 
+    # Declared here so attribute access resolves to these types instead of
+    # falling back to nn.Module.__getattr__'s `Tensor | Module` union: `_vgg`
+    # is assigned via object.__setattr__ (see __init__) and `_mean`/`_std` via
+    # register_buffer, neither of which mypy can see as a normal `self.x = ...`.
+    _vgg: torch.nn.Module
+    _mean: torch.Tensor
+    _std: torch.Tensor
+
     def __init__(
         self,
         layer: str = "vgg22",

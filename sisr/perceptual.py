@@ -25,7 +25,22 @@ the module tree: an ``nn.Module`` attribute would put ~230 MB of AlexNet (or
 ~528 MB of VGG16) into every ``state_dict`` this project writes.
 """
 
+from typing import Protocol, runtime_checkable
+
 import torch
+
+
+@runtime_checkable
+class _ResettableMetric(Protocol):
+    """Structural type for the "lpips" branch's net.
+
+    Whatever ``_lpips_metric_cls`` returns (the real torchmetrics class, or a
+    test double standing in for it) is matched by shape rather than base
+    class, so the seam stays swappable.
+    """
+
+    def reset(self) -> None: ...
+
 
 #: Metric name -> is-lower-better. Consumed by the checkpoint-monitor direction
 #: check: PSNR/SSIM are higher-better and SRCheckpoint defaults to mode='max',
@@ -146,6 +161,7 @@ def perceptual_score(
             # The metric object is reused, so its accumulators must not be: LPIPS
             # keeps a list state and would retain one tensor per call for the whole
             # run. Only the per-call value returned above is ever read.
+            assert isinstance(net, _ResettableMetric)  # the "lpips" branch of _cached_net
             net.reset()
             return score
         # require_grad=False matches what the functional path passes for the

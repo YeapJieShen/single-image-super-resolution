@@ -2,7 +2,10 @@
 
 import re
 import tomllib
+import zipfile
 from pathlib import Path
+
+import hatchling.build
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
@@ -56,3 +59,17 @@ def test_perceptual_extra_declares_lpips():
     pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     extras = pyproject["project"]["optional-dependencies"]
     assert any(dep.startswith("lpips") for dep in extras["perceptual"])
+
+
+def test_wheel_ships_py_typed(tmp_path):
+    """sisr/py.typed (PEP 561) makes the package's type annotations a checked
+    promise to consumers of the wheel, not just an internal convention.
+
+    Builds a real wheel via hatchling's PEP 517 build_wheel() hook rather than
+    only reading pyproject.toml's config, so a future include/exclude rule
+    that silently drops the marker is caught here instead of in a user's
+    environment.
+    """
+    wheel_name = hatchling.build.build_wheel(str(tmp_path))
+    with zipfile.ZipFile(tmp_path / wheel_name) as wheel:
+        assert "sisr/py.typed" in wheel.namelist()

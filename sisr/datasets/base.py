@@ -14,7 +14,7 @@ torch-free :mod:`~sisr.datasets.hr_cache`, because it subclasses
 """
 
 import abc
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -99,8 +99,13 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         """Return the number of items the dataset serves."""
 
     @abc.abstractmethod
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the ``(lr_tensor, hr_tensor)`` pair at ``idx``."""
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+        """Return the ``(lr_tensor, hr_tensor)`` pair at ``idx``.
+
+        Paired train/validation datasets return the tuple; prediction-only
+        datasets (no ground-truth HR to pair with) return a lone LR tensor —
+        see :class:`~sisr.datasets.predict.PredictDataset`.
+        """
 
 
 class HRCachedTrainDataset(SRDataset):
@@ -179,7 +184,11 @@ class HRCachedTrainDataset(SRDataset):
             sizes.append((h, w))
         return sizes
 
-    def _parallel_build_hr(self, ctx: LMDBCacheBuildContext, process_fn) -> None:
+    def _parallel_build_hr(
+        self,
+        ctx: LMDBCacheBuildContext,
+        process_fn: Callable[[Path, int], list[tuple[str, bytes]]],
+    ) -> None:
         """Runs the shared HR-decode build over :attr:`img_paths`.
 
         *process_fn* is passed in rather than imported here so each
