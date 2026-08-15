@@ -49,6 +49,28 @@ class BenchmarkSample(NamedTuple):
     perceptual: dict[str, float]
 
 
+def _logger_step(trainer: lightning.Trainer) -> int:
+    """Return the step axis Lightning writes ``self.log`` metrics on.
+
+    Deliberately not ``trainer.global_step``, which counts *optimizer* steps: a
+    module under manual optimization with two optimizers (SRGAN steps D and G
+    per batch) advances it twice per batch, so anything logged against it lands
+    at 2x the step of every ``self.log`` scalar. Lightning maintains
+    ``_batches_that_stepped`` for precisely this reason — "increased once per
+    batch disregarding multiple optimizers on purpose for loggers" — and reads
+    it back in ``logger_connector``; its own ``LearningRateMonitor`` and
+    ``DeviceStatsMonitor`` reach for the same private attribute, which is what
+    makes matching them here the correct call rather than a shortcut.
+
+    Args:
+        trainer: The active trainer.
+
+    Returns:
+        The batch-counted step shared by every ``self.log`` metric.
+    """
+    return trainer.fit_loop.epoch_loop._batches_that_stepped
+
+
 class BenchmarkImageLogger(Callback):
     """Logs bicubic|SR|HR image composites and PSNR/SSIM to TensorBoard for held-out sets.
 
@@ -342,6 +364,10 @@ class BenchmarkImageLogger(Callback):
         dataset = source_dataloaders[dataloader_idx].dataset
         batch_size = lr_img.size(0)
         n = pl_module.eval_config.crop_border
+        # Resolved once per batch, and only when something will actually be
+        # emitted — a trainer with no fit loop is legitimate when no TB logger
+        # is attached, and the guard below already skips every emission then.
+        step = _logger_step(trainer) if self._tb_experiment is not None else 0
 
         for i in range(batch_size):
             global_idx = batch_idx * batch_size + i
@@ -384,7 +410,6 @@ class BenchmarkImageLogger(Callback):
                 continue
 
             if self.log_per_image_metrics:
-                step = trainer.global_step
                 for key, psnr_val in psnr_dict.items():
                     tag = f"per_image/{dataset_name}/psnr/{key}/{filename}"
                     self._tb_experiment.add_scalar(tag, psnr_val, global_step=step)
@@ -415,9 +440,7 @@ class BenchmarkImageLogger(Callback):
             strip = torchvision.utils.make_grid(
                 [bicubic, sr_padded, hr_cpu], nrow=3, padding=2, pad_value=0.5
             )
-            self._tb_experiment.add_image(
-                f"{dataset_name}/{filename}", strip, global_step=trainer.global_step
-            )
+            self._tb_experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
     def _flush_buffer(self, pl_module: lightning.LightningModule):
         """Log per-set mean PSNR/SSIM/perceptual scores from the buffered samples.
