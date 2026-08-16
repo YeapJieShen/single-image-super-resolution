@@ -616,9 +616,9 @@ def _validate_monitor_metric(
 ) -> None:
     """Raise if ``monitor`` names no logged metric, or is monitored in the wrong direction.
 
-    Shared by :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint`'s ``setup`` —
-    they are siblings under :class:`~lightning.pytorch.callbacks.ModelCheckpoint`,
-    not parent/child, so this check cannot be reused via ``super()`` across them.
+    Implementation behind :meth:`_SRCheckpointBase._validate_monitor`, which is
+    how every caller reaches it — ``label``/``monitor``/``mode`` are all ``self``
+    there. Kept as a module-level function only because the rule is pure.
 
     The direction half exists because both classes default to ``mode='max'``,
     which is right for PSNR/SSIM and exactly inverted for LPIPS/DISTS — the
@@ -764,7 +764,94 @@ class _RollingSaveMixin:
             self._remove_checkpoint(trainer, self._rolling.pop(0))
 
 
-class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
+class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
+    """Everything :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint` share.
+
+    They were siblings under ``ModelCheckpoint`` rather than parent and child,
+    which forced the filename construction, the rolling-mode ``save_top_k``
+    rule and the monitor validation to be written twice or reached through a
+    free function taking the caller's identity as an argument. They are two
+    adapters over one module, so that module now exists.
+
+    Subclasses supply defaults and, where they differ, a ``_save_checkpoint``
+    payload. Nothing here decides what a checkpoint *contains*.
+    """
+
+    def __init__(
+        self,
+        monitor_metric: str | None = "psnr/val/RGB",
+        save_top_k: int = 3,
+        dirpath: str | None = None,
+        filename_prefix: str = "sr",
+        mode: str = "max",
+        keep_last: int = 3,
+        **kwargs: Any,
+    ):
+        if monitor_metric is None:
+            # Rolling: no metric in the filename (there is none), and step
+            # must be in it or every save overwrites the last.
+            filename = f"{filename_prefix}-{{step}}"
+            save_top_k = -1
+        else:
+            # '/' is a path separator; a monitor tag carries several.
+            label = monitor_metric.replace("/", "_")
+            filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
+        super().__init__(
+            monitor=monitor_metric,
+            mode=mode,
+            save_top_k=save_top_k,
+            dirpath=dirpath,
+            filename=filename,
+            auto_insert_metric_name=False,
+            **kwargs,
+        )
+        self._init_rolling(keep_last, filename_prefix)
+
+    def _validate_monitor(self, pl_module: lightning.LightningModule) -> None:
+        """Raise if this callback's ``monitor``/``mode`` pair is unloggable or inverted.
+
+        Args:
+            pl_module: The model being trained; must expose ``eval_config``.
+
+        Raises:
+            MisconfigurationException: Per :func:`_validate_monitor_metric`.
+        """
+        _validate_monitor_metric(type(self).__name__, self.monitor, pl_module, mode=self.mode)
+
+    def setup(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        stage: str,
+    ) -> None:
+        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+
+        Lightning itself only raises ``MisconfigurationException`` for a
+        missing monitor once the val loop has already run at least once
+        (``ModelCheckpoint._save_topk_checkpoint``, gated on
+        ``val_loop._has_run``) — with a long ``val_check_interval`` that is a
+        late, expensive-to-reach crash. This moves the same failure to startup.
+
+        Args:
+            trainer: The active trainer.
+            pl_module: The model being trained; must expose ``eval_config``.
+            stage: Lightning trainer stage. Only ``"fit"`` is checked — the
+                monitored tags are val-loop metrics, so they are never logged
+                under ``validate``/``test``/``predict`` and demanding them
+                there would reject configs valid for the stage being run.
+
+        Raises:
+            MisconfigurationException: If ``monitor`` does not name a metric
+                ``SRLightning`` will log during ``fit``, or if ``mode``
+                disagrees with that metric's direction.
+        """
+        super().setup(trainer, pl_module, stage)
+        if stage != "fit":
+            return
+        self._validate_monitor(pl_module)
+
+
+class SRCheckpoint(_SRCheckpointBase):
     """Model checkpoint that monitors a super-resolution quality metric.
 
     A thin convenience wrapper around
@@ -806,35 +893,6 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
             :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
     """
 
-    def __init__(
-        self,
-        monitor_metric: str | None = "psnr/val/RGB",
-        save_top_k: int = 3,
-        dirpath: str | None = None,
-        filename_prefix: str = "sr",
-        mode: str = "max",
-        keep_last: int = 3,
-        **kwargs: Any,
-    ):
-        if monitor_metric is None:
-            # Rolling: no metric in the filename (there is none), and step
-            # must be in it or every save overwrites the last.
-            filename = f"{filename_prefix}-{{step}}"
-            save_top_k = -1
-        else:
-            label = monitor_metric.replace("/", "_")
-            filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
-        super().__init__(
-            monitor=monitor_metric,
-            mode=mode,
-            save_top_k=save_top_k,
-            dirpath=dirpath,
-            filename=filename,
-            auto_insert_metric_name=False,
-            **kwargs,
-        )
-        self._init_rolling(keep_last, filename_prefix)
-
     def _save_checkpoint(self, trainer: lightning.Trainer, filepath: str) -> None:
         """Save via :class:`~lightning.pytorch.callbacks.ModelCheckpoint`, then enforce rolling.
 
@@ -847,46 +905,8 @@ class SRCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         # docstring for why a rolling window can't be expressed via save_top_k alone.
         self._enforce_rolling_window(trainer, filepath)
 
-    def setup(
-        self,
-        trainer: lightning.Trainer,
-        pl_module: lightning.LightningModule,
-        stage: str,
-    ) -> None:
-        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
 
-        Lightning itself only raises ``MisconfigurationException`` for a
-        missing monitor once the val loop has already run at least once
-        (``ModelCheckpoint._save_topk_checkpoint``, gated on
-        ``val_loop._has_run``) — with a long ``val_check_interval`` that is a
-        late, expensive-to-reach crash. This moves the same failure to
-        startup by checking ``monitor`` against ``pl_module.eval_config.psnr_keys``
-        / ``ssim_keys`` (the same seams ``SRLightning`` logs val PSNR/SSIM
-        from) up front, before any training happens.
-
-        Args:
-            trainer: The active trainer.
-            pl_module: The model being trained; must expose ``eval_config``
-                (an :class:`SREvalConfig`).
-            stage: Lightning trainer stage. Only ``"fit"`` is checked — the
-                monitored tags are val-loop metrics, so they are never logged
-                under ``validate``/``test``/``predict`` and demanding them
-                there would reject configs that are perfectly valid for the
-                stage actually being run.
-
-        Raises:
-            MisconfigurationException: If ``monitor`` does not name a
-                metric ``SRLightning`` will log during ``fit``, or if
-                ``mode`` disagrees with that metric's direction (PSNR/SSIM
-                are higher-is-better; LPIPS/DISTS are lower-is-better).
-        """
-        super().setup(trainer, pl_module, stage)
-        if stage != "fit":
-            return
-        _validate_monitor_metric("SRCheckpoint", self.monitor, pl_module, mode=self.mode)
-
-
-class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
+class SRWeightsCheckpoint(_SRCheckpointBase):
     """Model checkpoint that saves bare, optimizer-free weights as ``.pt`` files.
 
     A distributable sibling to :class:`SRCheckpoint`: that class produces resumable
@@ -952,22 +972,15 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         attribute: str = "model",
         **kwargs: Any,
     ):
-        if monitor_metric is None:
-            filename = f"{filename_prefix}-{{step}}"
-            save_top_k = -1
-        else:
-            label = monitor_metric.replace("/", "_")
-            filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
         super().__init__(
-            monitor=monitor_metric,
-            mode=mode,
+            monitor_metric=monitor_metric,
             save_top_k=save_top_k,
             dirpath=dirpath,
-            filename=filename,
-            auto_insert_metric_name=False,
+            filename_prefix=filename_prefix,
+            mode=mode,
+            keep_last=keep_last,
             **kwargs,
         )
-        self._init_rolling(keep_last, filename_prefix)
         self.attribute = attribute
 
     @property
@@ -1034,7 +1047,6 @@ class SRWeightsCheckpoint(_RollingSaveMixin, ModelCheckpoint):
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
-        _validate_monitor_metric("SRWeightsCheckpoint", self.monitor, pl_module, mode=self.mode)
         if not hasattr(pl_module, self.attribute):
             raise MisconfigurationException(
                 f"`SRWeightsCheckpoint(attribute={self.attribute!r})` has nothing to save: "
