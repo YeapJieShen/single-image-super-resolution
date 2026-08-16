@@ -28,6 +28,7 @@ from sisr.training import (
     WeightHistogramLogger,
 )
 from sisr.training.callbacks import BenchmarkSample
+from sisr.training.scoring import SRScorer
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -88,13 +89,17 @@ def _make_step_axis_trainer(
 
 
 def _make_benchmark_pl_module() -> MagicMock:
-    """Stub module exercising only ``_collect_batch``'s PSNR path."""
+    """Stub module exercising only ``_collect_batch``'s PSNR path.
+
+    Carries a **real** :class:`SRScorer` over a real ``SREvalConfig`` rather
+    than a mocked one: the scorer is the thing under test at this seam, and
+    stubbing it would let the callback stop scoring entirely without failing.
+    """
     pl_module = MagicMock()
-    pl_module.eval_config = SimpleNamespace(
-        crop_border=0, psnr_keys=["RGB"], ssim_keys=[], perceptual_keys=[]
-    )
+    eval_config = SREvalConfig(crop_border=0, psnr_channels=["RGB"], ssim_channels=[])
+    pl_module.eval_config = eval_config
     pl_module.predict_rgb = MagicMock(return_value=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)))
-    pl_module._build_metric_tensors = MagicMock(side_effect=lambda s, h: {"RGB": (s, h)})
+    pl_module.scorer = SRScorer(eval_config)
     return pl_module
 
 
@@ -129,7 +134,7 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
 def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
     """The benchmark path must score PSNR with the same reduction as validation.
 
-    ``SRLightning._mean_psnr`` uses ``dim=(1,2,3)`` — per-image PSNR then batch
+    ``SRScorer.psnr`` uses ``dim=(1,2,3)`` — per-image PSNR then batch
     mean — and documents that reduction as deliberate. ``_collect_batch`` used
     to call ``torchmetrics`` directly with the default ``dim=None``, which pools
     the whole batch into one PSNR. The two agree today only because this path
@@ -138,7 +143,7 @@ def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
     silently changed every ``psnr/{set}/{key}`` number.
 
     Asserted through the emitted value rather than by spying on the call: a
-    stub ``_mean_psnr`` returns a sentinel, and the buffered sample must carry
+    stub ``SRScorer.psnr`` returns a sentinel, and the buffered sample must carry
     it. A callback computing its own PSNR cannot produce the sentinel, so this
     goes red against the direct-torchmetrics version without caring *how* the
     module is reached.
@@ -146,7 +151,7 @@ def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
     cb = BenchmarkImageLogger()
     cb._buffer["Set5"] = []
     pl_module = _make_benchmark_pl_module()
-    pl_module._mean_psnr = MagicMock(return_value=torch.tensor(42.0))
+    pl_module.scorer.psnr = MagicMock(return_value=torch.tensor(42.0))
     dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
 
     cb._collect_batch(
@@ -1320,7 +1325,7 @@ def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering()
         hr_old = hr_cropped[i].unsqueeze(0).cpu()
         sr_old = sr_old[..., n:-n, n:-n]
         hr_old = hr_old[..., n:-n, n:-n]
-        metric_tensors_old = pl_module._build_metric_tensors(sr_old, hr_old)
+        metric_tensors_old = pl_module.scorer.metric_tensors(sr_old, hr_old)
         psnr_old = {
             key: torchmetrics.functional.image.peak_signal_noise_ratio(
                 *metric_tensors_old[key], data_range=1.0
@@ -1337,7 +1342,7 @@ def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering()
         # Shipped ordering: crop the per-image slice directly, no intervening copy.
         sr_new = sr[i : i + 1][..., n:-n, n:-n]
         hr_new = hr_cropped[i : i + 1][..., n:-n, n:-n]
-        metric_tensors_new = pl_module._build_metric_tensors(sr_new, hr_new)
+        metric_tensors_new = pl_module.scorer.metric_tensors(sr_new, hr_new)
         psnr_new = {
             key: torchmetrics.functional.image.peak_signal_noise_ratio(
                 *metric_tensors_new[key], data_range=1.0
@@ -1390,7 +1395,7 @@ def test_benchmark_logger_uses_module_ssim_impl():
 
     with torch.no_grad():
         sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
-    metric_tensors = pl_module._build_metric_tensors(sr, hr_cropped)
+    metric_tensors = pl_module.scorer.metric_tensors(sr, hr_cropped)
     expected = sisr.ssim.daala_ssim(*metric_tensors["Y"]).item()
 
     sample = cb._buffer["Set5"][0]
@@ -1733,7 +1738,7 @@ def test_benchmark_test_epoch_end_logs_means():
 
 def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
     """_collect_batch must pass the per-image, border-cropped SR/HR pair into
-    pl_module._mean_perceptual (mocked here at its perceptual_score seam, so no
+    pl_module.scorer.perceptual (mocked here at its perceptual_score seam, so no
     real LPIPS/DISTS weights load) -- not the un-cropped batch-level tensors or
     anything else in scope. The mock's return depends on sr/hr
     (``sr.sum() - hr.sum()``) rather than being a constant, so a wrong tensor
@@ -1741,7 +1746,7 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
     non-zero crop_border also means a wrong (un-cropped) pair differs in shape,
     not just content."""
     monkeypatch.setattr(
-        "sisr.training.lightning_module.perceptual_score",
+        "sisr.training.scoring.perceptual_score",
         lambda name, sr, hr, lpips_net: sr.sum() - hr.sum(),
     )
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)

@@ -341,10 +341,11 @@ class BenchmarkImageLogger(Callback):
         slices — mirroring the primary-val-loader path in
         ``SRLightning.validation_step`` — so only the scalar ``.item()``
         results ever leave the GPU. SSIM and perceptual scores go through
-        ``pl_module._mean_ssim``/``pl_module._mean_perceptual`` rather than calling
-        ``torchmetrics``/``perceptual_score`` here directly, so this callback
-        cannot silently diverge from ``validation_step`` on which SSIM
-        implementation or perceptual backbone a given ``eval_config`` means. When
+        ``pl_module.scorer`` — the same object ``validation_step`` uses — rather
+        than calling ``torchmetrics``/``perceptual_score`` here directly, so
+        this callback cannot silently diverge from ``validation_step`` on the
+        crop, the reductions, or which SSIM/perceptual backbone a given
+        ``eval_config`` means. When
         *should_log_images* (or
         ``self.log_per_image_metrics``), exactly one host transfer per image
         (``lr_img[i]``/``sr[i]``/``hr_img[i]`` each ``.cpu()`` at most once)
@@ -362,7 +363,6 @@ class BenchmarkImageLogger(Callback):
         # Resolve filenames from the underlying dataset for use as TB tags.
         dataset = source_dataloaders[dataloader_idx].dataset
         batch_size = lr_img.size(0)
-        n = pl_module.eval_config.crop_border
         # Resolved once per batch, and only when something will actually be
         # emitted — a trainer with no fit loop is legitimate when no TB logger
         # is attached, and the guard below already skips every emission then.
@@ -372,37 +372,18 @@ class BenchmarkImageLogger(Callback):
             global_idx = batch_idx * batch_size + i
             filename = dataset.img_paths[global_idx].stem
 
-            sr_metric = sr[i : i + 1]
-            hr_metric = hr_cropped[i : i + 1]
-            if n > 0:
-                sr_metric = sr_metric[..., n:-n, n:-n]
-                hr_metric = hr_metric[..., n:-n, n:-n]
-            # Still a private reach: the colorspace split has no public
-            # seam, and duplicating it here would recreate a divergence
-            # this design removed. Keys now come from eval_config, so this is a value
-            # lookup only — the callback no longer decides *which* keys exist.
-            # Same rationale extends to _mean_psnr and _mean_ssim below: they
-            # are the only places that decide the PSNR reduction and which
-            # implementation eval_config.ssim_impl means, so reaching into them
-            # here (rather than calling torchmetrics directly) keeps this path
-            # and validation_step's unable to disagree on what "psnr/..." and
-            # "ssim/..." tag under the same name. PSNR used to call torchmetrics
-            # directly with the default dim=None, which pools the batch instead
-            # of averaging per-image PSNRs; it agreed only because this loop
+            # One scorer object, shared with validation_step, so the two paths
+            # cannot disagree on the crop, the colorspace split, the PSNR
+            # reduction or which SSIM eval_config.ssim_impl names. This used to
+            # be four separate reaches into private SRLightning methods, each
+            # of which could have been "tidied" independently — PSNR in fact
+            # was, calling torchmetrics with the default dim=None (whole-batch
+            # pooling) and agreeing with validation_step only because this loop
             # slices one image at a time.
-            metric_tensors = pl_module._build_metric_tensors(sr_metric, hr_metric)
-            psnr_dict = {
-                key: pl_module._mean_psnr(*metric_tensors[key]).item()
-                for key in pl_module.eval_config.psnr_keys
-            }
-            ssim_dict = {
-                key: pl_module._mean_ssim(*metric_tensors[key]).item()
-                for key in pl_module.eval_config.ssim_keys
-            }
-            perceptual_dict = {
-                name: pl_module._mean_perceptual(name, sr_metric, hr_metric).item()
-                for name in pl_module.eval_config.perceptual_keys
-            }
+            scores = pl_module.scorer.score(sr[i : i + 1], hr_cropped[i : i + 1])
+            psnr_dict = {key: value.item() for key, value in scores.psnr.items()}
+            ssim_dict = {key: value.item() for key, value in scores.ssim.items()}
+            perceptual_dict = {name: value.item() for name, value in scores.perceptual.items()}
             self._buffer[dataset_name].append(
                 BenchmarkSample(filename, psnr_dict, ssim_dict, perceptual_dict)
             )
