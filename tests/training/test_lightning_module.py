@@ -25,6 +25,7 @@ from sisr.processors import (
 )
 from sisr.training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
 from sisr.training.cuda_graph import CUDAGraphStep
+from sisr.training.scoring import SRScorer
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -304,7 +305,7 @@ def test_build_metric_tensors_rgb_only_when_neither_metric_requests_y():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_metric_tensors(sr, hr)
+    tensors = lit.scorer.metric_tensors(sr, hr)
     assert set(tensors) == {"RGB", "R", "G", "B"}
 
 
@@ -323,7 +324,7 @@ def test_build_metric_tensors_union_of_psnr_and_ssim_keys():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_metric_tensors(sr, hr)
+    tensors = lit.scorer.metric_tensors(sr, hr)
     assert "Y" in tensors
 
 
@@ -338,7 +339,7 @@ def test_build_metric_tensors_with_separate_psnr_includes_per_channel():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_metric_tensors(sr, hr)
+    tensors = lit.scorer.metric_tensors(sr, hr)
     assert {"R", "G", "B", "RGB"} <= set(tensors)
 
 
@@ -353,7 +354,7 @@ def test_build_metric_tensors_ycbcr_does_conversion():
     )
     sr = torch.rand(1, 3, 4, 4)
     hr = torch.rand(1, 3, 4, 4)
-    tensors = lit._build_metric_tensors(sr, hr)
+    tensors = lit.scorer.metric_tensors(sr, hr)
     assert "YCbCr" in tensors
     sr_ycc, hr_ycc = tensors["YCbCr"]
     # YCbCr first channel (Y) must differ from input R-channel — verifies
@@ -377,7 +378,7 @@ def test_build_metric_tensors_ycbcr_uses_studio_range_not_full_range():
     )
     sr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(3))
     hr = torch.rand(1, 3, 4, 4, generator=torch.Generator().manual_seed(4))
-    tensors = lit._build_metric_tensors(sr, hr)
+    tensors = lit.scorer.metric_tensors(sr, hr)
     sr_ycc, hr_ycc = tensors["YCbCr"]
     torch.testing.assert_close(sr_ycc, rgb_to_ycbcr_studio(sr))
     torch.testing.assert_close(hr_ycc, rgb_to_ycbcr_studio(hr))
@@ -785,9 +786,9 @@ def test_step_psnr_matches_hand_clamped_reference_not_raw_output():
     sr_model_out, _ = lit._forward_lr(lr)
     _, _, _, sr_rgb, hr_cropped = lit._step((lr, hr))
 
-    scored_psnr = SRLightning._mean_psnr(sr_rgb, hr_cropped)
-    hand_clamped_psnr = SRLightning._mean_psnr(sr_model_out.clamp(0.0, 1.0), hr_cropped)
-    unclamped_psnr = SRLightning._mean_psnr(sr_model_out, hr_cropped)
+    scored_psnr = SRScorer.psnr(sr_rgb, hr_cropped)
+    hand_clamped_psnr = SRScorer.psnr(sr_model_out.clamp(0.0, 1.0), hr_cropped)
+    unclamped_psnr = SRScorer.psnr(sr_model_out, hr_cropped)
 
     torch.testing.assert_close(scored_psnr, hand_clamped_psnr)
     assert not torch.allclose(scored_psnr, unclamped_psnr)
@@ -964,7 +965,7 @@ def test_val_psnr_is_per_image_mean_not_batch_pooled():
     ).mean()
     pooled = psnr_fn(sr, hr, data_range=1.0)  # dim=None -> pools the batch
 
-    batch_val = SRLightning._mean_psnr(sr, hr)
+    batch_val = SRScorer.psnr(sr, hr)
     assert torch.allclose(batch_val, per_image, atol=1e-5)
     assert not torch.allclose(batch_val, pooled, atol=1e-3)
 
@@ -992,10 +993,10 @@ def test_mean_ssim_dispatches_on_eval_config():
     wang = _make_lit_with_ssim_impl("wang")
     daala = _make_lit_with_ssim_impl("daala")
 
-    assert daala._mean_ssim(sr, hr).item() == pytest.approx(
+    assert daala.scorer.ssim(sr, hr).item() == pytest.approx(
         sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12
     )
-    assert wang._mean_ssim(sr, hr).item() != pytest.approx(daala._mean_ssim(sr, hr).item())
+    assert wang.scorer.ssim(sr, hr).item() != pytest.approx(daala.scorer.ssim(sr, hr).item())
 
 
 def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
@@ -1008,7 +1009,7 @@ def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
     construction rather than a bespoke one.
 
     torch.manual_seed seeds SRResNet's weight init for reproducibility, even
-    though _mean_ssim never runs the model forward — sr/hr are independent
+    though SRScorer.ssim never runs the model forward — sr/hr are independent
     inputs — so nothing here is actually seed-sensitive, but a prior task's
     unseeded model was flagged in review and this follows the same discipline.
     """
@@ -1029,7 +1030,7 @@ def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
     sr = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(2))
     hr = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(3))
 
-    result = lit._mean_ssim(sr, hr)
+    result = lit.scorer.ssim(sr, hr)
 
     assert result.item() == pytest.approx(sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12)
     wang_result = structural_similarity_index_measure(sr, hr, data_range=1.0)
@@ -2260,7 +2261,7 @@ def capture_logged_metrics(module: SRLightning) -> dict[str, float]:
 def test_validation_logs_perceptual_tags(monkeypatch):
     """Requested perceptual metrics reach TensorBoard under their own tag family."""
     monkeypatch.setattr(
-        "sisr.training.lightning_module.perceptual_score",
+        "sisr.training.scoring.perceptual_score",
         lambda name, sr, hr, lpips_net: torch.tensor(0.5 if name == "lpips" else 0.25),
     )
     module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips", "dists"]))

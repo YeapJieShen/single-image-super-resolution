@@ -15,20 +15,17 @@ from typing import Any
 
 import lightning
 import torch
-import torchmetrics.functional
 import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
-from ..colorspace import rgb_to_ycbcr_studio
 from ..losses import SRLoss
 from ..models.base import SRModel
-from ..perceptual import perceptual_score
 from ..processors import SRProcessor
-from ..ssim import daala_ssim
 from .config import SREvalConfig, SRTrainingConfig
 from .cuda_graph import CUDAGraphStep
 from .metadata import build_metadata
+from .scoring import SRScorer, metric_tag
 
 
 class SRLightning(lightning.LightningModule):
@@ -94,6 +91,10 @@ class SRLightning(lightning.LightningModule):
         self.processor = processor
         self.training_config = training_config or SRTrainingConfig()
         self.eval_config = eval_config or SREvalConfig()
+        # The scoring path's one owner: crop, colorspace split, both
+        # reductions and the tag grammar. BenchmarkImageLogger uses this
+        # same object, so the two paths cannot disagree.
+        self.scorer = SRScorer(self.eval_config)
         self.criterion = criterion if criterion is not None else torch.nn.MSELoss()
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -467,98 +468,6 @@ class SRLightning(lightning.LightningModule):
             _recurse(v, k)
 
         return result
-
-    def _build_metric_tensors(
-        self, sr: torch.Tensor, hr: torch.Tensor
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Pre-computes (sr, hr) tensor pairs for every tracked PSNR/SSIM key.
-
-        Shared by both metric families (over the union of ``psnr_keys`` and
-        ``ssim_keys``) so a requested colorspace conversion happens at most
-        once per call regardless of how many metrics consume it. ``Y`` /
-        ``Cb`` / ``Cr`` / ``YCbCr`` are converted via ``rgb_to_ycbcr_studio`` —
-        BT.601 studio range, the literature's PSNR/SSIM convention — not the
-        full-range ``rgb_to_ycbcr`` the processors train in (see
-        ``sisr.colorspace`` module docstring). ``RGB``/``R``/``G``/``B`` are
-        untouched either way.
-        """
-        keys = set(self.eval_config.psnr_keys) | set(self.eval_config.ssim_keys)
-        tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-
-        if keys & {"RGB", "R", "G", "B"}:
-            tensors["RGB"] = (sr, hr)
-            tensors["R"] = (sr[:, 0:1], hr[:, 0:1])
-            tensors["G"] = (sr[:, 1:2], hr[:, 1:2])
-            tensors["B"] = (sr[:, 2:3], hr[:, 2:3])
-
-        if keys & {"YCbCr", "Y", "Cb", "Cr"}:
-            sr_ycc = rgb_to_ycbcr_studio(sr)
-            hr_ycc = rgb_to_ycbcr_studio(hr)
-            tensors["YCbCr"] = (sr_ycc, hr_ycc)
-            tensors["Y"] = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
-            tensors["Cb"] = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])
-            tensors["Cr"] = (sr_ycc[:, 2:3], hr_ycc[:, 2:3])
-
-        return tensors
-
-    @staticmethod
-    def _mean_psnr(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
-        """Mean of the per-image PSNRs across the batch (SR-standard reduction).
-
-        Scores each image independently (``dim=(1, 2, 3)``) before the batch
-        mean, so the result is invariant to the val ``batch_size``. This differs
-        from pooling the whole batch into one PSNR — the deviation a stateful
-        ``PeakSignalNoiseRatio`` with default ``dim`` would introduce.
-        """
-        return torchmetrics.functional.image.peak_signal_noise_ratio(
-            sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
-        )
-
-    def _mean_ssim(self, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
-        """Mean SSIM under the configured implementation.
-
-        The single decision point for which SSIM this project computes —
-        consumed by :meth:`validation_step` and by
-        :class:`~sisr.training.callbacks.BenchmarkImageLogger`, so the
-        validation and benchmark paths cannot report different metrics under
-        the same tag (the two call sites used to each call ``torchmetrics``
-        independently, and only one learning about a new implementation would
-        have silently split them). Not a ``staticmethod`` (unlike
-        :meth:`_mean_psnr`) because it reads ``self.eval_config.ssim_impl``.
-
-        Args:
-            sr: Reconstruction, ``(B, C, H, W)`` float in ``[0, 1]``.
-            hr: Reference, same shape.
-
-        Returns:
-            0-dim tensor. Both implementations reduce per-image then mean over
-            the batch.
-        """
-        if self.eval_config.ssim_impl == "daala":
-            return daala_ssim(sr, hr)
-        return torchmetrics.functional.image.structural_similarity_index_measure(
-            sr, hr, data_range=1.0
-        )
-
-    def _mean_perceptual(self, name: str, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
-        """Mean perceptual score under the configured backbone.
-
-        The single decision point for which perceptual metric this project
-        computes, mirroring :meth:`_mean_ssim` — consumed by
-        :meth:`validation_step` and by
-        :class:`~sisr.training.callbacks.BenchmarkImageLogger`, so the
-        validation and benchmark paths cannot report different quantities under
-        the same tag.
-
-        Args:
-            name: ``'lpips'`` or ``'dists'``.
-            sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
-            hr: Reference, same shape.
-
-        Returns:
-            0-dim tensor.
-        """
-        return perceptual_score(name, sr, hr, lpips_net=self.eval_config.lpips_net)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the wrapped SR model on ``x`` and return its raw output.
@@ -948,41 +857,23 @@ class SRLightning(lightning.LightningModule):
 
         loss, lr_img, hr_img, sr, hr_cropped = self._step(batch)
 
-        n = self.eval_config.crop_border
-        if n > 0:
-            sr = sr[..., n:-n, n:-n]
-            hr_cropped = hr_cropped[..., n:-n, n:-n]
-
-        metric_tensors = self._build_metric_tensors(sr, hr_cropped)
+        scores = self.scorer.score(sr, hr_cropped)
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
         self.log("loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
         self._log_loss_terms("val")
-        primary_psnr = self.eval_config.psnr_channels[0]
-        for key in self.eval_config.psnr_keys:
-            sr_t, hr_t = metric_tensors[key]
+        # prog_bar is a display choice, so it stays with the caller rather than
+        # moving into the scorer — the scorer decides values, not presentation.
+        prog_bar_tags = {
+            metric_tag("psnr", "val", self.eval_config.psnr_channels[0]),
+            metric_tag("ssim", "val", self.eval_config.ssim_channels[0]),
+        }
+        for tag, value in scores.tagged("val").items():
             self.log(
-                f"psnr/val/{key}",
-                self._mean_psnr(sr_t, hr_t),
-                prog_bar=(key == primary_psnr),
-                on_step=False,
-                add_dataloader_idx=False,
-            )
-        primary_ssim = self.eval_config.ssim_channels[0]
-        for key in self.eval_config.ssim_keys:
-            sr_t, hr_t = metric_tensors[key]
-            self.log(
-                f"ssim/val/{key}",
-                self._mean_ssim(sr_t, hr_t),
-                prog_bar=(key == primary_ssim),
-                on_step=False,
-                add_dataloader_idx=False,
-            )
-        for name in self.eval_config.perceptual_keys:
-            self.log(
-                f"{name}/val",
-                self._mean_perceptual(name, sr, hr_cropped),
+                tag,
+                value,
+                prog_bar=(tag in prog_bar_tags),
                 on_step=False,
                 add_dataloader_idx=False,
             )
