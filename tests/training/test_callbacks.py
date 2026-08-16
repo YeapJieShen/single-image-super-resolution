@@ -27,7 +27,7 @@ from sisr.training import (
     SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
-from sisr.training.callbacks import BenchmarkSample, _validate_monitor_metric
+from sisr.training.callbacks import BenchmarkSample
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -519,12 +519,12 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# _validate_monitor_metric direction check (LPIPS/DISTS are lower-is-better)
+# _SRCheckpointBase._validate_monitor direction check (LPIPS/DISTS are lower-is-better)
 # ---------------------------------------------------------------------------
 
 
 def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
-    """Real SRLightning exposing only the `eval_config` `_validate_monitor_metric` reads."""
+    """Real SRLightning exposing only the `eval_config` `_validate_monitor` reads."""
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     return SRLightning(
         model=model,
@@ -537,7 +537,7 @@ def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
 
 def test_perceptual_monitor_is_accepted():
     module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
-    _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="min")  # must not raise
+    SRCheckpoint(monitor_metric="lpips/val", mode="min")._validate_monitor(module)  # no raise
 
 
 def test_lower_is_better_metric_rejects_mode_max():
@@ -548,13 +548,30 @@ def test_lower_is_better_metric_rejects_mode_max():
     """
     module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips"]))
     with pytest.raises(MisconfigurationException, match="lower-is-better"):
-        _validate_monitor_metric("SRCheckpoint", "lpips/val", module, mode="max")
+        SRCheckpoint(monitor_metric="lpips/val", mode="max")._validate_monitor(module)
 
 
 def test_psnr_monitor_still_requires_mode_max():
     module = build_module(eval_config=SREvalConfig())
     with pytest.raises(MisconfigurationException, match="higher-is-better"):
-        _validate_monitor_metric("SRCheckpoint", "psnr/val/RGB", module, mode="min")
+        SRCheckpoint(monitor_metric="psnr/val/RGB", mode="min")._validate_monitor(module)
+
+
+@pytest.mark.parametrize("cls", [SRCheckpoint, SRWeightsCheckpoint])
+def test_monitor_error_names_the_actual_callback_class(cls):
+    """The misconfiguration message must name the class that was misconfigured.
+
+    The label used to be a hard-coded literal at each call site; it is now
+    derived from ``type(self).__name__`` so the two cannot drift. Nothing
+    pinned it, so deriving it wrongly — or reverting to a literal on the base,
+    which would name every subclass identically — was invisible to the suite.
+    Both classes are asserted because a single-class check passes under a
+    hard-coded literal that happens to match that one class.
+    """
+    module = build_module()
+    cb = cls(monitor_metric="not/a/metric", mode="max")
+    with pytest.raises(MisconfigurationException, match=cls.__name__):
+        cb._validate_monitor(module)
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +914,7 @@ def test_rolling_mode_needs_no_monitor_validation(tmp_path: Path):
     regardless of monitor. `_make_bare_trainer()` (used by every other
     `.setup()` test in this file) is a real, unfitted Trainer that clears
     that machinery without running an actual loop, isolating this test to
-    what it actually claims: that `_validate_monitor_metric` doesn't fire.
+    what it actually claims: that `_validate_monitor` doesn't fire.
     """
     cb = SRCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
     cb.setup(trainer=_make_bare_trainer(), pl_module=build_module(), stage="fit")  # must not raise
