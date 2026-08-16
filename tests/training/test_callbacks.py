@@ -126,6 +126,63 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
     assert cb._tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
 
 
+def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
+    """The benchmark path must score PSNR with the same reduction as validation.
+
+    ``SRLightning._mean_psnr`` uses ``dim=(1,2,3)`` — per-image PSNR then batch
+    mean — and documents that reduction as deliberate. ``_collect_batch`` used
+    to call ``torchmetrics`` directly with the default ``dim=None``, which pools
+    the whole batch into one PSNR. The two agree today only because this path
+    slices ``sr[i:i+1]``, so every call happens to be a batch of one; nothing
+    stated or tested that precondition, and batching this loop would have
+    silently changed every ``psnr/{set}/{key}`` number.
+
+    Asserted through the emitted value rather than by spying on the call: a
+    stub ``_mean_psnr`` returns a sentinel, and the buffered sample must carry
+    it. A callback computing its own PSNR cannot produce the sentinel, so this
+    goes red against the direct-torchmetrics version without caring *how* the
+    module is reached.
+    """
+    cb = BenchmarkImageLogger()
+    cb._buffer["Set5"] = []
+    pl_module = _make_benchmark_pl_module()
+    pl_module._mean_psnr = MagicMock(return_value=torch.tensor(42.0))
+    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+
+    cb._collect_batch(
+        trainer=_make_step_axis_trainer(global_step=2, batches_that_stepped=1),
+        pl_module=pl_module,
+        batch=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)),
+        batch_idx=0,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+
+    assert cb._buffer["Set5"][0].psnr["RGB"] == pytest.approx(42.0)
+
+
+def test_the_two_psnr_reductions_genuinely_differ_above_batch_size_one():
+    """Characterises the dependency the test above exists to guard.
+
+    Not a test of our code: it pins torchmetrics' behaviour that makes the
+    routing matter. If these two ever coincide at batch > 1, the invariant is
+    free and the guard above is redundant — this test is what would tell us.
+    """
+    # The per-image errors must DIFFER: 0.05 and 0.40. Two images with the same
+    # error give equal per-image PSNRs, and pooling then agrees with the mean --
+    # which is how the first draft of this test passed against both reductions.
+    sr = torch.stack([torch.zeros(3, 8, 8), torch.zeros(3, 8, 8)])
+    hr = torch.stack([torch.full((3, 8, 8), 0.05), torch.full((3, 8, 8), 0.40)])
+
+    pooled = torchmetrics.functional.image.peak_signal_noise_ratio(sr, hr, data_range=1.0)
+    per_image = torchmetrics.functional.image.peak_signal_noise_ratio(
+        sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
+    )
+    assert pooled.item() != pytest.approx(per_image.item())
+
+
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger._bicubic_to
 # ---------------------------------------------------------------------------

@@ -20,7 +20,6 @@ from weakref import proxy
 import lightning
 import torch
 import torch.nn.functional
-import torchmetrics.functional
 import torchvision
 from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
@@ -382,16 +381,18 @@ class BenchmarkImageLogger(Callback):
             # seam, and duplicating it here would recreate a divergence
             # this design removed. Keys now come from eval_config, so this is a value
             # lookup only — the callback no longer decides *which* keys exist.
-            # Same rationale extends to _mean_ssim below: it is the only place
-            # that decides which SSIM implementation eval_config.ssim_impl
-            # means, so reaching into it here (rather than calling
-            # torchmetrics directly) keeps this path and validation_step's
-            # unable to disagree on what "ssim/..." tags under the same name.
+            # Same rationale extends to _mean_psnr and _mean_ssim below: they
+            # are the only places that decide the PSNR reduction and which
+            # implementation eval_config.ssim_impl means, so reaching into them
+            # here (rather than calling torchmetrics directly) keeps this path
+            # and validation_step's unable to disagree on what "psnr/..." and
+            # "ssim/..." tag under the same name. PSNR used to call torchmetrics
+            # directly with the default dim=None, which pools the batch instead
+            # of averaging per-image PSNRs; it agreed only because this loop
+            # slices one image at a time.
             metric_tensors = pl_module._build_metric_tensors(sr_metric, hr_metric)
             psnr_dict = {
-                key: torchmetrics.functional.image.peak_signal_noise_ratio(
-                    *metric_tensors[key], data_range=1.0
-                ).item()
+                key: pl_module._mean_psnr(*metric_tensors[key]).item()
                 for key in pl_module.eval_config.psnr_keys
             }
             ssim_dict = {
