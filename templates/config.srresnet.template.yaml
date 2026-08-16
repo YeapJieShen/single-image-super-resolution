@@ -151,6 +151,13 @@ trainer:
   #   inductor reduce-overhead fp32      26.3   <- does NOT beat cuda_graph
   #   inductor reduce-overhead bf16      16.0   <- 1.60x over cuda_graph
   #
+  # !! Those two rows are NOT scope-matched, so read the fp32 one narrowly.
+  # cuda_graph captures the WHOLE training step (zero_grad, forward, loss,
+  # backward); compile_backend wraps the MODEL ONLY -- loss, backward and the
+  # optimizer stay eager. So "inductor fp32 loses" means "compiling the model
+  # alone does not beat capturing the whole step", not "inductor cannot beat
+  # graph capture". The bf16 win above is achieved despite that same handicap.
+  #
   # So the opt-in path is BOTH settings together, and only together:
   #   precision: bf16-mixed
   #   model.training_config.compile_backend: inductor   (with cuda_graph off --
