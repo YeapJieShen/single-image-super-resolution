@@ -99,6 +99,7 @@ def to_onnx(
     _require_onnx()
 
     global_step: int | None = None
+    batch_step: int | None = None
     epoch: int | None = None
     monitor: str | None = None
     monitor_value: float | None = None
@@ -111,6 +112,10 @@ def to_onnx(
         global_step = checkpoint.get("global_step")
         epoch = checkpoint.get("epoch")
         ckpt_training = checkpoint.get("sisr_meta", {}).get("training", {})
+        # The batch axis has no top-level key of its own -- Lightning writes only
+        # `global_step` there -- so it comes from the sisr envelope, and is absent
+        # (None) on any checkpoint written before that field existed.
+        batch_step = ckpt_training.get("batch_step")
         monitor = ckpt_training.get("monitor")
         monitor_value = ckpt_training.get("monitor_value")
 
@@ -164,6 +169,7 @@ def to_onnx(
         module,
         file_path,
         global_step=global_step,
+        batch_step=batch_step,
         epoch=epoch,
         monitor=monitor,
         monitor_value=monitor_value,
@@ -175,6 +181,7 @@ def _write_metadata_props(
     file_path: str | PathLike,
     *,
     global_step: int | None,
+    batch_step: int | None,
     epoch: int | None,
     monitor: str | None,
     monitor_value: float | None,
@@ -192,6 +199,7 @@ def _write_metadata_props(
         module: The :class:`~sisr.training.SRLightning` instance that was exported.
         file_path: Path to the ``.onnx`` file just written by ``torch.onnx.export``.
         global_step: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
+        batch_step: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
         epoch: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
         monitor: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
         monitor_value: Forwarded to :func:`~sisr.training.metadata.build_metadata`.
@@ -203,6 +211,7 @@ def _write_metadata_props(
     meta = build_metadata(
         module,
         global_step=global_step,
+        batch_step=batch_step,
         epoch=epoch,
         monitor=monitor,
         monitor_value=monitor_value,

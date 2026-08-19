@@ -934,13 +934,27 @@ class SRLightning(lightning.LightningModule):
         that pairing only exists for :class:`~sisr.training.callbacks.SRWeightsCheckpoint`,
         whose ``monitor`` is a well-defined single value.
 
+        ``batch_step`` comes from the same place, for the same reason: Lightning
+        persists ``_batches_that_stepped`` inside the checkpoint's own loop state,
+        so reading it here describes the exact step being written rather than
+        wherever the live trainer has since got to. It is the axis every logged
+        metric uses, and therefore the one that locates this file on a curve —
+        ``global_step`` beside it is the optimizer count, which an adversarial
+        run advances twice per batch. See
+        :meth:`~sisr.training.callbacks._SRCheckpointBase._monitor_candidates`
+        for the matching correction to the *filename*.
+
         Args:
             checkpoint: The checkpoint dict Lightning is about to write to disk; mutated
                 in place to add ``checkpoint["sisr_meta"]``.
         """
+        epoch_loop = (
+            checkpoint.get("loops", {}).get("fit_loop", {}).get("epoch_loop.state_dict", {})
+        )
         checkpoint["sisr_meta"] = build_metadata(
             self,
             global_step=checkpoint.get("global_step"),
+            batch_step=epoch_loop.get("_batches_that_stepped"),
             epoch=checkpoint.get("epoch"),
         )
 

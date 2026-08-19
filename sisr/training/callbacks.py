@@ -759,6 +759,39 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
     payload. Nothing here decides what a checkpoint *contains*.
     """
 
+    def _monitor_candidates(self, trainer: lightning.Trainer) -> dict[str, torch.Tensor]:
+        """Substitute the batch-counted axis for ``{step}`` in every checkpoint name.
+
+        Lightning fills ``{step}`` from ``trainer.global_step``, which counts
+        *optimizer* steps. Under manual optimization with two optimizers (an
+        adversarial run steps D and G per batch) that is **2x** the batch count,
+        while every metric the checkpoint would be read against lands on
+        ``_batches_that_stepped``. The result is an artifact whose name cannot be
+        located on any curve it should be comparable with — measured before this
+        override, ``experiments/SRGAN/golden`` held ``sr-400000`` against its own
+        ``metrics.csv`` maxing at 199,999, while every automatic-optimization run
+        was 1:1.
+
+        Overriding here rather than at each call site is deliberate: Lightning
+        routes filename formatting, top-k bookkeeping and the ``last``/``every_n``
+        paths through this one method, so a single substitution keeps them
+        consistent with each other. It is also invisible where the counters
+        already agree, which is every SRResNet/SRCNN run.
+
+        The name is only half of it — see :meth:`_save_checkpoint`, which records
+        *both* counters in the artifact's own metadata so the axis survives the
+        file being copied away from its run directory.
+
+        Args:
+            trainer: The active trainer.
+
+        Returns:
+            Lightning's candidates dict with ``step`` on the batch axis.
+        """
+        candidates = super()._monitor_candidates(trainer)
+        candidates["step"] = torch.tensor(_logger_step(trainer))
+        return candidates
+
     def __init__(
         self,
         monitor_metric: str | None = "psnr/val/RGB",
@@ -1074,6 +1107,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
             meta = build_metadata(
                 pl_module,
                 global_step=trainer.global_step,
+                batch_step=_logger_step(trainer),
                 epoch=trainer.current_epoch,
                 monitor=self.monitor,
                 monitor_value=monitor_value,
@@ -1083,6 +1117,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
                 pl_module,
                 self.attribute,
                 global_step=trainer.global_step,
+                batch_step=_logger_step(trainer),
                 epoch=trainer.current_epoch,
                 monitor=self.monitor,
                 monitor_value=monitor_value,

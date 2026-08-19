@@ -202,6 +202,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
     training_field = json.loads(props["training"])
     assert training_field == {
         "global_step": None,
+        "batch_step": None,
         "epoch": None,
         "monitor": None,
         "monitor_value": None,
@@ -232,6 +233,7 @@ def test_to_onnx_metadata_props_carry_ckpt_provenance_forward(tmp_path):
     training_field = json.loads(props["training"])
     assert training_field == {
         "global_step": 999,
+        "batch_step": None,
         "epoch": 3,
         "monitor": "psnr/val/RGB",
         "monitor_value": 31.2,

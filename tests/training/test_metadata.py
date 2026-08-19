@@ -149,6 +149,7 @@ def test_build_metadata_training_fields_default_to_none():
     meta = build_metadata(_make_srcnn_lit())
     assert meta["training"] == {
         "global_step": None,
+        "batch_step": None,
         "epoch": None,
         "monitor": None,
         "monitor_value": None,
@@ -165,6 +166,7 @@ def test_build_metadata_training_fields_forwarded():
     )
     assert meta["training"] == {
         "global_step": 1000,
+        "batch_step": None,
         "epoch": 5,
         "monitor": "psnr/val/RGB",
         "monitor_value": 30.5,
@@ -338,6 +340,7 @@ def test_component_metadata_training_fields_forwarded():
     )
     assert meta["training"] == {
         "global_step": 100,
+        "batch_step": None,
         "epoch": 2,
         "monitor": None,
         "monitor_value": None,
