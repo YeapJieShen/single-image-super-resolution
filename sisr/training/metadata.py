@@ -66,6 +66,7 @@ def _envelope(
     epoch: int | None,
     monitor: str | None,
     monitor_value: float | None,
+    batch_step: int | None = None,
 ) -> dict[str, Any]:
     """Fields every sisr artifact carries, whatever it holds.
 
@@ -84,8 +85,17 @@ def _envelope(
             "torch": str(torch.__version__),
             "lightning": str(lightning.__version__),
         },
+        # Two step counters exist and both are real. `global_step` is the
+        # OPTIMIZER count -- factually what it is, and the name Lightning's own
+        # checkpoint payload uses for the same quantity, so redefining it here
+        # would put this field in direct contradiction with the one beside it.
+        # `batch_step` is the batch-counted axis every `self.log` metric lands
+        # on, so it is the one a reader correlates a checkpoint against a curve
+        # with. Under automatic optimization they are equal; an adversarial
+        # module steps two optimizers per batch and they differ by 2x.
         "training": {
             "global_step": global_step,
+            "batch_step": batch_step,
             "epoch": epoch,
             "monitor": monitor,
             "monitor_value": monitor_value,
@@ -97,6 +107,7 @@ def build_metadata(
     module: SRLightning,
     *,
     global_step: int | None = None,
+    batch_step: int | None = None,
     epoch: int | None = None,
     monitor: str | None = None,
     monitor_value: float | None = None,
@@ -108,6 +119,10 @@ def build_metadata(
             describe — supplies ``model``, ``processor``, ``training_config``, and
             ``eval_config``.
         global_step: Optimizer step at save time, when known (``None`` otherwise).
+        batch_step: Batch-counted step at save time — the axis every logged metric
+            uses, and therefore the one to correlate this artifact against a curve.
+            Equal to ``global_step`` under automatic optimization; half of it on a
+            two-optimizer adversarial run.
         epoch: Training epoch at save time, when known (``None`` otherwise).
         monitor: Name of the metric that triggered this specific save (e.g.
             ``"psnr/val/RGB"``), when the sink is monitor-driven (``None`` otherwise).
@@ -127,7 +142,7 @@ def build_metadata(
     if scale is None:
         scale = model.hparams.get("scale")
 
-    meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value)
+    meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value, batch_step)
     meta["model"] = {
         "class_path": _class_path(model),
         "init_args": _to_plain(model.hparams),
@@ -155,6 +170,7 @@ def build_component_metadata(
     attribute: str,
     *,
     global_step: int | None = None,
+    batch_step: int | None = None,
     epoch: int | None = None,
     monitor: str | None = None,
     monitor_value: float | None = None,
@@ -174,6 +190,7 @@ def build_component_metadata(
         module: The Lightning module owning the component.
         attribute: Attribute name of the component on ``module`` (e.g. ``'discriminator'``).
         global_step: Optimizer step at save time, when known.
+        batch_step: Batch-counted step at save time — see :func:`build_metadata`.
         epoch: Training epoch at save time, when known.
         monitor: Metric that triggered this save, when monitor-driven.
         monitor_value: Value of ``monitor`` at save time.
@@ -185,7 +202,7 @@ def build_component_metadata(
     """
     component = getattr(module, attribute)
     processor = module.processor
-    meta = _envelope("component", global_step, epoch, monitor, monitor_value)
+    meta = _envelope("component", global_step, epoch, monitor, monitor_value, batch_step)
     meta["component"] = {
         "name": attribute,
         "class_path": _class_path(component),

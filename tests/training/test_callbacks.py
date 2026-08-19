@@ -1,3 +1,4 @@
+import csv
 import functools
 import shutil
 import tempfile
@@ -750,6 +751,9 @@ def test_weights_checkpoint_can_save_a_named_component(tmp_path):
     # does `for logger in trainer.loggers`, and a plain Mock's auto-attrs
     # don't support __iter__ (raises TypeError) -- MagicMock's do.
     trainer = MagicMock(lightning_module=module, global_step=7, current_epoch=0)
+    # The batch axis is read too, and it must be a real int: a MagicMock's
+    # auto-attribute would reach torch.save and fail there, not here.
+    trainer.fit_loop.epoch_loop._batches_that_stepped = 6
     cb = SRWeightsCheckpoint(
         monitor_metric=None, keep_last=1, attribute="discriminator", dirpath=str(tmp_path)
     )
@@ -898,7 +902,11 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
 
 
 def _run_tiny_fit(
-    callbacks: list, n_batches: int, ckpt_path: str | None = None
+    callbacks: list,
+    n_batches: int,
+    ckpt_path: str | None = None,
+    logger: object = False,
+    log_every_n_steps: int = 50,
 ) -> lightning.Trainer:
     """Real `Trainer.fit` for `n_batches` steps, driving `callbacks`'s real save path.
 
@@ -934,7 +942,8 @@ def _run_tiny_fit(
             num_sanity_val_steps=0,
             accelerator="cpu",
             devices=1,
-            logger=False,
+            logger=logger,
+            log_every_n_steps=log_every_n_steps,
             enable_progress_bar=False,
             enable_model_summary=False,
             callbacks=callbacks,
@@ -962,7 +971,10 @@ def test_rolling_mode_keeps_only_the_last_n(tmp_path):
     # Not just any 3 -- the 3 *newest* by step (oldest-first deletion), matching
     # the mechanism spike's own result (20 batches, every_n_train_steps=2, keep_last=3
     # -> steps 16/18/20 survive out of the 10 saved at steps 2, 4, ..., 20).
-    assert files == ["sr-16.ckpt", "sr-18.ckpt", "sr-20.ckpt"], files
+    # Stamps are the batch axis, which is what every logged metric uses -- so
+    # 15/17/19, not the 16/18/20 `trainer.global_step` would give. Those older
+    # numbers named steps that appear on no curve; see the step-axis tests below.
+    assert files == ["sr-15.ckpt", "sr-17.ckpt", "sr-19.ckpt"], files
 
 
 @_ignore_gpu_warning
@@ -1004,7 +1016,7 @@ def test_sr_weights_checkpoint_rolling_mode_keeps_only_the_last_n(tmp_path):
     )
     _run_tiny_fit(callbacks=[cb], n_batches=20)
     files = sorted(p.name for p in tmp_path.glob("*.pt"))
-    assert files == ["sr-weights-18.pt", "sr-weights-20.pt"], files
+    assert files == ["sr-weights-17.pt", "sr-weights-19.pt"], files
 
 
 def test_sr_weights_checkpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path):
@@ -1031,8 +1043,8 @@ def test_rolling_checkpoints_coexist_without_cross_deletion(tmp_path):
     ckpt_files = sorted(p.name for p in tmp_path.glob("sr-*.ckpt"))
     pt_files = sorted(p.name for p in tmp_path.glob("sr-weights-*.pt"))
     all_files = sorted(p.name for p in tmp_path.iterdir())
-    assert ckpt_files == ["sr-18.ckpt", "sr-20.ckpt"], ckpt_files
-    assert pt_files == ["sr-weights-18.pt", "sr-weights-20.pt"], pt_files
+    assert ckpt_files == ["sr-17.ckpt", "sr-19.ckpt"], ckpt_files
+    assert pt_files == ["sr-weights-17.pt", "sr-weights-19.pt"], pt_files
     assert len(all_files) == 4, all_files
 
 
@@ -1166,22 +1178,23 @@ def test_real_resume_keeps_the_window_at_keep_last(tmp_path: Path):
     is why seeding lives in ``on_train_start``. Only a real resume proves the
     ordering; the hook-level tests above cannot.
 
-    First fit saves at steps 2/4/6 and keeps 4/6. Resuming to step 12 saves at
-    8/10/12. With the window seeded, four deletions leave exactly ``keep_last``
-    files; unseeded, steps 4 and 6 are orphaned and six files survive.
+    Steps here are the batch axis the filenames now carry, which runs one
+    behind ``trainer.global_step``: the first fit saves at 1/3/5 and keeps 3/5,
+    and resuming saves at 7/9/11. With the window seeded, four deletions leave
+    exactly ``keep_last`` files; unseeded, 3 and 5 are orphaned and six survive.
     """
     ckpt_cb = SRCheckpoint(
         monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
     )
     _run_tiny_fit(callbacks=[ckpt_cb], n_batches=6)
-    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-4.ckpt", "sr-6.ckpt"]
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-3.ckpt", "sr-5.ckpt"]
 
     resumed_cb = SRCheckpoint(
         monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
     )
-    _run_tiny_fit(callbacks=[resumed_cb], n_batches=12, ckpt_path=str(tmp_path / "sr-6.ckpt"))
+    _run_tiny_fit(callbacks=[resumed_cb], n_batches=12, ckpt_path=str(tmp_path / "sr-5.ckpt"))
 
-    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-10.ckpt", "sr-12.ckpt"]
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-11.ckpt", "sr-9.ckpt"]
 
 
 # ---------------------------------------------------------------------------
@@ -2141,3 +2154,192 @@ def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir
     )
     fnames = [entry[0] for entry in cb._buffer["Set5"]]
     assert fnames == [p.stem for p in ds.img_paths[:2]]  # e.g. ["img_00", "img_01"]
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint step axis: what gets stamped on the artifact must be the axis the
+# metrics are on, or no checkpoint can be located on any curve.
+# ---------------------------------------------------------------------------
+
+_CKPT_CLASSES = [(SRCheckpoint, "sr"), (SRWeightsCheckpoint, "sr-weights")]
+
+
+def _manual_optimization_trainer(batches: int, optimizer_steps: int) -> MagicMock:
+    """A trainer whose two step counters disagree, as under manual optimization.
+
+    An adversarial module steps D and G per batch, so ``global_step`` runs at 2x
+    the batch count while every ``self.log`` metric lands on
+    ``_batches_that_stepped``. Both counters are set explicitly rather than
+    derived, so the test states the mismatch instead of assuming a ratio.
+    """
+    trainer = MagicMock()
+    trainer.global_step = optimizer_steps
+    trainer.current_epoch = 0
+    trainer.callback_metrics = {}
+    trainer.fit_loop.epoch_loop._batches_that_stepped = batches
+    return trainer
+
+
+@pytest.mark.parametrize("cls, prefix", _CKPT_CLASSES)
+def test_checkpoint_step_placeholder_uses_the_batch_axis(cls, prefix, tmp_path: Path):
+    """``{step}`` in a checkpoint filename must be the batch-counted axis.
+
+    Lightning fills ``{step}`` from ``trainer.global_step`` -- the *optimizer*
+    count -- while every metric it would be read against sits on
+    ``_batches_that_stepped``. On an adversarial run those differ by 2x, so a
+    checkpoint named for the optimizer axis cannot be located on any logged
+    curve. Measured on the real runs before this fix: ``experiments/SRGAN/golden``
+    held ``sr-400000`` against its own metrics maxing at 199,999.
+    """
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    trainer = _manual_optimization_trainer(batches=200_000, optimizer_steps=400_000)
+
+    assert int(cb._monitor_candidates(trainer)["step"]) == 200_000
+
+
+@pytest.mark.parametrize("cls, prefix", _CKPT_CLASSES)
+def test_checkpoint_filename_renders_the_batch_axis(cls, prefix, tmp_path: Path):
+    """End-to-end on the formatter, not just the candidates dict.
+
+    ``_monitor_candidates`` feeding the right number is only half of it -- the
+    filename template has to consume it. This asserts the rendered name, which is
+    what a human actually reads off ``ls``, and what the rolling window parses
+    back out.
+    """
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    trainer = _manual_optimization_trainer(batches=200_000, optimizer_steps=400_000)
+
+    name = Path(cb.format_checkpoint_name(cb._monitor_candidates(trainer))).name
+
+    assert name == f"{prefix}-200000{cls.FILE_EXTENSION}"
+
+
+@pytest.mark.parametrize("cls, prefix", _CKPT_CLASSES)
+def test_checkpoint_name_introduces_no_scaling_of_its_own(cls, prefix, tmp_path: Path):
+    """Where the two counters agree, the stamped name is exactly that value.
+
+    Guards against "fixing" the 2x by dividing: the override must *read the
+    batch counter*, never derive it from ``global_step`` and an assumed
+    optimizers-per-batch factor. A division-based fix would pass the adversarial
+    test above and fail here the moment a paradigm used one optimizer per batch
+    under manual optimization.
+    """
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    trainer = _manual_optimization_trainer(batches=1_000_000, optimizer_steps=1_000_000)
+
+    name = Path(cb.format_checkpoint_name(cb._monitor_candidates(trainer))).name
+
+    assert name == f"{prefix}-1000000{cls.FILE_EXTENSION}"
+
+
+@_ignore_gpu_warning
+@pytest.mark.filterwarnings("ignore:Checkpoint directory .* exists and is not empty.:UserWarning")
+def test_every_checkpoint_stamp_is_a_step_the_metrics_were_logged_at(tmp_path: Path):
+    """The property the whole change exists for, asserted end-to-end.
+
+    Every test above checks a *counter*; this checks the thing a human actually
+    needs — that a checkpoint's number can be found on a curve. It runs a real
+    fit with a real logger and intersects the two sets, so it cannot pass by
+    agreeing with a counter that is itself wrong.
+
+    On pre-fix code this fails with **zero** overlap, not a near-miss:
+    ``trainer.global_step`` runs one ahead of the axis ``self.log`` writes on,
+    so the old names (2/4/6...) named steps that appear on no curve at all,
+    and an adversarial run compounded that with a further factor of 2.
+    """
+    from lightning.pytorch.loggers import CSVLogger
+
+    logger = CSVLogger(str(tmp_path / "logs"), name="r", version="v")
+    cb = SRCheckpoint(
+        monitor_metric=None, keep_last=10, every_n_train_steps=2, dirpath=str(tmp_path / "ck")
+    )
+    _run_tiny_fit(callbacks=[cb], n_batches=12, logger=logger, log_every_n_steps=2)
+
+    stamps = sorted(int(p.stem.split("-")[1]) for p in (tmp_path / "ck").glob("*.ckpt"))
+    with open(tmp_path / "logs" / "r" / "v" / "metrics.csv") as fh:
+        logged = {int(row["step"]) for row in csv.DictReader(fh) if row.get("step")}
+
+    assert stamps, "no checkpoints were written -- the test proves nothing"
+    assert set(stamps) <= logged, (
+        f"checkpoint stamps {sorted(set(stamps) - logged)} appear on no logged curve; "
+        f"logged steps were {sorted(logged)}"
+    )
+
+
+def test_weights_checkpoint_metadata_records_both_axes_distinguishably(tmp_path: Path):
+    """The ``.pt`` path: the callback builds the metadata itself.
+
+    Both counters are real, so the artifact must say which is which.
+    ``global_step`` keeps meaning the optimizer count -- that is what it factually
+    is, and it is the name Lightning's own checkpoint payload uses for the same
+    quantity, so redefining it would put this field in direct contradiction with
+    the one beside it. The batch axis is added under its own name instead, which
+    also means an older reader that ignores the new key still reads a true value.
+    """
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+    )
+    trainer = _manual_optimization_trainer(batches=199_999, optimizer_steps=400_000)
+    trainer.lightning_module = module
+    trainer.is_global_zero = True
+    trainer.loggers = []
+
+    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    path = tmp_path / f"probe{SRWeightsCheckpoint.FILE_EXTENSION}"
+    cb._save_checkpoint(trainer, str(path))
+
+    training = torch.load(path, weights_only=True, map_location="cpu")["meta"]["training"]
+    assert training["global_step"] == 400_000, "the optimizer count must keep its own name"
+    assert training["batch_step"] == 199_999, "the metric axis must be recorded too"
+
+
+def test_full_checkpoint_metadata_records_both_axes_distinguishably():
+    """The ``.ckpt`` path: Lightning writes the file, so the module injects the metadata.
+
+    ``batch_step`` is read from the checkpoint's own persisted loop state, not
+    from the live trainer -- the same discipline ``global_step``/``epoch`` already
+    follow, so the metadata describes the step being written rather than wherever
+    the trainer has since got to. The numbers here are the real ones measured on
+    ``experiments/SRGAN/golden``.
+    """
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+    )
+    checkpoint = {
+        "global_step": 400_000,
+        "epoch": 3_999,
+        "loops": {"fit_loop": {"epoch_loop.state_dict": {"_batches_that_stepped": 199_999}}},
+    }
+
+    module.on_save_checkpoint(checkpoint)
+
+    training = checkpoint["sisr_meta"]["training"]
+    assert training["global_step"] == 400_000
+    assert training["batch_step"] == 199_999
+
+
+def test_checkpoint_metadata_batch_step_is_none_when_the_loop_state_is_absent():
+    """A checkpoint without loop state must degrade to ``None``, not raise.
+
+    ``validate``/``test``/``predict`` checkpoints and hand-built payloads carry no
+    ``loops`` key. Recording ``None`` says "unknown", which is what the field
+    already does for ``global_step`` on such a file -- guessing a value would be
+    worse than admitting there isn't one.
+    """
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(),
+        eval_config=SREvalConfig(),
+    )
+    checkpoint: dict = {}
+
+    module.on_save_checkpoint(checkpoint)
+
+    assert checkpoint["sisr_meta"]["training"]["batch_step"] is None
