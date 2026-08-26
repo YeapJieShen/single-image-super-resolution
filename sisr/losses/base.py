@@ -23,8 +23,7 @@ class SRLoss(torch.nn.Module, abc.ABC):
     (:class:`~sisr.losses.composite.WeightedSumLoss` is the one that does).
     The tensors are written in place across ordinary steps and only replaced
     when the existing buffer cannot be reused (first use, a device/dtype
-    change, or leaving :func:`torch.inference_mode`), so a CUDA-graph replay
-    keeps updating the entry it captured.
+    change, or leaving :func:`torch.inference_mode`).
     """
 
     @abc.abstractmethod

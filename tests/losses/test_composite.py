@@ -102,11 +102,10 @@ def test_last_terms_holds_detached_weighted_contributions_that_sum_to_the_total(
 
 
 def test_last_terms_are_stable_buffers_written_in_place():
-    """A CUDA-graph replay re-runs only recorded kernels, never the Python line
-    that creates a tensor — so the entry a replay updates is the one present at
-    capture. Rebinding it on an eager forward (mid-training validation, or an
-    epoch's partial last batch) would strand every per-term tag on that eager
-    value for the rest of the run, silently, while loss/train kept moving."""
+    """SRLightning reads last_terms by identity each step, and a replaying
+    backend re-runs only recorded kernels, never the Python line that binds a
+    name. Rebinding the entry would strand every per-term tag on a stale value
+    for the rest of the run, silently, while loss/train kept moving."""
     loss = WeightedSumLoss(terms={"a": _BindSpy(2.0)}, weights={"a": 1.0})
 
     loss(torch.zeros(1), torch.zeros(1))

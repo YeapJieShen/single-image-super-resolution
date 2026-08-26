@@ -112,8 +112,6 @@ model:
           example_input_shape: [3, 24, 24]
           # adversarial_weight: 1.0e-3 (paper) and d_steps_per_g_step: 1
           # (Goodfellow's k, Ledig's 1:1 alternation) are the dataclass defaults.
-          # cuda_graph is refused outright here — no two-optimizer manual loop can
-          # honour a capture built around one optimizer.
       # No init_args: the dataclass already adds lpips + dists on top of the
       # SRResNet scoring (crop_border 4, PSNR on RGB+Y, daala SSIM). An adversarial
       # objective makes PSNR and SSIM WORSE by design, so the perceptual pair is

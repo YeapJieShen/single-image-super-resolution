@@ -59,8 +59,7 @@ class WeightedSumLoss(SRLoss):
         self.weights = {name: float(weights.get(name, 1.0)) for name in terms}
         #: Per-term weighted contributions from the most recent forward, as
         #: stable buffers written in place (see :meth:`forward`) rather than
-        #: rebound each call — a CUDA-graph replay can only update a tensor
-        #: that already existed at capture time.
+        #: rebound each call.
         self.last_terms: dict[str, torch.Tensor] = {}
 
     def bind(self, processor: SRProcessor) -> None:
@@ -76,13 +75,12 @@ class WeightedSumLoss(SRLoss):
             contribution = term(pred, target) * self.weights[name]
             value = contribution.detach()
             prior = self.last_terms.get(name)
-            # In place, not a fresh clone: a CUDA-graph replay re-runs only the
-            # recorded copy kernel, so the only tensor it can update is the one
-            # that existed at capture. Rebinding here would strand the tag on
-            # the last eager step's value for the rest of the run. A buffer
-            # captured under torch.inference_mode() (trainer.validate()/test())
-            # can never be written to again once outside it, so it must be
-            # replaced rather than reused.
+            # A buffer created under torch.inference_mode() (trainer.validate()
+            # /test()) can never be written to again once outside it, so it must
+            # be replaced rather than reused. Otherwise write in place: a
+            # replaying backend re-runs only recorded kernels, never the Python
+            # line that binds a name, so rebinding would strand the tag on a
+            # stale value while loss/train kept moving.
             stale_inference = (
                 prior is not None and prior.is_inference() and not torch.is_inference_mode_enabled()
             )
