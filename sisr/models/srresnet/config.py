@@ -99,7 +99,7 @@ class SRResNetEvalConfig(SREvalConfig):
             with image height, not with Wang's fixed 11x11. PSNR is unaffected
             (it is implementation-invariant); SSIM under this setting is
             comparable to the paper and **not** to the wider SR literature,
-            which reports Wang. See :mod:`sisr.ssim`.
+            which reports Wang. See :mod:`sisr.metrics.ssim`.
     """
 
     crop_border: int = 4

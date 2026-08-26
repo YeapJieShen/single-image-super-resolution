@@ -30,7 +30,7 @@ def test_hr_cache_module_imports_no_torch():
     module a spawned ProcessPoolExecutor build worker re-imports to unpickle
     it -- regardless of which dataset module (srcnn/srresnet, both of which
     do import torch) merely re-exports a reference to it. Asserting this on
-    sisr.cache alone would prove the wrong thing: the worker's entry point is
+    sisr.utils.cache alone would prove the wrong thing: the worker's entry point is
     this module, not that one.
     """
     probe = "import sys, sisr.datasets.hr_cache; print('torch' in sys.modules)"

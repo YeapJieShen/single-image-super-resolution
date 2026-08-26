@@ -24,7 +24,7 @@ import torchvision
 from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
-from ..perceptual import PERCEPTUAL_METRICS
+from ..metrics.perceptual import PERCEPTUAL_METRICS
 from .metadata import build_component_metadata, build_metadata
 
 

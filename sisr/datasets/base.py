@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ..cache import LMDBCache, LMDBCacheBuildContext
+from ..utils.cache import LMDBCache, LMDBCacheBuildContext
 from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
 
 
@@ -112,7 +112,7 @@ class HRCachedTrainDataset(SRDataset):
     """Shared base for train datasets backed by the raw-HR LMDB cache.
 
     Owns the file-manifest checksum, per-image size probe, and
-    :class:`~sisr.cache.LMDBCache` construction/build that SRCNN's and
+    :class:`~sisr.utils.cache.LMDBCache` construction/build that SRCNN's and
     SRResNet's train datasets need identically — so the two cannot drift on
     it (e.g. two different build progress-bar labels for what is, by design,
     one shared cache). A subclass supplies only its indexing scheme (grid vs
@@ -211,7 +211,7 @@ class HRCachedTrainDataset(SRDataset):
     def _read_hr(self, img_idx: int) -> Iterator[np.ndarray]:
         """Yields the cached HR image at ``img_idx`` as an ``(H, W, 3)`` uint8 view.
 
-        A zero-copy :meth:`~sisr.cache.LMDBCache.get_buffer` view, valid only
+        A zero-copy :meth:`~sisr.utils.cache.LMDBCache.get_buffer` view, valid only
         inside this ``with`` block — slice and ``.copy()`` out whatever is
         needed before it exits. ``(h, w)`` come from this image's own header,
         never a fixed constant, so non-square and varied-size images are safe.

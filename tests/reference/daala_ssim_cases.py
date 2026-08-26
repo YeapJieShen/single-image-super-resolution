@@ -1,6 +1,6 @@
 """Synthetic and real-image plane pairs for daala-SSIM parity checks.
 
-Shared by ``tests/test_ssim.py`` and ``gen_daala_ssim_expected.py`` so both
+Shared by ``tests/metrics/test_ssim.py`` and ``gen_daala_ssim_expected.py`` so both
 sides score byte-identical inputs.
 
 :data:`CASES`/:func:`make_planes` are synthetic. Sizes are chosen to exercise
@@ -28,8 +28,8 @@ import torch
 from PIL import Image
 
 from sisr.colorspace import rgb_to_ycbcr_studio
-from sisr.imresize import resize
-from sisr.ssim import quantize_u8
+from sisr.metrics.ssim import quantize_u8
+from sisr.utils.imresize import resize
 
 #: name, (height, width), seed, and how the second plane differs from the first.
 CASES: list[dict] = [
@@ -85,7 +85,7 @@ def discover_real_cases(repo_root: Path = _REPO_ROOT) -> list[dict]:
         Dicts with ``name`` (``"<Set>/<stem>"``, the key into
         ``daala_ssim_expected.json``), ``set``, and ``path`` (the HR image
         file). ``[]`` if none of the set directories exist under
-        *repo_root* -- ``tests/test_ssim.py`` treats that as "data/ absent"
+        *repo_root* -- ``tests/metrics/test_ssim.py`` treats that as "data/ absent"
         (skip cleanly), distinct from a set directory existing but holding
         no images (an error).
     """
@@ -119,11 +119,11 @@ def make_real_planes(case: dict) -> tuple[np.ndarray, np.ndarray]:
 
     1. Mod-crop HR to a multiple of ``scale`` (:class:`sisr.datasets.srresnet.
        ValidationDataset`'s convention).
-    2. :func:`sisr.imresize.resize` down by ``scale``, then back up by
+    2. :func:`sisr.utils.imresize.resize` down by ``scale``, then back up by
        ``scale`` -- the model-free reconstruction.
     3. Crop ``crop_border`` px from each edge of both.
     4. Studio-range Y (:func:`sisr.colorspace.rgb_to_ycbcr_studio`), quantized
-       to uint8 (:func:`sisr.ssim.quantize_u8`) -- the bytes the daala C scores.
+       to uint8 (:func:`sisr.metrics.ssim.quantize_u8`) -- the bytes the daala C scores.
 
     Args:
         case: One entry of :func:`discover_real_cases`.

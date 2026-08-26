@@ -18,12 +18,12 @@ from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..losses import SRLoss
+from ..metrics.scoring import SRScorer, metric_tag
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
 from .metadata import build_metadata
 from .probe import probe_pair
-from .scoring import SRScorer, metric_tag
 
 
 class SRLightning(lightning.LightningModule):

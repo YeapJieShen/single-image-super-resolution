@@ -31,8 +31,8 @@ from typing import Literal
 
 import torch
 
+from ..metrics.perceptual import PERCEPTUAL_METRICS
 from ..models.base import SRModel
-from ..perceptual import PERCEPTUAL_METRICS
 from ..processors.base import SRProcessor
 
 # Colorspace entries map to their sub-channel names, expanded only when
@@ -237,7 +237,7 @@ class SREvalConfig:
             ``torchmetrics``, MATLAB and BasicSR compute, and therefore what
             most SR papers report. ``'daala'`` is the daala package's
             resolution-adaptive variant (sigma scales with image height), the
-            convention Ledig et al. actually used; see :mod:`sisr.ssim`.
+            convention Ledig et al. actually used; see :mod:`sisr.metrics.ssim`.
             Switching is **in place** — the ``ssim/...`` metric names do not
             change, so a figure is comparable only to one computed under the
             same setting. The value is recorded in ``hparams`` and in every
