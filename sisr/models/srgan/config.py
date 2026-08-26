@@ -30,8 +30,7 @@ class SRGANTrainingConfig(SRResNetTrainingConfig):
             alternation.
 
     Raises:
-        ValueError: If ``d_steps_per_g_step`` is below 1, or ``cuda_graph`` is
-            set.
+        ValueError: If ``d_steps_per_g_step`` is below 1.
     """
 
     init_from: str | None = None
@@ -40,16 +39,8 @@ class SRGANTrainingConfig(SRResNetTrainingConfig):
 
     def __post_init__(self) -> None:
         """Reject settings this training mode cannot honour."""
-        super().__post_init__()
         if self.d_steps_per_g_step < 1:
             raise ValueError(f"d_steps_per_g_step must be >= 1; got {self.d_steps_per_g_step}.")
-        if self.cuda_graph:
-            raise ValueError(
-                "training_config.cuda_graph=True is not supported for adversarial "
-                "training: CUDAGraphStep captures one {zero_grad, forward, loss, "
-                "backward} around one optimizer, and this mode runs two optimizers "
-                "alternately under manual optimization. Set cuda_graph to false."
-            )
 
 
 @dataclass

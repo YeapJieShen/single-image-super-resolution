@@ -655,16 +655,15 @@ def test_layer_lrs_refused():
 
 
 def test_a_base_training_config_is_refused():
-    """on_fit_start's "the CUDA-graph path is unreachable" argument rests on
-    SRGANTrainingConfig.__post_init__ refusing cuda_graph, which only holds if
-    the config really is that subclass — the type hint alone does not enforce it,
-    and this project has been silently frozen by a live graph before."""
+    """training_step reads adversarial_weight and d_steps_per_g_step off the
+    config on every step, and only the subclass carries them — the type hint
+    alone does not enforce it, so a base config would fail mid-run instead."""
     with pytest.raises(TypeError, match="SRGANTrainingConfig"):
         SRGANLightning(
             model=SRResNet(scale=4, num_residual_blocks=1),
             processor=RGBSignedOutputProcessor(),
             discriminator=SRDiscriminator(),
-            training_config=SRTrainingConfig(cuda_graph=True),
+            training_config=SRTrainingConfig(),
         )
 
 

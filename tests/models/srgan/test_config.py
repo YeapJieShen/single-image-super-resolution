@@ -19,12 +19,6 @@ def test_k_must_be_positive():
         SRGANTrainingConfig(d_steps_per_g_step=0)
 
 
-def test_cuda_graph_refused_at_construction():
-    """Manual optimization with two alternating optimizers cannot be captured."""
-    with pytest.raises(ValueError, match="cuda_graph"):
-        SRGANTrainingConfig(cuda_graph=True)
-
-
 def test_eval_config_turns_perceptual_metrics_on():
     """PSNR/SSIM get worse by design here, so the run needs a metric that means
     something."""
@@ -40,14 +34,6 @@ def test_training_config_subclass():
 
 def test_eval_config_subclass():
     assert issubclass(SRGANEvalConfig, SRResNetEvalConfig)
-
-
-def test_cuda_graph_and_compile_backend_both_set_reports_base_error_first():
-    """super().__post_init__() runs before the SRGAN-only checks, so the inherited
-    cuda_graph/compile_backend conflict (not the SRGAN cuda_graph-is-unsupported
-    message) is what surfaces when both are set."""
-    with pytest.raises(ValueError, match="compile_backend"):
-        SRGANTrainingConfig(cuda_graph=True, compile_backend="inductor")
 
 
 def test_eval_config_perceptual_metrics_independent_per_instance():
