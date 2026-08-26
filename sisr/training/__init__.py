@@ -4,6 +4,8 @@ Re-exports are flat so experiment YAMLs can use short class paths like
 ``sisr.training.SRLightning`` instead of ``sisr.training.lightning_module.SRLightning``.
 """
 
+from typing import Any
+
 from .callbacks import (
     BenchmarkImageLogger,
     GradNormLogger,
@@ -31,7 +33,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Resolve ``SRGANLightning`` on first access, not at package import.
 
     Every other re-export above is a plain import; this one cannot be. Each

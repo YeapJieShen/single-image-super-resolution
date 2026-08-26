@@ -215,7 +215,13 @@ check_untyped_defs = true
 # protocol) and jsonargparse's dynamic CLI/subclass resolution (dotted
 # overrides, class_path dispatch) make these fight a type checker rather than
 # benefit from one. Ignored wholesale rather than annotated around.
-module = ["sisr.training.*", "sisr.cli"]
+module = [
+    "sisr.training.callbacks",
+    "sisr.training.datamodule",
+    "sisr.training.gan_module",
+    "sisr.training.lightning_module",
+    "sisr.cli",
+]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
