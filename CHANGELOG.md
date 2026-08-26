@@ -89,6 +89,11 @@ notice.
   README.
 - **The LMDB cache could delete another process's in-progress build.** Deletion is now
   restricted to proven corruption; environmental failures raise instead.
+- **A cache build could wait on its lock forever.** The timeout only bounded waits on a
+  holder confirmed alive. A sentinel whose pid was unreadable, or was this process's own
+  after pid recycling, took neither that path nor the abandoned-lock takeover path while
+  a heartbeat kept it looking fresh — so the waiter polled with no error, no progress and
+  no further log line. Every wait path is now bounded by the same cap.
 - **SRCNN's paper weight-init std** corrected to the published `0.001`.
 - **`example_input_shape` pointed at the wrong size**, defeating compile warm-up and
   misreporting FLOPs.
