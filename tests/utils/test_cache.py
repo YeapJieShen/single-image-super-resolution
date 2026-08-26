@@ -846,6 +846,60 @@ def test_acquire_lock_raises_timeout_error_on_confirmed_live_holder_past_hard_ca
         )
 
 
+def test_acquire_lock_is_bounded_when_the_holder_pid_cannot_be_read(tmp_path: Path):
+    """The hard cap must cover the *not-stale* branch too, not only the
+    confirmed-live one.
+
+    A sentinel whose pid is unreadable (truncated, or caught mid-write) takes
+    neither the live-holder path -- that requires a readable pid -- nor the
+    takeover path, because a still-running heartbeat keeps its mtime fresh so
+    it never looks stale. Without a cap on this branch the waiter polls
+    forever: no error, no progress, no log line after the first, which is the
+    hardest failure to attribute after the fact. It must raise instead.
+
+    time.sleep is replaced rather than shortened so an unbounded loop fails
+    fast here instead of hanging the suite; the counter is what distinguishes
+    "raised late" from "never raised at all".
+    """
+    name, checksum = "unreadablepid", "up1"
+    lock_path = tmp_path / f"{name}_{checksum[:16]}.build.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, b"not-a-pid")  # _read_lock_pid() -> None
+    os.close(fd)
+
+    spins = 0
+    spin_cap = 60  # ~1.2s of real waiting; the 3x hard cap lands near spin 8
+    real_sleep = time.sleep  # captured before the patch, which rebinds time.sleep
+
+    class _SpunForever(Exception):
+        pass
+
+    def heartbeat_then_sleep(interval: float) -> None:
+        nonlocal spins
+        spins += 1
+        if spins > spin_cap:
+            raise _SpunForever(f"polled {spins} times without raising TimeoutError")
+        lock_path.touch()  # a live holder's heartbeat: never stale
+        real_sleep(interval)
+
+    with (
+        patch("sisr.utils.cache.time.sleep", heartbeat_then_sleep),
+        pytest.raises(TimeoutError, match="Refusing to wait indefinitely"),
+    ):
+        LMDBCache(
+            cache_dir=tmp_path,
+            name=name,
+            checksum=checksum,
+            length=1,
+            map_size=_MAP_SIZE,
+            build_fn=_make_build_fn(1),
+            lock_poll_interval=0.02,
+            lock_timeout=0.05,
+        )
+
+    assert spins <= spin_cap, "cap was never enforced"
+
+
 def test_acquire_lock_toctou_reread_skips_unlink_if_pid_changed(tmp_path: Path):
     """Immediately before unlinking a dead+stale sentinel to take over, the
     pid is re-read; if it changed (another waiter already reclaimed a fresh

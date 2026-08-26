@@ -41,9 +41,12 @@ _CORRUPTION_ERRORS = (lmdb.CorruptedError, lmdb.InvalidError, lmdb.VersionMismat
 _HEARTBEAT_MIN_INTERVAL = 0.01
 _HEARTBEAT_MAX_INTERVAL = 30.0
 
-# How many multiples of lock_timeout to wait on a confirmed-live holder
-# before giving up and raising -- bounds an otherwise-unbounded wait.
-_LIVE_HOLDER_WAIT_MULTIPLE = 3
+# How many multiples of lock_timeout to wait for a lock before giving up and
+# raising. Bounds *every* wait path, not just the confirmed-live-holder one: a
+# sentinel whose pid is unreadable, or is our own after pid recycling, takes
+# neither the live-holder path nor the takeover path, and without a cap there
+# it polls forever.
+_LOCK_WAIT_MULTIPLE = 3
 
 # Windows liveness check: OpenProcess's failure mode must be inspected via
 # GetLastError, which ctypes only tracks reliably through a use_last_error=True
@@ -516,7 +519,7 @@ class LMDBCache:
         :meth:`_start_heartbeat`) has gone stale for longer than *timeout*
         — i.e. it crashed without releasing the lock. Waiting on a
         confirmed-*live* holder is itself capped at
-        ``_LIVE_HOLDER_WAIT_MULTIPLE * timeout``: past that this raises
+        ``_LOCK_WAIT_MULTIPLE * timeout``: past that this raises
         rather than blocking forever, so a genuinely stuck wait surfaces
         instead of hanging silently.
 
@@ -537,8 +540,9 @@ class LMDBCache:
             :attr:`_length` in that case.
 
         Raises:
-            TimeoutError: If a confirmed-live holder still has not finished
-                after ``_LIVE_HOLDER_WAIT_MULTIPLE * timeout`` seconds.
+            TimeoutError: If the lock has not been obtained after
+                ``_LOCK_WAIT_MULTIPLE * timeout`` seconds, whether the holder
+                is confirmed alive or cannot be confirmed either way.
         """
         if self._claim_sentinel():
             return True
@@ -546,19 +550,23 @@ class LMDBCache:
         own_pid = os.getpid()
         start = time.monotonic()
         next_log_at = start + timeout
-        hard_deadline = start + timeout * _LIVE_HOLDER_WAIT_MULTIPLE
+        hard_deadline = start + timeout * _LOCK_WAIT_MULTIPLE
         while True:
             if self._try_load(checksum):
                 return False
 
+            # Evaluated once per pass so every branch below is bounded by it --
+            # including any added later. Only the message differs by branch.
+            now = time.monotonic()
+            expired = now > hard_deadline
+
             holder_pid = self._read_lock_pid()
             if holder_pid is not None and holder_pid != own_pid and _pid_alive(holder_pid):
-                now = time.monotonic()
-                if now > hard_deadline:
+                if expired:
                     raise TimeoutError(
                         f"Build lock {self._lock_path()} has been held by live pid "
-                        f"{holder_pid} for over {timeout * _LIVE_HOLDER_WAIT_MULTIPLE:.1f}s "
-                        f"({_LIVE_HOLDER_WAIT_MULTIPLE}x lock_timeout). Refusing to wait "
+                        f"{holder_pid} for over {timeout * _LOCK_WAIT_MULTIPLE:.1f}s "
+                        f"({_LOCK_WAIT_MULTIPLE}x lock_timeout). Refusing to wait "
                         f"indefinitely. If that process is confirmed gone, remove "
                         f"{self._lock_path()} manually and retry."
                     )
@@ -575,6 +583,21 @@ class LMDBCache:
                 continue
 
             if not self._lock_is_stale(timeout):
+                if expired:
+                    whose = (
+                        "unreadable"
+                        if holder_pid is None
+                        else f"{holder_pid}, which is dead or our own"
+                    )
+                    raise TimeoutError(
+                        f"Build lock {self._lock_path()} is held by a process this one "
+                        f"cannot confirm is alive -- its recorded pid is {whose} -- yet "
+                        f"its heartbeat keeps the sentinel fresh, so it never looks "
+                        f"abandoned either. Waited over "
+                        f"{timeout * _LOCK_WAIT_MULTIPLE:.1f}s ({_LOCK_WAIT_MULTIPLE}x "
+                        f"lock_timeout). Refusing to wait indefinitely. If no build is "
+                        f"really running, remove {self._lock_path()} manually and retry."
+                    )
                 time.sleep(poll_interval)
                 continue
 
@@ -636,7 +659,7 @@ class LMDBCache:
         started". That would mask the original ``start()`` error *and* skip
         :meth:`_release_lock` on the next line (this runs inside a
         ``finally``), leaving a live-pid sentinel that stalls every other
-        waiter for up to ``_LIVE_HOLDER_WAIT_MULTIPLE * lock_timeout``.
+        waiter for up to ``_LOCK_WAIT_MULTIPLE * lock_timeout``.
         """
         if self._heartbeat_stop is None:
             return
