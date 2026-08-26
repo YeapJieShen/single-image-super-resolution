@@ -38,7 +38,7 @@ def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     interpolation fails here."""
     import numpy as np
 
-    from sisr.imresize import resize
+    from sisr.utils.imresize import resize
 
     ds = TrainDataset(img_dir=tiny_rgb_image_dir, scale=4, hr_crop_size=16)
     lr, hr = ds[0]
@@ -240,7 +240,7 @@ def test_train_dataset_missing_key_raises_keyerror(tiny_rgb_image_dir: Path):
 def test_train_dataset_build_num_workers_1_builds_inline(tiny_rgb_image_dir: Path):
     """build_num_workers=1 must thread through to an inline LMDB build (no
     ProcessPoolExecutor), safe inside a test/xdist worker."""
-    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.utils.cache.ProcessPoolExecutor") as mock_pool:
         ds = TrainDataset(
             img_dir=tiny_rgb_image_dir,
             scale=2,

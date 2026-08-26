@@ -105,7 +105,7 @@ def _gaussian_kernel_int(sigma: float, max_len: int) -> list[int]:
     for ci in range(kernel_len, 0, -1):
         # int(v + 0.5), NOT round(): the C casts to unsigned, truncating toward
         # zero, i.e. round-half-UP. Python's round() ties to even -- the classic
-        # reason a "faithful" port misses parity (see sisr/imresize.py).
+        # reason a "faithful" port misses parity (see sisr/utils/imresize.py).
         tap = int(_KERNEL_WEIGHT * scale * math.exp(nhisigma2 * ci * ci) + 0.5)
         kernel[kernel_len - ci] = kernel[kernel_len + ci] = tap
         side_sum += tap
@@ -122,7 +122,7 @@ def quantize_u8(t: torch.Tensor) -> torch.Tensor:
     would hold. Rounds half up via ``floor(x + 0.5)`` — equivalent to
     half-away-from-zero here only because the preceding clamp to ``[0, 1]``
     means ``x`` is never negative; the two conventions disagree for negative
-    ties. Matches :mod:`sisr.imresize`'s convention rather than
+    ties. Matches :mod:`sisr.utils.imresize`'s convention rather than
     ``torch.round``'s ties-to-even. The Wang path is deliberately *not*
     quantised — changing it would renumber every SSIM this project has ever
     logged.

@@ -15,6 +15,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from PIL import Image
 
+from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
@@ -29,7 +30,6 @@ from sisr.training import (
     WeightHistogramLogger,
 )
 from sisr.training.callbacks import BenchmarkSample
-from sisr.training.scoring import SRScorer
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -1377,9 +1377,9 @@ def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering()
 
 def test_benchmark_logger_uses_module_ssim_impl():
     """BenchmarkImageLogger must not re-implement the metric: with
-    ssim_impl='daala' its buffered SSIM has to equal sisr.ssim.daala_ssim, not
+    ssim_impl='daala' its buffered SSIM has to equal sisr.metrics.ssim.daala_ssim, not
     torchmetrics. Guards against the two metric paths drifting apart."""
-    import sisr.ssim
+    import sisr.metrics.ssim
 
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
@@ -1409,7 +1409,7 @@ def test_benchmark_logger_uses_module_ssim_impl():
     with torch.no_grad():
         sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
     metric_tensors = pl_module.scorer.metric_tensors(sr, hr_cropped)
-    expected = sisr.ssim.daala_ssim(*metric_tensors["Y"]).item()
+    expected = sisr.metrics.ssim.daala_ssim(*metric_tensors["Y"]).item()
 
     sample = cb._buffer["Set5"][0]
     assert sample.ssim["Y"] == pytest.approx(expected, rel=1e-9)
@@ -1759,7 +1759,7 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
     non-zero crop_border also means a wrong (un-cropped) pair differs in shape,
     not just content."""
     monkeypatch.setattr(
-        "sisr.training.scoring.perceptual_score",
+        "sisr.metrics.scoring.perceptual_score",
         lambda name, sr, hr, lpips_net: sr.sum() - hr.sum(),
     )
     cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)

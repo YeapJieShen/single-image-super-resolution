@@ -10,6 +10,7 @@ import torch._dynamo
 import torchmetrics
 
 from sisr.losses import SRLoss
+from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
@@ -21,7 +22,6 @@ from sisr.processors import (
     YChannelProcessor,
 )
 from sisr.training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
-from sisr.training.scoring import SRScorer
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -981,7 +981,7 @@ def _make_lit_with_ssim_impl(ssim_impl: str) -> SRLightning:
 def test_mean_ssim_dispatches_on_eval_config():
     """One seam decides which SSIM exists. Flipping ssim_impl must change the
     value, or the flag is silently inert."""
-    import sisr.ssim
+    import sisr.metrics.ssim
 
     sr = torch.rand(1, 1, 64, 64, generator=torch.Generator().manual_seed(0))
     hr = torch.rand(1, 1, 64, 64, generator=torch.Generator().manual_seed(1))
@@ -990,7 +990,7 @@ def test_mean_ssim_dispatches_on_eval_config():
     daala = _make_lit_with_ssim_impl("daala")
 
     assert daala.scorer.ssim(sr, hr).item() == pytest.approx(
-        sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12
+        sisr.metrics.ssim.daala_ssim(sr, hr).item(), rel=1e-12
     )
     assert wang.scorer.ssim(sr, hr).item() != pytest.approx(daala.scorer.ssim(sr, hr).item())
 
@@ -1011,7 +1011,7 @@ def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
     """
     from torchmetrics.functional.image import structural_similarity_index_measure
 
-    import sisr.ssim
+    import sisr.metrics.ssim
 
     torch.manual_seed(0)
     model = SRResNet(scale=4, hidden_channel=8, num_residual_blocks=1)
@@ -1028,7 +1028,7 @@ def test_mean_ssim_uses_daala_through_real_srresnet_eval_config():
 
     result = lit.scorer.ssim(sr, hr)
 
-    assert result.item() == pytest.approx(sisr.ssim.daala_ssim(sr, hr).item(), rel=1e-12)
+    assert result.item() == pytest.approx(sisr.metrics.ssim.daala_ssim(sr, hr).item(), rel=1e-12)
     wang_result = structural_similarity_index_measure(sr, hr, data_range=1.0)
     assert result.item() != pytest.approx(wang_result.item())
 
@@ -1855,7 +1855,7 @@ def capture_logged_metrics(module: SRLightning) -> dict[str, float]:
 def test_validation_logs_perceptual_tags(monkeypatch):
     """Requested perceptual metrics reach TensorBoard under their own tag family."""
     monkeypatch.setattr(
-        "sisr.training.scoring.perceptual_score",
+        "sisr.metrics.scoring.perceptual_score",
         lambda name, sr, hr, lpips_net: torch.tensor(0.5 if name == "lpips" else 0.25),
     )
     module = build_module(eval_config=SREvalConfig(perceptual_metrics=["lpips", "dists"]))

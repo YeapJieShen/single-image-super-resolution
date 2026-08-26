@@ -24,7 +24,7 @@ upstream file does not itself achieve MATLAB parity here:
   port does, rounding only once at the very end) is a second, independent
   source of drift from real MATLAB -- confirmed against the unmodified
   upstream file, which does the same double-rounding (see
-  ``tests/test_imresize.py``).
+  ``tests/utils/test_imresize.py``).
 
 All arithmetic runs in float64 throughout (MATLAB computes ``imresize`` in
 double; a float32 port drifts by fractions of a level -- invisible until a
@@ -166,7 +166,7 @@ def _resize_axis(
     shipped worker counts. The contraction runs over the tap axis alone, so every
     output element's summation is unchanged by where the free axis is cut: the
     result is byte-identical, not merely close, and is asserted that way in
-    ``tests/test_imresize.py``.
+    ``tests/utils/test_imresize.py``.
 
     Args:
         image: uint8 array, ``(H, W, C)``.

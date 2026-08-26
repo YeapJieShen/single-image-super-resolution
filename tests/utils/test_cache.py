@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import lmdb
 import pytest
 
-from sisr.cache import LMDBCache, LMDBCacheBuildContext
+from sisr.utils.cache import LMDBCache, LMDBCacheBuildContext
 
 _MAP_SIZE = 16 * 1024 * 1024  # 16 MiB — plenty for tiny test caches
 
@@ -28,21 +28,27 @@ def _make_build_fn(n: int, value_prefix: bytes = b"v"):
 # ---------------------------------------------------------------------------
 
 
-def test_cache_module_imports_no_torch():
-    """sisr.cache must not pull torch in, directly or transitively.
+@pytest.mark.parametrize("module", ["sisr.utils", "sisr.utils.cache", "sisr.utils.imresize"])
+def test_utils_package_imports_no_torch(module):
+    """Nothing reachable from sisr.utils may pull torch in, transitively included.
 
     parallel_build fans out over a ProcessPoolExecutor, and on spawn platforms
     each worker re-imports the module tree holding its process_fn. A torch
     import reachable from here costs every worker several seconds for a
-    dependency the build path never calls, so guard it: a fresh interpreter is
-    required because the test session itself has torch loaded already.
+    dependency the build path never calls. A fresh interpreter is required
+    because the test session itself has torch loaded already.
+
+    The package is checked, not only its modules. sisr/utils/__init__.py
+    re-exporting anything is what would silently reintroduce the cost, because
+    importing one member would then import them all — and sisr.colorspace
+    imports torch eagerly, which is exactly why it is not in this package.
     """
-    probe = "import sys, sisr.cache; print('torch' in sys.modules)"
+    probe = f"import sys, {module}; print('torch' in sys.modules)"
     proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
     assert proc.stdout.strip() == "False", (
-        "sisr.cache now imports torch (directly or transitively). Every spawned "
-        "LMDB build worker pays that import for nothing — move the torch-dependent "
-        "code to sisr.colorspace or another module."
+        f"{module} now imports torch (directly or transitively). Every spawned "
+        f"LMDB build worker pays that import for nothing — keep torch-dependent code "
+        f"out of sisr.utils, and keep its __init__.py free of re-exports."
     )
 
 
@@ -274,7 +280,7 @@ def test_lmdb_try_load_drops_cache_on_genuine_corruption(tmp_path: Path):
         build_fn=_make_build_fn(1),
     )
     assert cache.path.exists()
-    with patch("sisr.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")):
+    with patch("sisr.utils.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")):
         assert cache._try_load("abc") is False
     assert not cache.path.exists()
 
@@ -292,8 +298,8 @@ def test_lmdb_try_load_does_not_raise_when_rmtree_fails_on_corruption(tmp_path: 
         build_fn=_make_build_fn(1),
     )
     with (
-        patch("sisr.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")),
-        patch("sisr.cache.shutil.rmtree", side_effect=PermissionError("locked")),
+        patch("sisr.utils.cache.lmdb.open", side_effect=lmdb.CorruptedError("corrupt")),
+        patch("sisr.utils.cache.shutil.rmtree", side_effect=PermissionError("locked")),
     ):
         assert cache._try_load("abc") is False
 
@@ -331,7 +337,7 @@ def test_lmdb_try_load_does_not_delete_cache_on_permission_error(tmp_path: Path)
         map_size=_MAP_SIZE,
         build_fn=_make_build_fn(1),
     )
-    with patch("sisr.cache.lmdb.open", side_effect=PermissionError("denied")):
+    with patch("sisr.utils.cache.lmdb.open", side_effect=PermissionError("denied")):
         assert cache._try_load("abc") is False
     assert cache.path.exists()
 
@@ -348,7 +354,7 @@ def test_lmdb_try_load_does_not_delete_cache_on_non_corruption_lmdb_error(tmp_pa
         map_size=_MAP_SIZE,
         build_fn=_make_build_fn(1),
     )
-    with patch("sisr.cache.lmdb.open", side_effect=lmdb.LockError("lock table full")):
+    with patch("sisr.utils.cache.lmdb.open", side_effect=lmdb.LockError("lock table full")):
         assert cache._try_load("abc") is False
     assert cache.path.exists()
 
@@ -385,7 +391,7 @@ def test_lmdb_try_load_propagates_unexpected_error(tmp_path: Path):
         map_size=_MAP_SIZE,
         build_fn=_make_build_fn(1),
     )
-    with patch("sisr.cache.lmdb.open", side_effect=ValueError("unexpected")):
+    with patch("sisr.utils.cache.lmdb.open", side_effect=ValueError("unexpected")):
         with pytest.raises(ValueError, match="unexpected"):
             cache._try_load("abc")
 
@@ -478,7 +484,7 @@ def test_parallel_build_single_worker_skips_process_pool(tmp_path: Path):
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[2, 3, 4], process_fn=_sq_process_fn, num_workers=1)
 
-    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.utils.cache.ProcessPoolExecutor") as mock_pool:
         cache = LMDBCache(
             cache_dir=tmp_path,
             name="pb1",
@@ -499,7 +505,7 @@ def test_parallel_build_none_workers_builds_single_item_inline(tmp_path: Path):
     def build(ctx: LMDBCacheBuildContext) -> None:
         ctx.parallel_build(items=[7], process_fn=_sq_process_fn, num_workers=None)
 
-    with patch("sisr.cache.ProcessPoolExecutor") as mock_pool:
+    with patch("sisr.utils.cache.ProcessPoolExecutor") as mock_pool:
         cache = LMDBCache(
             cache_dir=tmp_path,
             name="pbn",
@@ -578,7 +584,7 @@ def test_release_lock_does_not_remove_a_sentinel_it_never_created(tmp_path: Path
 
 _RACE_WORKER_SCRIPT = """
 import sys, time
-from sisr.cache import LMDBCache
+from sisr.utils.cache import LMDBCache
 
 def build(ctx):
     with open(sys.argv[2], "a") as f:
@@ -633,7 +639,7 @@ def test_lmdb_cache_builds_exactly_once_across_two_racing_processes(tmp_path: Pa
 
 _LIVE_BUILDER_WORKER_SCRIPT = """
 import sys, time
-from sisr.cache import LMDBCache
+from sisr.utils.cache import LMDBCache
 
 def build(ctx):
     with open(sys.argv[3], "a") as f:
@@ -942,7 +948,7 @@ def test_heartbeat_survives_transient_os_error_and_keeps_refreshing(tmp_path: Pa
             raise PermissionError("transient")
         real_utime(path, times)
 
-    with patch("sisr.cache.os.utime", side_effect=flaky_utime):
+    with patch("sisr.utils.cache.os.utime", side_effect=flaky_utime):
         cache._start_heartbeat(timeout=0.05)  # interval clamps to _HEARTBEAT_MIN_INTERVAL (0.01s)
         time.sleep(0.3)
         cache._stop_heartbeat()
@@ -959,7 +965,7 @@ def test_construction_releases_lock_when_heartbeat_thread_fails_to_start(tmp_pat
     up to 3x lock_timeout. The original error must still surface, and the
     sentinel must still be released."""
     with patch(
-        "sisr.cache.threading.Thread.start",
+        "sisr.utils.cache.threading.Thread.start",
         side_effect=RuntimeError("can't start new thread"),
     ):
         with pytest.raises(RuntimeError, match="can't start new thread"):
@@ -988,13 +994,13 @@ def test_pid_alive_windows_access_denied_means_alive():
     """OpenProcess failing with ERROR_ACCESS_DENIED means the process exists
     (e.g. owned by another user/session) -- it must be treated as alive, or
     a live builder running under a different account could be preempted."""
-    from sisr.cache import _pid_alive_windows  # local: doesn't exist pre-fix
+    from sisr.utils.cache import _pid_alive_windows  # local: doesn't exist pre-fix
 
     fake_kernel32 = MagicMock()
     fake_kernel32.OpenProcess.return_value = 0
     with (
-        patch("sisr.cache._kernel32", fake_kernel32),
-        patch("sisr.cache.ctypes.get_last_error", return_value=5),  # ERROR_ACCESS_DENIED
+        patch("sisr.utils.cache._kernel32", fake_kernel32),
+        patch("sisr.utils.cache.ctypes.get_last_error", return_value=5),  # ERROR_ACCESS_DENIED
     ):
         assert _pid_alive_windows(4242) is True
 
@@ -1003,13 +1009,13 @@ def test_pid_alive_windows_access_denied_means_alive():
 def test_pid_alive_windows_invalid_parameter_means_dead():
     """OpenProcess failing with ERROR_INVALID_PARAMETER (empirically what a
     genuinely nonexistent pid produces) means no such process."""
-    from sisr.cache import _pid_alive_windows  # local: doesn't exist pre-fix
+    from sisr.utils.cache import _pid_alive_windows  # local: doesn't exist pre-fix
 
     fake_kernel32 = MagicMock()
     fake_kernel32.OpenProcess.return_value = 0
     with (
-        patch("sisr.cache._kernel32", fake_kernel32),
-        patch("sisr.cache.ctypes.get_last_error", return_value=87),  # ERROR_INVALID_PARAMETER
+        patch("sisr.utils.cache._kernel32", fake_kernel32),
+        patch("sisr.utils.cache.ctypes.get_last_error", return_value=87),  # ERROR_INVALID_PARAMETER
     ):
         assert _pid_alive_windows(4242) is False
 
@@ -1052,7 +1058,7 @@ def test_publish_does_not_destroy_a_still_open_target_directory(tmp_path: Path):
         txn.put(b"__length__", b"1")
     tmp_env.close()
 
-    with patch("sisr.cache.shutil.rmtree") as mock_rmtree:
+    with patch("sisr.utils.cache.shutil.rmtree") as mock_rmtree:
         cache._publish(tmp_build_dir)
 
     assert mock_rmtree.call_count == 1, (

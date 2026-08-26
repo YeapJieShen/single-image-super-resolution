@@ -14,7 +14,7 @@ randomness); it is drawn fresh, from the cached raw array, on every
 ``scale``, uncached (each is decoded once per epoch, no repetition).
 
 LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-:mod:`sisr.imresize`), comparable to published paper numbers.
+:mod:`sisr.utils.imresize`), comparable to published paper numbers.
 """
 
 import random
@@ -22,8 +22,8 @@ from pathlib import Path
 
 import torch
 
-from ..cache import LMDBCacheBuildContext
-from ..imresize import resize
+from ..utils.cache import LMDBCacheBuildContext
+from ..utils.imresize import resize
 from .base import HRCachedTrainDataset, SRDataset
 from .hr_cache import process_hr_image as _process_hr_image
 
@@ -40,7 +40,7 @@ class TrainDataset(HRCachedTrainDataset):
     random ``hr_crop_size`` square crop (plain numpy slicing — crop
     randomness must survive the cache, so only the *decode* is memoized,
     never the crop), and bicubic-downsamples it by ``scale`` (via
-    :func:`sisr.imresize.resize`) to form the LR input. Unlike
+    :func:`sisr.utils.imresize.resize`) to form the LR input. Unlike
     :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     downsample+upsample round-trip** and the LR is *not* upsampled back —
     the model is responsible for the ×``scale`` upsampling, so the LR tensor is

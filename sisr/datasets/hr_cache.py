@@ -10,7 +10,7 @@ duplicating them per architecture, or having one borrow the other's — means
 the same image directory produces exactly one cache regardless of which
 architecture's dataset builds it first.
 
-Deliberately torch-free, like :mod:`sisr.cache`: :func:`process_hr_image` is
+Deliberately torch-free, like :mod:`sisr.utils.cache`: :func:`process_hr_image` is
 the function pickled to ``ProcessPoolExecutor`` build workers, and a spawned
 worker re-imports *its own defining module* to unpickle it — this one, not
 whichever dataset module happens to call it.

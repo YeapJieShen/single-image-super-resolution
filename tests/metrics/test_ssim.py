@@ -1,6 +1,6 @@
-"""Tests for :mod:`sisr.ssim` — the daala-methodology SSIM port.
+"""Tests for :mod:`sisr.metrics.ssim` — the daala-methodology SSIM port.
 
-Two layers of evidence, mirroring ``tests/test_imresize.py``:
+Two layers of evidence, mirroring ``tests/utils/test_imresize.py``:
 
 1. Structural tests (always run) pin the properties that make this a daala
    port rather than "SSIM with a different sigma": the integer kernel summing
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from sisr.ssim import _gaussian_kernel_int, daala_ssim, quantize_u8
+from sisr.metrics.ssim import _gaussian_kernel_int, daala_ssim, quantize_u8
 from tests.reference.daala_ssim_cases import (
     CASES,
     REAL_SETS,
@@ -26,9 +26,14 @@ from tests.reference.daala_ssim_cases import (
     make_real_planes,
 )
 
-EXPECTED_PATH = Path(__file__).resolve().parent / "reference" / "daala_ssim_expected.json"
+# Anchored on the tests/ and repo roots explicitly, not on this file's depth:
+# tests/reference/ and data/ are shared, so a path written relative to this
+# module silently breaks -- or worse, silently skips -- when the file moves.
+_TESTS_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+EXPECTED_PATH = _TESTS_ROOT / "reference" / "daala_ssim_expected.json"
 EXPECTED: dict[str, float] = json.loads(EXPECTED_PATH.read_text(encoding="utf-8"))
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = _REPO_ROOT / "data"
 
 
 def test_reference_expectations_cover_every_case():
@@ -147,7 +152,7 @@ def test_matches_daala_c_reference(case):
 def _real_case_params() -> list:
     """Build the ``case`` parametrize argument for the real-image parity test.
 
-    Mirrors ``tests/test_imresize.py``'s real-data pattern (see
+    Mirrors ``tests/utils/test_imresize.py``'s real-data pattern (see
     ``REFERENCE_DIR`` and its skip logic): a directory-existence check
     producing a single cleanly-skipped node whose reason names what is
     missing, versus the directory existing but yielding no cases.
@@ -307,7 +312,7 @@ def test_quantize_roundtrips_every_8bit_level():
 
 
 def test_quantize_rounds_half_away_from_zero():
-    """Ties go away from zero, not to even — sisr.imresize's convention.
+    """Ties go away from zero, not to even — sisr.utils.imresize's convention.
 
     The precondition assert matters: k/255 is never exactly representable
     (255 = 3*5*17 has no power-of-two factor), so the test verifies that the

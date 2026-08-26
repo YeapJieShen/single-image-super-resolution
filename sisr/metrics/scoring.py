@@ -26,13 +26,21 @@ This module deliberately depends on ``SREvalConfig`` and tensors only: no
 tensors and a config.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
 import torch
 import torchmetrics.functional.image
 
 from ..colorspace import rgb_to_ycbcr_studio
-from ..perceptual import perceptual_score
-from ..ssim import daala_ssim
-from .config import SREvalConfig
+from .perceptual import perceptual_score
+from .ssim import daala_ssim
+
+if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
+    # runtime import would make this package depend on `sisr.training` — which
+    # imports back into `sisr.metrics`, closing a cycle.
+    from ..training.config import SREvalConfig
 
 __all__ = ["SRScorer", "Scores", "metric_tag"]
 
@@ -202,8 +210,14 @@ class SRScorer:
         """
         if self.eval_config.ssim_impl == "daala":
             return daala_ssim(sr, hr)
-        return torchmetrics.functional.image.structural_similarity_index_measure(
-            sr, hr, data_range=1.0
+        # torchmetrics widens the return to a tuple only when return_full_image or
+        # return_contrast_sensitivity is set; both default False, so this call site
+        # always yields the scalar.
+        return cast(
+            torch.Tensor,
+            torchmetrics.functional.image.structural_similarity_index_measure(
+                sr, hr, data_range=1.0
+            ),
         )
 
     def perceptual(self, name: str, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:

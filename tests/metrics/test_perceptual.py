@@ -10,7 +10,7 @@ dict alongside, so a spy from one test can never be served to another.
 import pytest
 import torch
 
-from sisr.perceptual import PERCEPTUAL_METRICS, perceptual_score
+from sisr.metrics.perceptual import PERCEPTUAL_METRICS, perceptual_score
 
 
 class _LpipsSpy(torch.nn.Module):
@@ -53,9 +53,9 @@ def spies(monkeypatch):
     """Both import seams stubbed, on a cache private to this test."""
     _LpipsSpy.seen = {}
     _DistsSpy.constructions = 0
-    monkeypatch.setattr("sisr.perceptual._NET_CACHE", {})
-    monkeypatch.setattr("sisr.perceptual._lpips_metric_cls", lambda: _LpipsSpy)
-    monkeypatch.setattr("sisr.perceptual._dists_net_cls", lambda: _DistsSpy)
+    monkeypatch.setattr("sisr.metrics.perceptual._NET_CACHE", {})
+    monkeypatch.setattr("sisr.metrics.perceptual._lpips_metric_cls", lambda: _LpipsSpy)
+    monkeypatch.setattr("sisr.metrics.perceptual._dists_net_cls", lambda: _DistsSpy)
 
 
 @pytest.mark.parametrize("net", ["alex", "vgg", "squeeze"])
@@ -135,7 +135,7 @@ def test_lpips_state_is_reset_after_every_call(spies):
 def test_cached_backbone_cannot_train_or_leak_gradients(spies, name):
     """A memoised backbone outlives the call that built it, so it must be inert:
     eval mode, detached parameters, and no graph reaching the scored tensors."""
-    from sisr.perceptual import _cached_net
+    from sisr.metrics.perceptual import _cached_net
 
     sr = torch.rand(1, 3, 32, 32, requires_grad=True)
     score = perceptual_score(name, sr, torch.rand(1, 3, 32, 32))
@@ -164,7 +164,7 @@ def test_missing_lpips_extra_names_the_install_command(monkeypatch):
     ImportError (or any error that drops the extra's name) would leave anyone
     hitting this with no way to know which package fixes it.
     """
-    monkeypatch.setattr("sisr.perceptual._NET_CACHE", {})
+    monkeypatch.setattr("sisr.metrics.perceptual._NET_CACHE", {})
     monkeypatch.setattr("torchmetrics.utilities.imports._LPIPS_AVAILABLE", False)
 
     with pytest.raises(ImportError, match=r"pip install '\.\[perceptual\]'"):

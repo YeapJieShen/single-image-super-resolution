@@ -14,7 +14,7 @@ what gets sliced/degraded from them at read time.
 :class:`ValidationDataset` generates LR pairs on the fly for full images.
 
 LR degradation uses MATLAB-compatible antialiased bicubic resizing (see
-:mod:`sisr.imresize`): its kernel widening on downscale is itself the
+:mod:`sisr.utils.imresize`): its kernel widening on downscale is itself the
 low-pass filter, so no separate blur step is needed.
 """
 
@@ -25,8 +25,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..cache import LMDBCacheBuildContext
-from ..imresize import resize
+from ..utils.cache import LMDBCacheBuildContext
+from ..utils.imresize import resize
 from .base import HRCachedTrainDataset, SRDataset
 from .hr_cache import process_hr_image as _process_hr_image
 

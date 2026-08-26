@@ -1,4 +1,4 @@
-"""Tests for the vendored MATLAB-compatible :mod:`sisr.imresize`.
+"""Tests for the vendored MATLAB-compatible :mod:`sisr.utils.imresize`.
 
 Two layers of evidence:
 
@@ -68,7 +68,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sisr.imresize import (
+from sisr.utils.imresize import (
     _contributions,
     _cubic,
     _resize_axis,
@@ -77,7 +77,7 @@ from sisr.imresize import (
     resize,
 )
 
-REFERENCE_DIR = Path(__file__).resolve().parent.parent / "data" / "reference"
+REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference"
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ def test_resize_axis_gather_chunking_is_byte_identical_and_really_splits(axis, m
     runs in — so the observed gather sizes are asserted too: more than one, and
     every one within the cap.
     """
-    import sisr.imresize as imresize
+    import sisr.utils.imresize as imresize
 
     rng = np.random.default_rng(20260809 + axis)
     img = rng.integers(0, 256, size=(40, 53, 3), dtype=np.uint8)

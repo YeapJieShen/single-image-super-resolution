@@ -10,7 +10,7 @@ This module deliberately imports no torch, and must stay that way.
 ``ProcessPoolExecutor``, and on spawn platforms (Windows, macOS) every worker
 re-imports the module tree holding its ``process_fn`` — so a torch import
 reachable from here costs each worker several seconds for a dependency the
-build path never calls. ``tests/test_cache.py`` asserts the module stays
+build path never calls. ``tests/utils/test_cache.py`` asserts the module stays
 torch-free; colorspace math lives in :mod:`sisr.colorspace` for this reason.
 """
 
