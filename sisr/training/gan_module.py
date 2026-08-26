@@ -73,7 +73,7 @@ class SRGANLightning(SRLightning):
         training_config: Defaults to :class:`SRGANTrainingConfig`, which
             supplies ``adversarial_weight`` and ``d_steps_per_g_step`` — both
             read by :meth:`training_step` — plus ``init_from`` (read by
-            :meth:`setup`, on ``fit`` only), and refuses ``cuda_graph``.
+            :meth:`setup`, on ``fit`` only).
         eval_config: Defaults to :class:`SRGANEvalConfig` (SRResNet's scoring
             plus perceptual metrics, which are the only metrics that track what
             an adversarial objective optimises).
@@ -127,15 +127,12 @@ class SRGANLightning(SRLightning):
         )
         # The type hint is not enforced at runtime, and everything this module
         # asserts about its config rests on the subclass: the base carries no
-        # adversarial_weight/d_steps_per_g_step, and does not refuse cuda_graph.
+        # adversarial_weight/d_steps_per_g_step.
         if not isinstance(self.training_config, SRGANTrainingConfig):
             raise TypeError(
                 f"training_config must be an SRGANTrainingConfig, got "
                 f"{type(self.training_config).__name__}. This module reads "
-                f"adversarial_weight and d_steps_per_g_step off it on every step, and "
-                f"only that subclass refuses cuda_graph — which no two-optimizer manual "
-                f"loop can honour, and which SRLightning.on_fit_start would otherwise "
-                f"accept and start checking graph prerequisites for."
+                f"adversarial_weight and d_steps_per_g_step off it on every step."
             )
 
         # The correlated check SRGANTrainingConfig.validate_against cannot do:
@@ -436,11 +433,7 @@ class SRGANLightning(SRLightning):
         writing that synchronisation explicitly, so this refuses rather than
         training silently out of sync.
 
-        The base's CUDA-graph path is unreachable from here — it is gated on
-        ``training_config.cuda_graph``, which :class:`SRGANTrainingConfig`
-        refuses at construction, and :meth:`__init__` refuses any other config
-        type — so what ``super()`` contributes is the ``torch.compile`` warm-up
-        and the graph-state reset.
+        What ``super()`` contributes is the ``torch.compile`` warm-up.
 
         Raises:
             RuntimeError: If ``trainer.world_size > 1``.

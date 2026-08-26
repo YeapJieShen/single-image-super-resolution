@@ -21,7 +21,6 @@ from ..losses import SRLoss
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
-from .cuda_graph import CUDAGraphStep
 from .metadata import build_metadata
 from .probe import probe_pair
 from .scoring import SRScorer, metric_tag
@@ -122,13 +121,6 @@ class SRLightning(lightning.LightningModule):
         # set of weights and it still moves with .to() through self.model's
         # normal registration.
         object.__setattr__(self, "_compiled", compiled)
-
-        self._cuda_graph: CUDAGraphStep | None = None
-        # Per-step, not per-run: on an eager fallback step Lightning must still
-        # run backward and zero_grad. Gating those on "a graph exists" instead
-        # makes the epoch's partial last batch step on the previous replay's
-        # gradients — a silent duplicated update, not a crash.
-        self._graphed_step = False
 
         # Save exactly this plain dict — bypasses save_hyperparameters' frame/given_hparams
         # introspection, so the checkpoint's `hyper_parameters` is identical whether this
@@ -581,9 +573,7 @@ class SRLightning(lightning.LightningModule):
         Returns:
             Scalar loss tensor for the optimizer.
         """
-        loss = self._graph_step(batch) if self.training_config.cuda_graph else None
-        if loss is None:
-            loss, *_ = self._step(batch, need_sr_rgb=False)
+        loss, *_ = self._step(batch, need_sr_rgb=False)
         self.log("loss/train", loss, prog_bar=True, on_step=True)
         self._log_loss_terms("train")
         return loss
@@ -610,133 +600,6 @@ class SRLightning(lightning.LightningModule):
                 on_epoch=not on_step,
                 add_dataloader_idx=False,
             )
-
-    def _graph_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor | None:
-        """Run the captured training step, building the graph on first use.
-
-        Args:
-            batch: ``(lr_img, hr_img)`` tuple, already on the device.
-
-        Returns:
-            The replayed step's loss, or ``None`` when the batch's shapes don't
-            match the captured ones (the epoch's partial last batch) and the
-            caller must run an eager step instead.
-        """
-        if self._cuda_graph is None:
-            optimizer = self.optimizers()
-            self._cuda_graph = CUDAGraphStep(
-                lambda b: self._step(b, need_sr_rgb=False)[0],
-                self,
-                getattr(optimizer, "optimizer", optimizer),
-            )
-            reason = self._unsafe_capture_reason()
-            if reason is not None:
-                self._cuda_graph.disable(reason)
-        loss = self._cuda_graph.run(batch)
-        self._graphed_step = loss is not None
-        return loss
-
-    def _unsafe_capture_reason(self) -> str | None:
-        """Why capture must not even be attempted on this run, or ``None``.
-
-        A ``DataLoader`` with ``num_workers > 0`` **and** ``pin_memory=True``
-        runs its pinning in a separate thread of *this* process, and that thread
-        calls ``cudaHostAlloc`` whenever its host-block cache needs a new size.
-        ``cudaHostAlloc`` implicitly synchronizes the device, which invalidates
-        any capture open at that moment. Measured on this project: 1 crash in 6
-        fits at ``num_workers=16, pin_memory=True`` versus 0 in 8 with
-        ``pin_memory=False``, all else equal.
-
-        Retrying does not make this safe. The invalidation leaves a sticky CUDA
-        error that the *next* CUDA call in the process consumes, and when that
-        call belongs to the pin-memory thread the ``DataLoader`` dies
-        ("Caught AcceleratorError in pin memory thread") no matter what this
-        process's main thread does about its own capture. Prevention is the only
-        option, so this is a warn-and-run-eager condition rather than one of
-        :meth:`_check_cuda_graph_prerequisites`'s hard refusals: those catch
-        silent mistraining, this only costs speed.
-
-        ``num_workers=0`` — what both shipped templates use — pins inline on the
-        main thread, so there is no second thread to race and ``pin_memory``
-        stays worth having there.
-
-        Returns:
-            An operator-facing reason, or ``None`` when capture is safe to try.
-        """
-        loader = getattr(self.trainer, "train_dataloader", None)
-        workers = getattr(loader, "num_workers", 0) or 0
-        if workers > 0 and getattr(loader, "pin_memory", False):
-            return (
-                f"the train DataLoader combines num_workers={workers} with "
-                f"pin_memory=True, whose pin-memory thread calls cudaHostAlloc and can "
-                f"invalidate a capture mid-flight, killing the run. Training continues "
-                f"eagerly. Set pin_memory: false to graph at this worker count, or "
-                f"num_workers: 0 (both shipped templates do) to keep pin_memory — it "
-                f"pins on the main thread there, with nothing to race."
-            )
-        return None
-
-    def backward(self, loss: torch.Tensor, *args: Any, **kwargs: Any) -> None:
-        """Backpropagate ``loss``, unless the captured graph already did.
-
-        On an eager fallback step this writes into the same ``.grad`` tensors the
-        captured graph holds addresses for, which is only safe while
-        ``create_graph`` stays ``False`` — a double-backward pass makes ``.grad``
-        a graph-tracked tensor and can rebind it, invalidating every later replay.
-        Nothing in this project passes ``create_graph``.
-
-        Args:
-            loss: Scalar loss returned by :meth:`training_step`.
-            *args: Forwarded to Lightning's implementation.
-            **kwargs: Forwarded to Lightning's implementation.
-        """
-        if self._graphed_step:
-            return
-        super().backward(loss, *args, **kwargs)
-
-    def optimizer_zero_grad(
-        self, epoch: int, batch_idx: int, optimizer: torch.optim.Optimizer
-    ) -> None:
-        """Zero gradients, unless the captured graph owns them.
-
-        Lightning's closure order is ``training_step -> zero_grad -> backward``,
-        so on a graphed step this must be a no-op: the replay has already
-        zeroed, filled and finished with the gradients, and zeroing again here
-        would hand the optimizer nothing but zeros. On an eager fallback step it
-        must run — but with ``set_to_none=False`` whenever a graph is live,
-        because the graph writes into those exact ``.grad`` tensors and freeing
-        them invalidates every later replay. With no live graph (capture
-        disabled after repeated failures) the ordinary ``set_to_none=True`` is
-        both safe and marginally faster.
-
-        Args:
-            epoch: Current epoch index.
-            batch_idx: Current batch index.
-            optimizer: The optimizer whose gradients to zero.
-        """
-        if not self.training_config.cuda_graph:
-            super().optimizer_zero_grad(epoch, batch_idx, optimizer)
-        elif not self._graphed_step:
-            live = self._cuda_graph is not None and self._cuda_graph.captured
-            optimizer.zero_grad(set_to_none=not live)
-
-    def on_validation_model_zero_grad(self) -> None:
-        """Skip Lightning's pre-validation gradient release while a graph is live.
-
-        Before each mid-training validation run Lightning frees gradient memory
-        with ``zero_grad(set_to_none=True)``. The replay fills the exact
-        ``.grad`` tensors allocated at capture and never re-binds the
-        parameters' ``.grad`` attributes, so one release severs the link
-        permanently: every later ``optimizer.step()`` sees ``None`` grads and
-        skips every parameter — training silently freezes at the first
-        validation while the logged loss keeps moving with the incoming
-        batches. There is also nothing to free: the tensors live in the
-        graph's private memory pool for the rest of the run either way. Eager
-        runs keep Lightning's release.
-        """
-        live = self._cuda_graph is not None and self._cuda_graph.captured
-        if not live:
-            super().on_validation_model_zero_grad()
 
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
@@ -780,7 +643,7 @@ class SRLightning(lightning.LightningModule):
             )
 
     def on_fit_start(self) -> None:
-        """Check the CUDA-graph prerequisites, then warm up the compiled training path.
+        """Warm up the compiled training path, if compilation is on.
 
         A backend name ``torch._dynamo.list_backends()`` recognizes can
         still lack its toolchain (e.g. ``'inductor'`` without Triton), which
@@ -794,106 +657,12 @@ class SRLightning(lightning.LightningModule):
         The warm-up is a no-op when compilation is off, or when
         ``training_config.example_input_shape`` is unset — there is then no
         input shape to probe with (both shipped templates set it).
-
-        Any graph captured by a previous ``fit`` on this module is dropped here,
-        unconditionally. ``Strategy.teardown`` moves the module — and its
-        ``.grad`` tensors — back to CPU at the end of a fit, which frees the
-        device blocks the graph baked addresses for; replaying it in a second
-        ``fit`` would write into freed memory. Re-capturing is cheap (three
-        warm-up iterations) and happens on the next graphed step.
-
-        Raises:
-            RuntimeError: Via :meth:`_check_cuda_graph_prerequisites` when
-                ``training_config.cuda_graph`` is set on a run that cannot
-                honour it.
         """
-        self._cuda_graph = None
-        self._graphed_step = False
-        if self.training_config.cuda_graph:
-            self._check_cuda_graph_prerequisites()
         if self._compiled is None or self.training_config.example_input_shape is None:
             return
         dummy = torch.zeros(1, *self.training_config.example_input_shape, device=self.device)
         with torch.no_grad():
             self._compiled(dummy)
-
-    def on_train_epoch_start(self) -> None:
-        """Re-assert the CUDA-graph prerequisites at the top of every epoch.
-
-        ``on_fit_start`` alone is not enough:
-        :class:`~lightning.pytorch.callbacks.GradientAccumulationScheduler`
-        *requires* ``trainer.accumulate_grad_batches`` to still be 1 when
-        training starts and only raises it from its own
-        ``on_train_epoch_start``, so a once-at-fit-start check is guaranteed to
-        read 1 and pass, and accumulation would then silently take effect from
-        the scheduled epoch. Lightning runs callback hooks before this module
-        hook, so by here the scheduler's value for this epoch is already in
-        place.
-
-        Raises:
-            RuntimeError: Via :meth:`_check_cuda_graph_prerequisites` when a
-                prerequisite stopped holding since ``fit`` began.
-        """
-        if self.training_config.cuda_graph:
-            self._check_cuda_graph_prerequisites()
-
-    def _check_cuda_graph_prerequisites(self) -> None:
-        """Refuse ``cuda_graph=True`` on a run whose semantics it would change.
-
-        Each of these would otherwise mistrain silently rather than crash, so
-        they are hard refusals, not warnings. Checked in
-        config-then-environment order so a misconfiguration is reported even on
-        a machine with no GPU to run on. Called from ``on_fit_start`` and again
-        from :meth:`on_train_epoch_start`, since a callback can move
-        ``accumulate_grad_batches`` after ``fit`` has begun.
-
-        Raises:
-            RuntimeError: If precision is not ``'32-true'``; if the run is
-                distributed (capture and DDP's gradient hooks conflict — DDP
-                stashes ``AccumulateGrad`` references); if
-                ``accumulate_grad_batches > 1`` (Lightning zeroes gradients only
-                on the first micro-batch and expects the rest to accumulate, but
-                every replay zeroes them, and the loss is not scaled by the
-                accumulation factor); or if the accelerator is not CUDA.
-        """
-        trainer = self.trainer
-        if trainer.precision != "32-true":
-            reason = (
-                "its GradScaler scales the loss in the precision plugin's pre_backward "
-                "hook, which a captured backward pass never runs, so gradients would be "
-                "silently unscaled"
-                if trainer.precision == "16-mixed"
-                else "the captured region's dtypes and autocast state are fixed at capture "
-                "time and this path is only validated for full fp32 (bf16 is a measured "
-                "regression on this project's architectures besides)"
-            )
-            raise RuntimeError(
-                f"training_config.cuda_graph=True requires trainer.precision='32-true', "
-                f"got {trainer.precision!r}: {reason}. Set trainer.precision to 32-true, "
-                f"or cuda_graph to false."
-            )
-        if trainer.world_size > 1:
-            raise RuntimeError(
-                f"training_config.cuda_graph=True does not support distributed training "
-                f"(trainer.world_size={trainer.world_size}). DDP stashes references to "
-                f"the autograd graph's AccumulateGrad nodes and inserts gradient "
-                f"all-reduce hooks, neither of which survives capture. Train on one "
-                f"device, or set cuda_graph to false."
-            )
-        if trainer.accumulate_grad_batches > 1:
-            raise RuntimeError(
-                f"training_config.cuda_graph=True does not support gradient accumulation "
-                f"(trainer.accumulate_grad_batches={trainer.accumulate_grad_batches}). "
-                f"Every replay zeroes the gradients, so nothing would accumulate across "
-                f"micro-batches. Raise the loader's batch_size instead, or set cuda_graph "
-                f"to false."
-            )
-        if self.device.type != "cuda":
-            raise RuntimeError(
-                f"training_config.cuda_graph=True requires a CUDA device, but this module "
-                f"is on {self.device!r}. Set trainer.accelerator='cuda', or cuda_graph to "
-                f"false."
-            )
 
     def on_train_start(self) -> None:
         """Register val metric tags with TensorBoard's HParams tab.
