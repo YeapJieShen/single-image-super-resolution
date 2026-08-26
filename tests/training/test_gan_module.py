@@ -466,8 +466,8 @@ def test_global_step_counts_optimizer_steps_not_batches(k, n_batches, expected):
 def test_training_keeps_updating_across_a_validation_boundary():
     """Everything but the optimization surface is inherited, so validation must
     still score and training must still move afterwards. A mid-training
-    validation run has frozen this project's training before (the CUDA-graph
-    zero_grad trap), and it does so with the loss curve still moving."""
+    validation run has frozen this project's training before, and it did so
+    with the loss curve still moving."""
     module = build_gan_module(k=1)
     recorder = ParamRecorder()
 

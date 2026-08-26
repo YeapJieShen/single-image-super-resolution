@@ -59,8 +59,6 @@ notice.
   the size of a full checkpoint. `attribute` picks which component gets saved, with
   matching provenance, so a GAN run can hand out the generator and retain the critic in
   separate files.
-- **Opt-in full-step CUDA-graph capture** (`SRTrainingConfig.cuda_graph`), which refuses
-  configurations it cannot capture soundly rather than capturing them anyway.
 - **LR-only prediction path** — `PredictDataset`, `predict_step`, and `SRPredictionWriter`.
 - **LMDB HR caching** shared by both architectures, with an advisory build lock so
   concurrent builds do not duplicate work.
@@ -80,9 +78,6 @@ notice.
 
 ### Fixed
 
-- **Graphed training froze at the first mid-training validation.** Lightning's pre-val
-  `zero_grad(set_to_none=True)` severed a live CUDA graph's gradient tensors from the
-  optimizer, so weights stopped updating while the reported loss kept moving.
 - **`--ckpt_path` could not reload any checkpoint this project had ever saved.**
 - **`--ckpt_path` rebuilt an architecture's `eval_config` as the base class**, so every
   default the subclass had overridden reverted on reload — a resumed SRResNet run could

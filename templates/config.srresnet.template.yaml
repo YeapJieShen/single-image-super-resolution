@@ -37,8 +37,6 @@ model:
       # Two caveats before running it: the first use downloads ~548 MB of VGG19
       # weights to the torch hub cache, and TV's 2e-8 presumes the [-1, 1] output
       # range that RGBSignedOutputProcessor above provides.
-      # cuda_graph: true is compatible with a VGG term -- capture engages with the
-      # VGG inside the captured region.
       # criterion:
       #   class_path: sisr.losses.WeightedSumLoss
       #   init_args:
@@ -135,44 +133,11 @@ trainer:
   # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
   # above, hence it lives here rather than as a custom key.
   benchmark: true
-  # bf16-mixed on its own is a REGRESSION at this batch size, measured twice on
-  # two platforms (0.72x on Windows; 41.0 vs 35.5 ms/step eager on Linux, 0.87x).
-  # Autocast's cast-churn doesn't saturate the SMs at b16, so this is not merely
-  # "stay in fp32 for paper comparability" -- alone, it is slower.
-  # Crossover measured at b32 (bf16+fused wins) -- revisit only if batch_size rises.
-  #
-  # It is a different story COMBINED WITH torch.compile's inductor backend, which
-  # fuses those casts into the kernels. Measured on Linux, SRResNet b16 96x96 x4,
-  # 350 steady batches per cell, both sweep orderings:
-  #
-  #   cuda_graph fp32 (below)            25.7 ms/step
-  #   eager fp32                         35.5
-  #   eager bf16                         41.0   <- bf16 alone loses
-  #   inductor reduce-overhead fp32      26.3   <- does NOT beat cuda_graph
-  #   inductor reduce-overhead bf16      16.0   <- 1.60x over cuda_graph
-  #
-  # !! Those two rows are NOT scope-matched, so read the fp32 one narrowly.
-  # cuda_graph captures the WHOLE training step (zero_grad, forward, loss,
-  # backward); compile_backend wraps the MODEL ONLY -- loss, backward and the
-  # optimizer stay eager. So "inductor fp32 loses" means "compiling the model
-  # alone does not beat capturing the whole step", not "inductor cannot beat
-  # graph capture". The bf16 win above is achieved despite that same handicap.
-  #
-  # So the opt-in path is BOTH settings together, and only together:
-  #   precision: bf16-mixed
-  #   model.training_config.compile_backend: inductor   (with cuda_graph off --
-  #     the two are mutually exclusive; inductor brings its own cudagraph trees)
-  #
-  # !! Before using it for anything you intend to compare against a paper: the
-  # cuda_graph path is verified bit-identical to eager, and bf16-mixed is not.
-  # The 1.60x is a numerics trade whose PSNR/SSIM cost has NOT been measured.
-  # Throughput was all that matrix established. Stay in fp32 for reproduction
-  # runs until a fidelity comparison exists.
-  #
-  # Inductor also needs a C COMPILER at runtime, not just the triton package --
-  # it shells out to build each kernel. `pip install triton` alone is not enough;
-  # a box with no toolchain fails at the first compiled step with
-  # "RuntimeError: Failed to find C compiler".
+  # This config trains eager fp32 -- bit-identical by definition, which is what a
+  # paper reproduction needs. bf16-mixed alone is slower here, not faster; pairing
+  # it with model.training_config.compile_backend: inductor is the opt-in fast path
+  # (inductor additionally needs a C compiler at runtime, not just triton), and its
+  # PSNR/SSIM cost has not been measured.
   # precision: bf16-mixed
   accelerator: cuda
   devices: [0]

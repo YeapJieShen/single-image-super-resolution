@@ -58,6 +58,6 @@ thing this section exists to prevent.
 ---
 
 <sub>**Note on `codecov/patch`:** it is expected to fail and is not a required check. It
-reports on paths that cannot execute on CPU-only runners (cache-lock liveness, CUDA-graph
-capture). The real coverage gate is `--cov-fail-under=90` inside `test`. No need to
+reports on paths that cannot execute on CPU-only runners (cache-lock liveness). The real
+coverage gate is `--cov-fail-under=90` inside `test`. No need to
 investigate it.</sub>
