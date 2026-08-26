@@ -65,6 +65,10 @@ notice.
 
 ### Changed
 
+- **Type checking is a required status check**, and the package ships a `py.typed`
+  marker, so the annotations are a checked promise to downstream users rather than an
+  internal convention. The modules exempted from it are now named one by one instead
+  of matched by a glob that silently swallowed every module added beside them.
 - **`LMDBCache.close()`** releases the read environment and lets the next access reopen
   it. Closing the object `get_env()` returns left the instance holding a dead handle.
 - **Y-channel metrics are computed in BT.601 studio range**, matching MATLAB and the
