@@ -4,11 +4,16 @@
 [![build](https://github.com/YeapJieShen/single-image-super-resolution/actions/workflows/build.yml/badge.svg)](https://github.com/YeapJieShen/single-image-super-resolution/actions/workflows/build.yml)
 [![coverage](https://codecov.io/gh/YeapJieShen/single-image-super-resolution/branch/main/graph/badge.svg)](https://app.codecov.io/gh/YeapJieShen/single-image-super-resolution)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![mypy](https://img.shields.io/badge/mypy-checked-blue)](https://mypy-lang.org/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
-That `test` badge isn't decorative: `test` is a required status check, so a pull
-request cannot merge without the full suite passing.
+Those badges aren't decorative. `test`, `build`, `lint` and `typecheck` are all
+**required status checks**, so a pull request cannot merge unless the full suite
+passes on Linux and Windows across Python 3.12 and 3.13, the wheel and the editable
+install both work, `ruff` is clean, and the package type-checks. The package also
+ships a `py.typed` marker, so those annotations reach you rather than stopping at
+the repository boundary.
 
 Reproduce single-image super-resolution papers without rewriting a training loop each
 time. Every architecture runs through one `LightningCLI` entrypoint, and an experiment is
