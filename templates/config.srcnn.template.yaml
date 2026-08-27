@@ -42,7 +42,7 @@ model:
 
 data:
   # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-  # sisr/imresize.py), comparable to published paper numbers.
+  # sisr/utils/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srcnn.TrainDataset
     init_args:

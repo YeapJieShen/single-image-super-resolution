@@ -26,7 +26,7 @@ notice.
   of `SRLightning`. Existing configs that set `model:` fields directly keep resolving
   against the default `SRLightning`; the shipped templates were re-nested to match the
   new form.
-- **Perceptual metrics** (`sisr/perceptual.py`) — LPIPS and DISTS, selected by
+- **Perceptual metrics** (`sisr/metrics/perceptual.py`) — LPIPS and DISTS, selected by
   `SREvalConfig.perceptual_metrics` and logged as `lpips/val` / `dists/val` and per
   benchmark set. Empty by default, so every existing architecture logs exactly the tags
   it logged before. They exist because an adversarial objective makes PSNR and SSIM worse
@@ -45,11 +45,11 @@ notice.
 - **Pluggable losses** (`sisr/losses/`): `CharbonnierLoss`, `TotalVariationLoss`,
   `VGG19FeatureLoss`, `VGG16FeatureLoss` and `WeightedSumLoss`, selectable and combinable
   from YAML. L1 and MSE need no wrapper — `torch.nn.L1Loss` already works as a criterion.
-- **daala-methodology SSIM** (`sisr/ssim.py`) behind `SREvalConfig.ssim_impl`, the
+- **daala-methodology SSIM** (`sisr/metrics/ssim.py`) behind `SREvalConfig.ssim_impl`, the
   convention Ledig et al. used, verified against daala's own C implementation.
   `SRResNetEvalConfig` defaults to it; everything else stays on the field-standard fixed
   11×11 gaussian.
-- **Vendored byte-exact MATLAB `imresize`** (`sisr/imresize.py`, MIT) as the sole LR
+- **Vendored byte-exact MATLAB `imresize`** (`sisr/utils/imresize.py`, MIT) as the sole LR
   degradation, verified byte-identical to real MATLAB output across the benchmark sets.
 - **ONNX export** (`sisr/export.py`) behind the `[export]` extra, with dynamic spatial
   axes and provenance written into `metadata_props`.

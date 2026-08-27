@@ -41,10 +41,11 @@ dependencies = [
     "torch>=2.6",
     "torchvision>=0.21",
     "lightning>=2.4",
-    # 1.9 is the version DISTS was verified present in on this project. sisr/perceptual.py
-    # caches the backbones directly (torchmetrics.functional.image.dists.DISTSNetwork and
-    # torchmetrics.image.lpip.LearnedPerceptualImagePatchSimilarity.net), so the pin covers
-    # those, not just the functional entry points.
+    # 1.9 is the version DISTS was verified present in on this project.
+    # sisr/metrics/perceptual.py caches the backbones directly
+    # (torchmetrics.functional.image.dists.DISTSNetwork and
+    # torchmetrics.image.lpip.LearnedPerceptualImagePatchSimilarity.net), so the
+    # pin covers those, not just the functional entry points.
     # Lowering it means testing the lower version, not guessing.
     "torchmetrics>=1.9",
     # sisr/cli.py calls set_parsing_settings(subclasses_enabled=...) so a dotted CLI
@@ -117,7 +118,7 @@ testpaths = ["tests"]
 # bare `pytest` in a dev shell runs serial. See test.yml's test-matrix job for the
 # worker-count rationale and measurements.
 addopts = "-ra --strict-markers --import-mode=importlib"
-# importlib import-mode does NOT add the repo root to sys.path — tests/test_ssim.py's
+# importlib import-mode does NOT add the repo root to sys.path — tests/metrics/test_ssim.py's
 # `from tests.reference....` (and any `import sisr`) only resolves today because the
 # editable install's .pth file happens to put it there. A non-editable install (`pip
 # install .`) plus bare pytest fails at collection; bare pytest from a git worktree
@@ -197,7 +198,7 @@ convention = "google"
 # static typing without a large, separate effort. The mypy CI job is green
 # only because of those overrides -- it is not exercising those modules.
 python_version = "3.12"
-# Pinned rather than left to infer from the host: sisr/cache.py's Windows
+# Pinned rather than left to infer from the host: sisr/utils/cache.py's Windows
 # liveness check uses ctypes.WinDLL, which typeshed only exposes under this
 # platform. Without pinning it, the exact same code type-checks clean on a
 # Windows dev machine and fails with attr-defined errors on Linux/macOS one
