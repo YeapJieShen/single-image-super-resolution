@@ -399,6 +399,21 @@ def test_flatten_hparams_handles_nested():
     }
 
 
+def test_flatten_hparams_stringifies_a_value_of_no_other_kind():
+    """The catch-all is the only thing standing between an unusual config
+    field and a crash while writing the TensorBoard HParams tab.
+
+    No shipped config reaches it today -- every field is a primitive, a list,
+    a dict or a class -- which is why it sat uncovered. It is reachable by any
+    architecture whose config holds something else (a Path, an enum), so it is
+    a live safety net rather than dead code, and it is cheaper to pin than to
+    remove and rediscover.
+    """
+    flat = SRLightning._flatten_hparams({"where": Path("/tmp/x"), "nested": {"k": Path("y")}})
+
+    assert flat == {"where": str(Path("/tmp/x")), "nested/k": str(Path("y"))}
+
+
 # ---------------------------------------------------------------------------
 # init strategy
 # ---------------------------------------------------------------------------

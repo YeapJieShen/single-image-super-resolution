@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,22 @@ import pytest
 from sisr.utils.cache import LMDBCache, LMDBCacheBuildContext
 
 _MAP_SIZE = 16 * 1024 * 1024  # 16 MiB — plenty for tiny test caches
+
+
+@contextmanager
+def _live_child():
+    """Yields the pid of a process that is certainly alive and certainly not ours.
+
+    Tests that need a "confirmed live holder" must own that process: the parent
+    pid is not a safe stand-in, since nothing stops it exiting mid-test, and
+    Windows does not reparent orphans the way POSIX does.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 def _make_build_fn(n: int, value_prefix: bytes = b"v"):
@@ -828,22 +845,27 @@ def test_acquire_lock_raises_timeout_error_on_confirmed_live_holder_past_hard_ca
     notice and intervene."""
     name, checksum = "hardcap", "hc1"
     lock_path = tmp_path / f"{name}_{checksum[:16]}.build.lock"
-    other_pid = os.getppid()  # genuinely alive, and guaranteed not to equal our own pid
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    os.write(fd, str(other_pid).encode())
-    os.close(fd)
 
-    with pytest.raises(TimeoutError, match="Refusing to wait indefinitely"):
-        LMDBCache(
-            cache_dir=tmp_path,
-            name=name,
-            checksum=checksum,
-            length=1,
-            map_size=_MAP_SIZE,
-            build_fn=_make_build_fn(1),
-            lock_poll_interval=0.02,
-            lock_timeout=0.05,
-        )
+    # A child we own, not os.getppid(). The parent's liveness is not ours to
+    # guarantee: POSIX reparents an orphan to init, but Windows does not, so a
+    # parent that exits leaves getppid() naming a dead -- or recycled -- pid,
+    # and this test's whole premise is that the holder is *confirmed alive*.
+    with _live_child() as other_pid:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(other_pid).encode())
+        os.close(fd)
+
+        with pytest.raises(TimeoutError, match="Refusing to wait indefinitely"):
+            LMDBCache(
+                cache_dir=tmp_path,
+                name=name,
+                checksum=checksum,
+                length=1,
+                map_size=_MAP_SIZE,
+                build_fn=_make_build_fn(1),
+                lock_poll_interval=0.02,
+                lock_timeout=0.05,
+            )
 
 
 def test_acquire_lock_is_bounded_when_the_holder_pid_cannot_be_read(tmp_path: Path):
@@ -1186,3 +1208,154 @@ def test_build_invokes_sibling_sweep_automatically(tmp_path: Path):
     )
 
     assert not leftover.exists()
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups from the post-merge review batch
+# ---------------------------------------------------------------------------
+
+
+def test_strict_load_treats_a_concurrent_rename_aside_as_absent(tmp_path: Path):
+    """_publish moves an existing cache aside with os.replace rather than
+    deleting it. That rename can land between _try_load's exists() check and
+    its lmdb.open, and the open then fails for a perfectly benign reason.
+
+    Strict mode must re-check and report "nothing to load" rather than raising
+    the environmental-failure error, whose text tells the operator to go
+    investigate an OS-level conflict that does not exist.
+    """
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="race",
+        checksum="r1",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+
+    def rename_aside_then_fail(*args, **kwargs):
+        os.replace(cache.path, cache.path.with_name(cache.path.name + ".gone"))
+        raise lmdb.Error("environment already open in this process")
+
+    with patch("sisr.utils.cache.lmdb.open", side_effect=rename_aside_then_fail):
+        assert cache._try_load("r1", strict=True) is False
+
+
+def test_strict_load_still_raises_when_the_directory_is_really_there(tmp_path: Path):
+    """The re-check above must not weaken the guard it sits in: a directory
+    that is still present after a failed open is the destructive-rebuild case
+    strict mode exists to refuse."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="present",
+        checksum="p1",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+
+    with (
+        patch("sisr.utils.cache.lmdb.open", side_effect=lmdb.Error("already open")),
+        pytest.raises(RuntimeError) as excinfo,
+    ):
+        cache._try_load("p1", strict=True)
+
+    assert "Refusing to silently rebuild" in str(excinfo.value)
+    # The underlying failure is the actionable half -- "already open in this
+    # process" and a Windows sharing violation need different responses.
+    assert isinstance(excinfo.value.__cause__, lmdb.Error)
+
+
+def test_sibling_tmp_paths_are_unique_within_one_process(tmp_path: Path):
+    """A trash sibling whose cleanup lost the race against a lingering reader
+    is still on disk when this process publishes again. Reusing the name would
+    make os.replace fail onto the non-empty leftover and report a stale-cache
+    error for what is only a naming collision."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="uniq",
+        checksum="u1",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    first = cache._sibling_tmp_path("trash")
+    first.mkdir()
+    second = cache._sibling_tmp_path("trash")
+
+    assert first != second, "a surviving leftover must not be handed out twice"
+    assert not second.exists()
+    # The pid stays last so the stale-sibling sweep can still read it.
+    assert LMDBCache._pid_from_sibling_name(first.name) == os.getpid()
+    assert LMDBCache._pid_from_sibling_name(second.name) == os.getpid()
+
+
+def test_publish_succeeds_when_an_earlier_trash_sibling_survives(tmp_path: Path):
+    """The cleanup of a trash sibling is best-effort: a lingering reader can
+    leave it on disk. Publishing again from the same process must still work.
+
+    Before the per-attempt sequence, the second publish derived the identical
+    <lmdb>.trash.<pid>.tmp name, and os.replace onto that non-empty leftover
+    fails -- surfacing as "cannot move the stale cache aside", which sends the
+    operator looking for a corrupt cache when the only problem is a name
+    collision. _publish is driven directly here to isolate that mechanism.
+    """
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="survivor",
+        checksum="s1",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1, value_prefix=b"old"),
+    )
+    stranded = cache.path.with_name(f"{cache.path.name}.trash.{os.getpid()}.tmp")
+    stranded.mkdir()
+    (stranded / "data.mdb").write_bytes(b"not empty")
+
+    tmp_build_dir = cache.path.with_name(f"{cache.path.name}.staged.tmp")
+    tmp_env = lmdb.open(str(tmp_build_dir), map_size=_MAP_SIZE)
+    with tmp_env.begin(write=True) as txn:
+        txn.put(b"key_0", b"new0")
+        txn.put(b"__checksum__", b"s1")
+        txn.put(b"__length__", b"1")
+    tmp_env.close()
+
+    cache._publish(tmp_build_dir)  # must not raise
+
+    cache.close()
+    assert cache.get("key_0") == b"new0", "the freshly published build must be live"
+
+
+def test_close_lets_the_environment_be_reopened(tmp_path: Path):
+    """Closing the object get_env() returns leaves this instance holding a dead
+    handle that get_env() hands straight back, so every later read fails. The
+    close() seam exists so callers stop reaching through to do that."""
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="closable",
+        checksum="c1",
+        length=2,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(2),
+    )
+    assert cache.get("key_0") == b"v0"
+
+    cache.close()
+    assert cache._env is None
+    cache.close()  # idempotent
+
+    assert cache.get("key_0") == b"v0", "get_env must reopen after close()"
+
+
+def test_close_is_safe_before_the_environment_is_ever_opened(tmp_path: Path):
+    cache = LMDBCache(
+        cache_dir=tmp_path,
+        name="unopened",
+        checksum="u2",
+        length=1,
+        map_size=_MAP_SIZE,
+        build_fn=_make_build_fn(1),
+    )
+    cache.close()
+    cache.close()
+    assert cache._env is None

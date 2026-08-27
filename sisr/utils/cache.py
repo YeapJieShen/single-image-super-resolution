@@ -15,6 +15,7 @@ torch-free; colorspace math lives in :mod:`sisr.colorspace` for this reason.
 """
 
 import ctypes
+import itertools
 import logging
 import os
 import shutil
@@ -47,6 +48,10 @@ _HEARTBEAT_MAX_INTERVAL = 30.0
 # neither the live-holder path nor the takeover path, and without a cap there
 # it polls forever.
 _LOCK_WAIT_MULTIPLE = 3
+
+#: Distinguishes temp siblings created by the same process for the same cache.
+#: See :meth:`LMDBCache._sibling_tmp_path`.
+_SIBLING_SEQ = itertools.count()
 
 # Windows liveness check: OpenProcess's failure mode must be inspected via
 # GetLastError, which ctypes only tracks reliably through a use_last_error=True
@@ -267,6 +272,16 @@ class LMDBCache:
         lock_timeout: Seconds to wait on a held lock, past which a *dead*
             holder's lock is considered abandoned. A live holder is never
             preempted regardless of this value.
+
+    Raises:
+        RuntimeError: If no valid cache exists and *build_fn* is ``None``; if
+            an existing cache cannot be opened for a reason that is not
+            corruption (see :meth:`_try_load`, which refuses to rebuild
+            destructively over it); or if a finished build cannot be moved
+            into place (see :meth:`_publish`).
+        TimeoutError: If another process's build lock could not be obtained
+            within ``_LOCK_WAIT_MULTIPLE * lock_timeout`` (see
+            :meth:`_acquire_lock`).
     """
 
     def __init__(
@@ -331,6 +346,21 @@ class LMDBCache:
         if self._env is None:
             self._env = lmdb.open(str(self._lmdb_path), readonly=True, lock=False)
         return self._env
+
+    def close(self) -> None:
+        """Closes the read environment, if one is open, and forgets the handle.
+
+        Closing the object returned by :meth:`get_env` directly leaves this
+        instance holding a closed handle that :meth:`get_env` will hand out
+        again, so every later read fails on a dead environment. Going through
+        here instead makes the next :meth:`get_env` reopen cleanly.
+
+        Idempotent, and safe to call on a cache whose environment was never
+        opened.
+        """
+        if self._env is not None:
+            self._env.close()
+            self._env = None
 
     def get(self, key: str) -> bytes | None:
         """Reads a single value from the cache.
@@ -436,7 +466,11 @@ class LMDBCache:
                 pass
             return False
         except (lmdb.Error, OSError) as exc:
-            if strict:
+            # A concurrent _publish renames this directory aside between the
+            # exists() check above and the open here. That is not a failure to
+            # report -- there is simply nothing to load -- so re-check before
+            # raising, or a routine publish surfaces as a scary open error.
+            if strict and self._lmdb_path.exists():
                 raise RuntimeError(
                     f"Cannot open the existing cache at {self._lmdb_path}: {exc}. This is "
                     "not corruption: most likely another handle to this cache is already "
@@ -628,6 +662,16 @@ class LMDBCache:
         check's own false negatives (e.g. a pid query blocked or denied for
         a transient reason) with an independent liveness signal.
 
+        The interval is a quarter of *timeout*, but clamped, and the clamp is
+        what a test has to watch. Below a ``lock_timeout`` of
+        ``4 * _HEARTBEAT_MIN_INTERVAL`` the floor wins and the interval stops
+        shrinking with the timeout; at or under ``_HEARTBEAT_MIN_INTERVAL``
+        the heartbeat can no longer refresh faster than the sentinel goes
+        stale. A test that pairs one process's long ``lock_timeout`` against
+        another's very short one is then asserting nothing -- the lock reads
+        as stale on the first check regardless of whether the heartbeat works
+        -- so keep the short side comfortably above that floor.
+
         Args:
             timeout: The caller's ``lock_timeout``; the refresh interval is
                 a small fraction of it, bounded to a sane range.
@@ -745,9 +789,7 @@ class LMDBCache:
         """
         self._sweep_stale_siblings()
 
-        tmp_path = self._lmdb_path.with_name(f"{self._lmdb_path.name}.build.{os.getpid()}.tmp")
-        if tmp_path.exists():
-            shutil.rmtree(tmp_path)  # leftover of an earlier crashed attempt, same pid: ours
+        tmp_path = self._sibling_tmp_path("build")
 
         env = lmdb.open(str(tmp_path), map_size=map_size)
         try:
@@ -766,6 +808,31 @@ class LMDBCache:
 
         self._publish(tmp_path)
         self._length = length
+
+    def _sibling_tmp_path(self, kind: str) -> Path:
+        """Builds a unique ``<name>.<kind>.<seq>.<pid>.tmp`` sibling path.
+
+        The pid stays last so :meth:`_pid_from_sibling_name` can still read it
+        and :meth:`_sweep_stale_siblings` can still tell a dead owner's leftover
+        from a live one's. The sequence number in front of it is what makes the
+        name unique *within* this process: a trash sibling whose cleanup lost
+        the race against a lingering reader is still on disk when the next
+        publish runs, and reusing the name would make ``os.replace`` fail onto
+        the non-empty leftover -- reporting a stale-cache error for what is
+        only a naming collision.
+
+        Args:
+            kind: ``'build'`` or ``'trash'``.
+
+        Returns:
+            A sibling path that does not currently exist.
+        """
+        while True:
+            candidate = self._lmdb_path.with_name(
+                f"{self._lmdb_path.name}.{kind}.{next(_SIBLING_SEQ)}.{os.getpid()}.tmp"
+            )
+            if not candidate.exists():
+                return candidate
 
     def _publish(self, tmp_path: Path) -> None:
         """Atomically moves a finished build from *tmp_path* into :attr:`_lmdb_path`.
@@ -800,9 +867,7 @@ class LMDBCache:
         """
         trash_path = None
         if self._lmdb_path.exists():
-            trash_path = self._lmdb_path.with_name(
-                f"{self._lmdb_path.name}.trash.{os.getpid()}.tmp"
-            )
+            trash_path = self._sibling_tmp_path("trash")
             try:
                 os.replace(self._lmdb_path, trash_path)
             except OSError as exc:
