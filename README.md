@@ -40,7 +40,8 @@ pip install .
 
 Bring your own HR images. Training and benchmark sets are downloaded separately and are
 not distributed here. Copy a template out of [`templates/`](templates/) and point its
-dataset paths at wherever yours live.
+dataset paths at wherever yours live. Every setting a template exposes is explained in
+[`docs/configuration.md`](docs/configuration.md).
 
 ```bash
 # check the config resolves before committing to a run

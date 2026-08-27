@@ -35,23 +35,13 @@ classifiers = [
 ]
 
 dependencies = [
-    # 2.6 excludes the torch.load(weights_only=True) unpickler bypass fixed in
-    # 2.6.0 (GHSA-53q9-r3pm-6pq6 / CVE-2025-32434) — that flag is this project's
-    # entire load-time safety contract for third-party .ckpt/.pt files.
+    # SECURITY FLOOR (CVE-2025-32434) -- do not lower. See docs/configuration.md.
     "torch>=2.6",
     "torchvision>=0.21",
     "lightning>=2.4",
-    # 1.9 is the version DISTS was verified present in on this project.
-    # sisr/metrics/perceptual.py caches the backbones directly
-    # (torchmetrics.functional.image.dists.DISTSNetwork and
-    # torchmetrics.image.lpip.LearnedPerceptualImagePatchSimilarity.net), so the
-    # pin covers those, not just the functional entry points.
-    # Lowering it means testing the lower version, not guessing.
+    # DISTS was verified present at 1.9; the pin covers the cached backbones too.
     "torchmetrics>=1.9",
-    # sisr/cli.py calls set_parsing_settings(subclasses_enabled=...) so a dotted CLI
-    # override of a dataclass config field keeps the architecture's subclass. That
-    # keyword does not exist below 4.50, and 4.50 is the version it was verified on
-    # here. Lowering it means testing the lower version, not guessing.
+    # set_parsing_settings(subclasses_enabled=...) does not exist below 4.50.
     "jsonargparse[signatures]>=4.50",
     "lmdb>=1.4",
     "pillow>=10",
@@ -66,33 +56,19 @@ dev = [
     "pytest-cov>=5",
     # Parallelizes the suite (CI-only, see test.yml's `-n 2`); execnet is pulled in transitively.
     "pytest-xdist>=3.6",
-    # tests/test_cli.py parses/emits config YAML directly; PyYAML otherwise
-    # resolves only transitively (via jsonargparse/lightning), which is fragile.
+    # Explicit: the tests import yaml directly, not transitively.
     "pyyaml>=6",
     "ruff>=0.9",
     "mypy>=1.11",
-    # tests/test_packaging.py builds a real wheel via hatchling's PEP 517
-    # build_wheel() hook to check py.typed actually ships in it, rather than
-    # only asserting the pyproject.toml config that's supposed to include it.
-    # Already a [build-system] requirement; declared again here so it's
-    # present outside pip's ephemeral build-isolation environment too.
+    # Declared again outside build-isolation: the packaging test builds a real wheel.
     "hatchling>=1.27",
 ]
-# Opt-in: sisr/export.py gates the actual `import onnx` inside to_onnx(),
-# so plain `pip install .` stays onnx-free. onnxruntime is the CI numeric-parity
-# check's target (CPU build — GitHub runners have no GPU); it also lets users
-# verify an export locally without a separate inference framework. Deliberately
-# NOT paired with onnxscript: that would pull in torch's newer torch.export-based
-# exporter, so to_onnx() pins dynamo=False (the legacy TorchScript exporter) and
-# stays on this pair.
+# Opt-in, and deliberately without onnxscript: to_onnx() pins dynamo=False.
 export = [
     "onnx>=1.16",
     "onnxruntime>=1.19",
 ]
-# LPIPS only. torchmetrics implements both LPIPS and DISTS, but gates LPIPS on
-# the `lpips` package (_LPIPS_AVAILABLE) while DISTS needs only torchvision,
-# already a core dep — so DISTS ships in core and this extra buys exactly one
-# metric. Optional because it is a scoring convention, not a training need.
+# LPIPS only: DISTS needs only torchvision and ships in core.
 perceptual = ["lpips>=0.1"]
 
 [project.scripts]
@@ -111,69 +87,25 @@ packages = ["sisr"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# --import-mode=importlib avoids duplicate-basename collisions across test
-# subdirs (e.g. tests/models/srcnn/test_model.py vs
-# tests/models/srresnet/test_model.py) without requiring __init__.py files.
-# No -n/--dist here: parallelism is a CI-only concern, not a local default, so a
-# bare `pytest` in a dev shell runs serial. See test.yml's test-matrix job for the
-# worker-count rationale and measurements.
+# importlib mode avoids duplicate-basename collisions; parallelism is CI-only.
 addopts = "-ra --strict-markers --import-mode=importlib"
-# importlib import-mode does NOT add the repo root to sys.path — tests/metrics/test_ssim.py's
-# `from tests.reference....` (and any `import sisr`) only resolves today because the
-# editable install's .pth file happens to put it there. A non-editable install (`pip
-# install .`) plus bare pytest fails at collection; bare pytest from a git worktree
-# (this project's PR workflow) would resolve `tests.reference` from a DIFFERENT
-# checkout's sys.path entry while the sibling EXPECTED_PATH stays worktree-local,
-# silently mixing two trees. Explicit pythonpath removes the dependency on install mode.
+# Required: without it a worktree run can mix two checkouts. See docs/configuration.md.
 pythonpath = ["."]
 filterwarnings = [
     "error",
-    # Lightning 2.6.5 constructs torch 2.12's deprecated pytree `LeafSpec` at
-    # lightning/pytorch/utilities/_pytree.py:21, so any real Trainer loop emits a
-    # FutureWarning: "`isinstance(treespec, LeafSpec)` is deprecated, use
-    # `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.".
-    # Scoped to the lightning namespace + dated 2026-07-12; drop this once lightning
-    # stops calling torch's deprecated pytree API (track the next lightning/torch bump).
-    # Upstream: https://github.com/Lightning-AI/pytorch-lightning (pytree LeafSpec deprecation)
+    # Lightning calls torch's deprecated pytree API; drop this once it stops.
     "ignore::FutureWarning:lightning.*",
-    # Manual optimization (SRGANLightning) + every_n_train_steps: Lightning warns
-    # that the saved state is post-optimization. That is exactly the state we
-    # want — a checkpoint should hold the weights the step produced.
+    # Post-optimization state is exactly what a checkpoint should hold.
     "ignore:Using ModelCheckpoint with manual optimization:UserWarning",
 ]
 
 [tool.ruff]
-# Ruff owns lint + format for this project. line-length 100 matches the
-# code as written: 88 would reflow ~157 lines across every file, 100 only ~53
-# (mostly docstrings the formatter can't wrap). It governs both E501 and the
-# formatter's wrap width. target-version pins syntax so UP never rewrites below
-# our requires-python floor. Formatter runs with defaults (double quotes, which
-# already dominate the tree).
+# line-length 100 matches the code as written; 88 would reflow ~157 lines.
 target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-# E,F: pycodestyle errors + pyflakes (unused imports/vars, undefined names).
-# I: import sorting. UP: pyupgrade (modern syntax for the py312 floor).
-# B: flake8-bugbear (likely-bug patterns, e.g. zip() without strict=).
-# UP038 (non-pep604-isinstance) was hand-applied when UP was first selected, then
-# deprecated in ruff 0.12.0 and *removed* in 0.16.0 — so it no longer fires and there
-# is nothing to suppress. Do not add it to `ignore`: ruff warns "rules have been
-# removed and ignoring them has no effect" on every run, which is noise in a required
-# check. The isinstance(x, A | B) style it enforced is now convention, not lint.
-# D: pydocstyle — makes "Google-style docstrings on public API" (a stated
-# project non-negotiable) enforceable instead of review-only. D105 (undocumented
-# magic method) is ignored because dunder semantics are defined by the language,
-# not by us. D107 (undocumented __init__) is ignored because Google style documents
-# constructor args in the *class* docstring, which this repo already does —
-# requiring an __init__ docstring too would push against the very convention being
-# enforced.
-# Limitation worth knowing: D417 (missing Args entry) fires only on *partially*
-# documented functions, not undocumented ones — a docstring with its whole Args:
-# section deleted passes with D fully enabled (verified empirically with a
-# two-function probe; preview DOC rules were silent on it too). So this catches
-# half-documented functions and formatting drift, not the wholesale Args: deletion
-# that motivated adding it. That guardrail stays human review.
+# Do NOT add the removed UP038 to `ignore`: ruff then warns on every run.
 select = ["E", "F", "I", "UP", "B", "D"]
 ignore = ["D105", "D107"]
 
@@ -182,27 +114,14 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Re-export hubs import names purely to surface them under short class paths.
-# Names in __all__ are already treated as used; this documents the intent and
-# covers any future __init__.py that omits __all__.
 "__init__.py" = ["F401"]
-# Tests carry ~400 D violations, ~135 of them D103 (undocumented public function).
-# Test *names* are the documentation here; writing hundreds of docstrings to
-# satisfy a linter is churn, not clarity.
+# Test names are the documentation here.
 "tests/**" = ["D"]
 
 [tool.mypy]
-# Checks that the "modern type hints" style rule (PEP 585/604) is a checked
-# promise, not just convention. Runs over the whole `sisr` package; the
-# overrides below blanket-ignore the modules whose dynamism (Lightning's hook
-# system, jsonargparse's dynamic CLI/subclass resolution) resists useful
-# static typing without a large, separate effort. The mypy CI job is green
-# only because of those overrides -- it is not exercising those modules.
+# A required status check; tests/test_typing.py pins the exemption list below.
 python_version = "3.12"
-# Pinned rather than left to infer from the host: sisr/utils/cache.py's Windows
-# liveness check uses ctypes.WinDLL, which typeshed only exposes under this
-# platform. Without pinning it, the exact same code type-checks clean on a
-# Windows dev machine and fails with attr-defined errors on Linux/macOS one
-# -- see the typecheck CI job (windows-latest) for the other half of this.
+# Pinned, not inferred: ctypes.WinDLL is only in typeshed under this platform.
 platform = "win32"
 warn_unused_configs = true
 warn_unused_ignores = true
@@ -211,10 +130,7 @@ disallow_untyped_defs = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-# Lightning's hook system (dynamic **kwargs call signatures, callback
-# protocol) and jsonargparse's dynamic CLI/subclass resolution (dotted
-# overrides, class_path dispatch) make these fight a type checker rather than
-# benefit from one. Ignored wholesale rather than annotated around.
+# Lightning's hook system and jsonargparse's subclass resolution fight a checker.
 module = [
     "sisr.training.callbacks",
     "sisr.training.datamodule",
@@ -225,14 +141,11 @@ module = [
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-# Neither ships inline types or a py.typed marker (checked against the
-# versions in dev's environment: torchvision 0.28, tqdm 4.70).
+# Neither ships inline types or a py.typed marker.
 module = ["torchvision.*", "tqdm.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# onnx is the optional [export] extra, deliberately not part of the default
-# dev install (see test.yml's onnx-export job) — the typecheck job installs
-# only [dev], so the import is unresolved there regardless of stub coverage.
+# The optional [export] extra: unresolved in a [dev]-only install by design.
 module = ["onnx"]
 ignore_missing_imports = true

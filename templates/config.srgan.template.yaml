@@ -1,26 +1,18 @@
+# SRGAN-VGG54 -- Ledig et al.'s adversarial variant, generator initialised from MSE.
+# Settings are explained in docs/configuration.md, which covers the two-optimizer
+# layout and the global-step vs batch units below. Config files must stay ASCII.
 seed_everything: 42
 
-# TF32 matmul on Ampere+ GPUs. Measured no-op on this repo's conv stacks: conv runs
-# through cuDNN, whose allow_tf32 already defaults True — kept for matmul-heavy archs.
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
 matmul_precision: high
 
-# The GENERATOR's optimizer. Linked into model.init_args.optimizer by SRLightningCLI.
-# The discriminator's is nested under model.init_args below — see the comment there.
+# The GENERATOR's optimizer; the discriminator's is nested under model.init_args.
 optimizer:
   class_path: torch.optim.Adam
   init_args:
     lr: 1.0e-4
 
-# The generator's LR schedule, and the paper's second training phase: Ledig et al.
-# decay 1e-4 -> 1e-5 after 1e5 generator iterations, then train 1e5 more. The
-# discriminator_lr_scheduler nested under model.init_args below mirrors this
-# block exactly, so both networks decay together — Ledig's sentence describes
-# the SRGAN networks as a whole, not the generator alone, and a critic left at
-# 1e-4 for the whole second phase while the generator drops to 1e-5 is a
-# standard way to saturate the generator's adversarial gradient.
-# SRGANLightning steps its schedulers by hand in on_train_batch_end (manual
-# optimization does not step them), so milestones are counted in BATCHES — at the
-# default k=1 one batch is one generator iteration.
+# The generator's schedule. The discriminator's mirrors it so both decay together.
 lr_scheduler:
   class_path: torch.optim.lr_scheduler.MultiStepLR
   init_args:
@@ -31,7 +23,6 @@ model:
   class_path: sisr.training.SRGANLightning
   init_args:
       # The generator: the same SRResNet the baseline template trains, unchanged.
-      # Only how it is trained differs.
       model:
         class_path: sisr.models.srresnet.SRResNet
         init_args:
@@ -41,96 +32,48 @@ model:
           kernel_sizes: [9, 3, 9]
           num_residual_blocks: 16
           padding: same
+      # The discriminator scores the generator's output in THIS space.
       processor:
-        # Paper's range (Ledig et al. §3.2): LR [0,1] in, HR/target [-1,1]. The
-        # discriminator scores the generator's output in THIS space, so changing
-        # the processor renumbers what the critic is trained on.
         class_path: sisr.processors.RGBSignedOutputProcessor
-      # The generator's CONTENT loss. The adversarial term is added on top by
-      # SRGANLightning, weighted by training_config.adversarial_weight.
-      # phi_{5,4} is SRGAN-VGG54, the paper's headline variant. NO total-variation
-      # term: Ledig et al. scope TV at 2e-8 to SRResNet-VGG22, not to the GAN
-      # variants, and adding one here is not the published recipe.
-      # First use downloads ~548 MB of VGG19 weights to the torch hub cache.
+      # CONTENT loss only. First use downloads ~548 MB of VGG19 weights.
       criterion:
         class_path: sisr.losses.VGG19FeatureLoss
         init_args:
           layer: vgg54
-      # The critic. Its dense head fixes the accepted input size, so hr_input_size
-      # must equal the HR crop the training data serves — data.train_dataset.
-      # hr_crop_size below is anchored to this very value, and SRGANLightning's
-      # setup probe re-checks it against a real sample before the first step.
+      # Must equal the HR crop the data serves; hr_crop_size below is anchored to it.
       discriminator:
         class_path: sisr.models.srgan.SRDiscriminator
         init_args:
           hr_input_size: &hr_crop 96
-      # Nested under model.init_args rather than being a second top-level key
-      # alongside optimizer:. A top-level one would need a second
-      # parser.add_optimizer_args(link_to=...) in SRLightningCLI, and that link
-      # targets an argument SRLightning does not have — it would break every
-      # non-GAN config the moment it were added. Nesting keeps the second
-      # optimizer local to the only module that has one.
       discriminator_optimizer:
         class_path: torch.optim.Adam
         init_args:
           lr: 1.0e-4
-      # Same shape as the top-level lr_scheduler:, also nested, and set to the
-      # same milestone/gamma so both networks decay together. Ledig et al.'s
-      # sentence ("All SRGAN variants were trained with 1e5 update iterations
-      # at a learning rate of 1e-4 and another 1e5 iterations at a lower rate
-      # of 1e-5") describes the SRGAN networks as a whole; leaving this unset
-      # would hold the critic at 1e-4 for the entire second phase while the
-      # generator it scores drops to 1e-5 — 10x faster, a standard way to
-      # saturate the generator's adversarial gradient.
       discriminator_lr_scheduler:
         class_path: torch.optim.lr_scheduler.MultiStepLR
         init_args:
           milestones: [100000]   # BATCHES, not global steps
           gamma: 0.1
-      # adversarial_loss: unset means sisr.losses.AdversarialLoss — the
-      # non-saturating objective over the discriminator's LOGITS. Do not pair it
-      # with a sigmoid-terminated critic; SRDiscriminator deliberately emits logits.
+      # adversarial_loss unset means sisr.losses.AdversarialLoss, over LOGITS.
       training_config:
         class_path: sisr.models.srgan.SRGANTrainingConfig
         init_args:
-          # Ledig et al. scope the MSE-initialisation trick to "when training the
-          # actual GAN", so a paper-faithful run starts from an MSE-trained
-          # SRResNet — this repo's golden 1e6-step baseline. Bare weights (.pt),
-          # never the sibling .ckpt: a .ckpt holds the whole LightningModule.
-          # The generator's architecture, processor, output range and scale are
-          # all checked against the file's own metadata and refused on any
-          # mismatch — loading weights trained under a different one produces a
-          # model that trains and scores without ever erroring.
-          # Set to null HERE (or in a --config overlay) to train the GAN from
-          # scratch -- not the paper's recipe. --...init_from=null on the command
-          # line does not work: jsonargparse coerces it to the string 'None',
-          # which SRGANLightning refuses by name rather than hunting for a file.
+          # Bare weights (.pt), never the sibling .ckpt. Mismatches are refused.
           init_from: "experiments/SRResNet/golden/checkpoints/sr-weights-1000000-psnr_val_RGB=28.8635.pt"
-          # Matches the real training input: RGB at hr_crop_size / scale. Not only a
-          # TensorBoard-graph dummy -- it also shapes the compile warm-up (a wrong size
-          # compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+          # Must match the real training input: RGB at hr_crop_size / scale.
           example_input_shape: [3, 24, 24]
-          # adversarial_weight: 1.0e-3 (paper) and d_steps_per_g_step: 1
-          # (Goodfellow's k, Ledig's 1:1 alternation) are the dataclass defaults.
-      # No init_args: the dataclass already adds lpips + dists on top of the
-      # SRResNet scoring (crop_border 4, PSNR on RGB+Y, daala SSIM). An adversarial
-      # objective makes PSNR and SSIM WORSE by design, so the perceptual pair is
-      # the only metric family that tracks what this run is actually optimising.
-      # 'lpips' needs the [perceptual] extra installed.
+          # adversarial_weight 1.0e-3 and d_steps_per_g_step 1 are the defaults.
+      # Defaults add lpips + dists; 'lpips' needs the [perceptual] extra.
       eval_config:
         class_path: sisr.models.srgan.SRGANEvalConfig
 
 data:
-  # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-  # sisr/utils/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srresnet.TrainDataset
     init_args:
       img_dir: data/DIV2K_train_HR
       scale: *scale
-      # Anchored to the discriminator's hr_input_size above: the critic scores
-      # this exact crop, and a mismatch is a raw Linear shape error otherwise.
-      hr_crop_size: *hr_crop
+      hr_crop_size: *hr_crop   # anchored to the discriminator's hr_input_size
       crops_per_image: 1
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
@@ -157,90 +100,41 @@ data:
         scale: *scale
   train_dataloader_kwargs:
     batch_size: 16
-    # Workers are load-bearing on real data: per-sample LR derivation is a real
-    # cost, and num_workers=0 hits a hard serial floor (real DIV2K steady-state:
-    # 56.0 ms/step at w0 vs 40.1 ms/step at w16 -- 0.72x). The ~2-minute one-time
-    # spawn cost amortizes to nothing over a full run.
-    # These counts OOM'd host RAM on a 16-worker box -- see the note beside
-    # val_dataloader_kwargs below.
+    # !! These counts have OOM'd host RAM on a 16-worker box. Lower them if you do.
     num_workers: 16
     pin_memory: true
     persistent_workers: true
   val_dataloader_kwargs:
     batch_size: 1
-    # These worker counts (16 train, 2 val) OOM'd host RAM on a 16-worker box: a
-    # val worker's float64 imresize on a full-size DIV2K image (2040px wide)
-    # raised numpy._ArrayMemoryError, at the FIRST validation, not step 0. This
-    # module is more exposed than the SRResNet template on the same data path --
-    # a resident discriminator plus a VGG19 feature extractor eat the RAM the
-    # SRResNet template doesn't need. A smoke run only got through at 4 train /
-    # 0 val workers; the safe counts on any given box are unmeasured -- lower
-    # these if you OOM.
     num_workers: 2
     persistent_workers: true
 
 trainer:
   max_epochs: -1
-  # global_step counts optimizer steps, and this module takes TWO per batch (one
-  # discriminator, one generator), so it advances N + N//k per N batches -- 2x at
-  # the default k=1. That is unchanged Lightning behaviour, not a quirk of manual
-  # optimization: measured, manual optimization with a SINGLE optimizer still
-  # gives global_step == batches. Every other architecture here is unaffected.
-  # The units differ, so read this before changing any of them. max_steps,
-  # checkpoint filenames and every_n_train_steps are in GLOBAL STEPS;
-  # val_check_interval, log_every_n_steps and the hand-stepped LR scheduler's
-  # milestones are in BATCHES (Lightning keys val_check_interval on
-  # total_batch_idx whenever check_val_every_n_epoch is null, as it is below;
-  # log_every_n_steps tests the same _batches_that_stepped counter unconditionally
-  # -- logger_connector.py:59,64). every_n_train_steps' own condition is checked
-  # once per batch, so an EVEN value halves the batch cadence (10000 -> every
-  # 5000 batches) while an odd one does not (5 -> still every 5).
-  # _batches_that_stepped is also the DEFAULT X-AXIS every logged metric is
-  # plotted against, so TensorBoard shows this run in batches while checkpoint
-  # filenames carry global_step: sr-weights-10000.pt is the state at
-  # TensorBoard x=5000, not x=10000 -- a 2x offset between a curve and the
-  # checkpoint pulled off it.
-  # 400000 here = the paper's 2e5 generator iterations (1e5 at 1e-4 + 1e5 at 1e-5).
-  max_steps: 400000
-  # 5000 batches = every 10000 global steps: the checkpoint cadence below.
-  val_check_interval: 5000
+  # !! GLOBAL STEPS; val_check_interval and log_every_n_steps are BATCHES. See the docs.
+  max_steps: 400000            # the paper's 2e5 generator iterations
+  val_check_interval: 5000     # batches = every 10000 global steps
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
-  # BATCHES too -- see the units comment above.
-  log_every_n_steps: 1000
+  log_every_n_steps: 1000      # batches
   deterministic: false
-  # cuDNN autotunes a conv algorithm per input shape and caches it — free here since
-  # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
-  # above, hence it lives here rather than as a custom key.
+  # Free here: every training step feeds the same fixed crop shape.
   benchmark: true
   accelerator: cuda
-  # One device only. SRGANLightning refuses world_size > 1: manual optimization
-  # opts out of Lightning's gradient synchronisation, so the two networks would
-  # train out of sync across ranks with nothing failing.
-  devices: [0]
+  devices: [0]                 # SRGANLightning refuses world_size > 1
   enable_progress_bar: true
   enable_model_summary: true
   callbacks:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
         log_every_n_val_runs: 1
-    # Primary artifacts: rolling, monitor-free. PSNR and SSIM get WORSE by design
-    # under an adversarial objective, so top-k on either would keep the LEAST
-    # adversarial state of the run (typically one from the first few thousand
-    # steps). Rolling keeps the last `keep_last` saves by step instead.
-    # every_n_train_steps is in GLOBAL steps -- see the max_steps comment above:
-    # 10000 is even, so it fires every 5000 batches.
+    # Rolling and monitor-free: a PSNR/SSIM top-k would keep the least adversarial state.
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: null
         keep_last: 3
         every_n_train_steps: 10000
-    # Distributable, optimizer-free weights (.pt) for BOTH networks. The generator's
-    # is what gets handed out, and is what init_from above consumes. The
-    # discriminator's is kept so the critic can be restored by hand, or by a
-    # future run that accepts one -- nothing shipped consumes a d-weights-*.pt
-    # today; there is no init_discriminator_from. Distinct filename_prefix keeps
-    # each callback's rolling deletion off the other's files in a shared dirpath.
+    # Both networks. The generator's is what init_from consumes.
     - class_path: sisr.training.SRWeightsCheckpoint
       init_args:
         monitor_metric: null
@@ -255,31 +149,10 @@ trainer:
         every_n_train_steps: 10000
         attribute: discriminator
         filename_prefix: d-weights
-    # --- Metric-monitored alternatives, for reference. NOT enabled. ---
-    # A PSNR- or SSIM-monitored "best" tracks the least adversarial model here,
-    # which is the opposite of what this run is for. A perceptual monitor tracks
-    # the objective, but lpips/dists are lower-is-better: mode MUST be min, or
-    # the callback silently keeps the worst checkpoint of the run (SRCheckpoint
-    # refuses the wrong direction at setup rather than letting that happen).
-    # - class_path: sisr.training.SRCheckpoint
-    #   init_args:
-    #     monitor_metric: lpips/val
-    #     mode: min
-    #     save_top_k: 3
-    # - class_path: sisr.training.SRWeightsCheckpoint
-    #   init_args:
-    #     monitor_metric: lpips/val
-    #     mode: min
-    #     save_top_k: 3
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step
-    # GradNormLogger is deliberately absent. Measured on this module: its
-    # on_after_backward hook fires TWICE per batch (once per network's backward),
-    # and pl_module.parameters() spans both networks (58 tensors = 24 generator +
-    # 34 discriminator), so the single diag/grad_norm scalar it logs mixes the two
-    # and alternates between two different meanings. Log per-network norms by hand
-    # if you need them.
+    # GradNormLogger is deliberately absent: one scalar would mix both networks.
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:

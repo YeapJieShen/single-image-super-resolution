@@ -7,9 +7,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Workflow-wide floor. actions: write is NOT here -- it is granted per job, to
-# the ones that actually save an Actions cache, so a job that only checks out
-# and runs a script cannot write to the cache at all.
+# Floor only: actions: write is granted per job, to the ones that save a cache.
 permissions:
   contents: read
 
@@ -18,9 +16,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Cheap gate: skips the expensive matrices below on a doc-only PR. Deliberately
-  # an allowlist, not a denylist — anything not explicitly listed here (including
-  # this workflow file itself) is treated as code and runs the full matrix.
+  # Allowlist, not denylist: anything unlisted is treated as code. See docs/configuration.md.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -66,18 +62,12 @@ jobs:
         run: pip install .
       - name: Smoke import
         run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
-      # Ports the old tests/test_cli.py::test_cli_help_lists_subcommands subprocess
-      # smoke here: it cost ~10s of the pytest suite re-importing torch +
-      # lightning just to print --help, and this job already installs the wheel and
-      # smoke-imports it, so it's the natural home for a packaging-level check.
+      # Lives here, not in pytest: this job already has the wheel installed.
       - name: CLI entry point lists subcommands
         run: |
           python -c "import subprocess; out = subprocess.run(['sisr', '--help'], capture_output=True, text=True, check=True).stdout; missing = [s for s in ('fit', 'validate', 'test', 'predict') if s not in out]; assert not missing, f'sisr --help missing subcommands: {missing}'"
 
-  # Cheap single-leg guard for the *editable* install path (PEP 660): test.yml
-  # moved to uv, so nothing else in CI exercises `pip install -e`, yet
-  # CONTRIBUTING.md gives contributors who skip uv exactly that command. One
-  # OS/Python leg is enough — this checks build-backend behaviour, not the matrix.
+  # The only leg exercising `pip install -e`, which CONTRIBUTING.md still gives.
   editable-install:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -98,9 +88,7 @@ jobs:
       - name: Smoke import
         run: python -c "import sisr; from sisr.cli import main; print('sisr', sisr.__version__, '- main:', main)"
 
-  # Stable required-check context: green only if every build-matrix leg and the
-  # editable-install check passed, or were skipped because `changes` found a
-  # doc-only PR (see the equivalent gate in test.yml).
+  # Stable required-check context: matrix legs are not fixed contexts themselves.
   build:
     needs: [build-matrix, editable-install]
     if: always()
