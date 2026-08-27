@@ -65,6 +65,8 @@ notice.
 
 ### Changed
 
+- **`LMDBCache.close()`** releases the read environment and lets the next access reopen
+  it. Closing the object `get_env()` returns left the instance holding a dead handle.
 - **Y-channel metrics are computed in BT.601 studio range**, matching MATLAB and the
   published SR literature. Figures produced before this read systematically low.
 - **SR output is clamped to `[0, 1]` before scoring.**
@@ -89,6 +91,12 @@ notice.
   README.
 - **The LMDB cache could delete another process's in-progress build.** Deletion is now
   restricted to proven corruption; environmental failures raise instead.
+- **A misspelled key inside a dataset spec's `init_args`** reported a bare `TypeError`
+  naming the dataset class but not the config path that produced it. It now names the
+  field, the offending key and the accepted ones.
+- **Publishing a rebuilt cache could fail on a name collision** when an earlier trash
+  sibling from the same process had outlived its best-effort cleanup, and reported it as
+  though the cache were stale.
 - **A cache build could wait on its lock forever.** The timeout only bounded waits on a
   holder confirmed alive. A sentinel whose pid was unreadable, or was this process's own
   after pid recycling, took neither that path nor the abandoned-lock takeover path while
