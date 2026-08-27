@@ -64,7 +64,7 @@ model:
           example_input_shape: [3, 24, 24]
       # No init_args: the dataclass default already sets ssim_impl: daala, the
       # convention Ledig et al.'s paper actually used (sigma scales with image height,
-      # not Wang's fixed 11x11 -- see sisr/ssim.py). That makes this run's SSIM
+      # not Wang's fixed 11x11 -- see sisr/metrics/ssim.py). That makes this run's SSIM
       # comparable to the paper and NOT to the Wang-based numbers the rest of the SR
       # literature reports (EDSR/RCAN/SwinIR/BasicSR lineage). Override with:
       #   eval_config:
@@ -76,7 +76,7 @@ model:
 
 data:
   # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-  # sisr/imresize.py), comparable to published paper numbers.
+  # sisr/utils/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srresnet.TrainDataset
     init_args:

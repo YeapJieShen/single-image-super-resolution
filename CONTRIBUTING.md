@@ -72,7 +72,7 @@ Two claims need proof in the PR, not just assertion:
   (worker spawn, cache warm, autotune) and can invert the conclusion. Say how many
   iterations you discarded.
 
-Anything touching `sisr/imresize.py` must re-prove byte-identical output against the
+Anything touching `sisr/utils/imresize.py` must re-prove byte-identical output against the
 MATLAB reference set; that byte-equality is the basis of every comparison to published
 results.
 
@@ -126,5 +126,5 @@ trains one network needs no new module.
 
 ## License
 
-MIT. Dependencies are MIT-compatible. `sisr/imresize.py` vendors an MIT-licensed
+MIT. Dependencies are MIT-compatible. `sisr/utils/imresize.py` vendors an MIT-licensed
 MATLAB-`imresize` port, so keep its attribution header intact.

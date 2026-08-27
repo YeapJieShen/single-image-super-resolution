@@ -34,7 +34,7 @@ thing this section exists to prevent.
   <!-- A mean over a short run hides worker spawn / cache warm / autotune and can invert the result. -->
 - Measured on: <!-- which checkout, which dataset, which power state -->
 
-**Touches `sisr/imresize.py`** — byte-equality against the MATLAB reference set re-proven:
+**Touches `sisr/utils/imresize.py`** — byte-equality against the MATLAB reference set re-proven:
 
 - <!-- result, e.g. 357/357, max|diff| = 0 -->
 

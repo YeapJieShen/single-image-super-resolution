@@ -71,7 +71,7 @@ jobs:
   # without a large, separate effort). Installs the dev extra rather than a
   # bare `mypy` so it type-checks against the same third-party stubs/versions
   # the rest of CI runs against.
-  # windows-latest, not ubuntu-latest: sisr/cache.py's ctypes.WinDLL Windows
+  # windows-latest, not ubuntu-latest: sisr/utils/cache.py's ctypes.WinDLL Windows
   # liveness check is genuine platform-specific code, guarded by a runtime
   # sys.platform == "win32" check -- but typeshed's ctypes stubs only expose
   # WinDLL under that same platform, so mypy raises attr-defined errors for it

@@ -233,7 +233,7 @@ Benchmark numbers only mean something if the inputs and the metrics match the pa
 both are pinned:
 
 - **LR generation** uses a vendored MATLAB-compatible `imresize`
-  ([`sisr/imresize.py`](sisr/imresize.py), MIT, attribution in the file header) rather than
+  ([`sisr/utils/imresize.py`](sisr/utils/imresize.py), MIT, attribution in the file header) rather than
   OpenCV's bicubic. The two differ in ways that move PSNR: MATLAB antialiases by widening
   the kernel on downscale, and uses `a = -0.5` where OpenCV uses `a = -0.75`. Downscaling
   is verified byte-identical against the MATLAB-generated reference pairs distributed by
@@ -250,7 +250,7 @@ both are pinned:
   gaussian sigma scales with image height (`_h*(1.5/256)`) rather than staying fixed.
   The same image therefore scores differently under the two conventions, and a
   benchmark set's aggregate partly reflects the pixel dimensions of its images, not
-  only reconstruction quality. [`sisr/ssim.py`](sisr/ssim.py) ports daala's method,
+  only reconstruction quality. [`sisr/metrics/ssim.py`](sisr/metrics/ssim.py) ports daala's method,
   verified against daala's own compiled C reference on 133 cases, and
   `SREvalConfig.ssim_impl` (`'wang'` or `'daala'`, see
   [`sisr/training/config.py`](sisr/training/config.py)) selects between them —
@@ -298,7 +298,7 @@ both are pinned:
   Super-Resolution" (CVPRW 2017), downloaded from
   `https://cv.snu.ac.kr/research/EDSR/benchmark.tar`, SHA-256
   `80c21c333bbf6ceb5308b7243761f8284478274413a97b96f1d63e9045fd93e8` (recorded and checked
-  in [`tests/test_imresize.py`](tests/test_imresize.py)). This project's Set14 is the full
+  in [`tests/utils/test_imresize.py`](tests/utils/test_imresize.py)). This project's Set14 is the full
   14-image variant from that distribution — published SR papers' "Set14" numbers have been
   reported over 11-, 12- and 14-image subsets depending on source, so this count is worth
   stating explicitly for anyone comparing numbers against this project's own.
