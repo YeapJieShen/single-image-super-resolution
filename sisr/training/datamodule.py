@@ -7,6 +7,8 @@ only run for the stages that need them. Test sets are surfaced through
 :meth:`test_dataloader` (for ``cli test --ckpt_path`` final eval).
 """
 
+import importlib
+import inspect
 from typing import Any
 
 import lightning
@@ -54,6 +56,68 @@ def _validate_spec(field_name: str, spec: dict[str, Any]) -> None:
     init_args = spec.get("init_args", {})
     if not isinstance(init_args, dict):
         raise ValueError(f"{field_name}.init_args must be a mapping; got {init_args!r}.")
+
+
+def _accepted_init_args(class_path: str) -> list[str] | None:
+    """Returns *class_path*'s accepted keyword argument names, or ``None``.
+
+    Only called on the error path, so importing here costs nothing on a
+    healthy run -- and by then the class has already been imported anyway.
+
+    Args:
+        class_path: Dotted path from the spec.
+
+    Returns:
+        Sorted parameter names, or ``None`` if the class cannot be resolved
+        or inspected (in which case the caller falls back to the raw error).
+    """
+    try:
+        module_name, _, attr = class_path.rpartition(".")
+        cls = getattr(importlib.import_module(module_name), attr)
+        params = inspect.signature(cls).parameters
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return None
+    return sorted(
+        name
+        for name, p in params.items()
+        if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD) and name != "self"
+    )
+
+
+def _instantiate_spec(field_name: str, spec: dict[str, Any]) -> Any:
+    """Materialises a dataset spec, naming the field when an init_arg is wrong.
+
+    ``_validate_spec`` catches keys that landed *beside* ``init_args``. A
+    misspelled key *inside* ``init_args`` gets all the way to the dataset
+    constructor instead, and surfaces as a bare ``TypeError`` naming the class
+    but not the config path that produced it -- so the reader is told
+    ``TrainDataset`` is wrong without being told which of several dataset
+    blocks to go and fix.
+
+    Args:
+        field_name: Dotted config path, e.g. ``'data.train_dataset'``.
+        spec: A spec already checked by :func:`_validate_spec`.
+
+    Returns:
+        The instantiated dataset.
+
+    Raises:
+        ValueError: If ``init_args`` holds a key the target does not accept.
+    """
+    try:
+        return instantiate_class((), spec)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        accepted = _accepted_init_args(spec["class_path"])
+        given = sorted(spec.get("init_args", {}))
+        unknown = [k for k in given if accepted is not None and k not in accepted]
+        detail = f" Unexpected: {unknown}." if unknown else ""
+        options = f" Accepted: {accepted}." if accepted is not None else ""
+        raise ValueError(
+            f"{field_name}.init_args holds a key {spec['class_path']} does not accept."
+            f"{detail}{options} Original error: {exc}"
+        ) from exc
 
 
 class SRDataModule(lightning.LightningDataModule):
@@ -182,15 +246,16 @@ class SRDataModule(lightning.LightningDataModule):
                 which datasets get instantiated.
         """
         if stage in ("fit", None) and self._train_ds is None:
-            self._train_ds = instantiate_class((), self._train_spec)
+            self._train_ds = _instantiate_spec("data.train_dataset", self._train_spec)
         if stage in ("fit", "validate", "test", None) and not self._test_ds and self._test_specs:
             self._test_ds = {
-                name: instantiate_class((), spec) for name, spec in self._test_specs.items()
+                name: _instantiate_spec(f"data.test_datasets.{name}", spec)
+                for name, spec in self._test_specs.items()
             }
         if stage in ("fit", "validate", None) and self._val_ds is None:
-            self._val_ds = instantiate_class((), self._val_spec)
+            self._val_ds = _instantiate_spec("data.val_dataset", self._val_spec)
         if stage in ("predict", None) and self._predict_ds is None and self._predict_spec:
-            self._predict_ds = instantiate_class((), self._predict_spec)
+            self._predict_ds = _instantiate_spec("data.predict_dataset", self._predict_spec)
 
     def train_dataloader(self) -> DataLoader:
         """Build the training DataLoader.

@@ -111,6 +111,9 @@ class ProbeResult:
                 self._train_lr = self.sample.lr
             else:
                 self._train_lr, _ = _sample_zero(train_ds)
+        # Set on the branch above, both ways: either from an existing sample
+        # taken from train_dataset, or by reading index 0. train_ds being
+        # non-None is what guarantees one of them ran.
         assert self._train_lr is not None
         return train_ds, self._train_lr
 

@@ -1,9 +1,11 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from torch.utils.data import DataLoader
 
 from sisr.training import SRDataModule
+from sisr.training.datamodule import _accepted_init_args
 
 
 def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
@@ -448,3 +450,71 @@ def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
     assert isinstance(dm._train_ds, TrainDataset)
     assert isinstance(dm._val_ds, ValidationDataset)
     assert isinstance(dm._test_ds["Set5"], ValidationDataset)
+
+
+def test_unknown_init_args_key_names_the_config_field_and_the_valid_keys(tmp_path):
+    """_validate_spec catches keys that land *beside* init_args. A misspelled
+    key *inside* it reaches the dataset constructor instead and surfaces as a
+    bare TypeError naming the class but not the config path — which of several
+    dataset blocks is wrong is exactly what the reader needs."""
+    dm = SRDataModule(
+        train_dataset={
+            "class_path": "sisr.datasets.srresnet.ValidationDataset",
+            "init_args": {"img_dir": str(tmp_path), "scale": 2, "crops_per_imag": 8},
+        },
+        val_dataset={
+            "class_path": "sisr.datasets.srresnet.ValidationDataset",
+            "init_args": {"img_dir": str(tmp_path), "scale": 2},
+        },
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        dm.setup(stage="fit")
+
+    message = str(excinfo.value)
+    assert "data.train_dataset.init_args" in message, "must name the offending config field"
+    assert "crops_per_imag" in message, "must name the key that was not accepted"
+    assert "img_dir" in message, "must list what the target does accept"
+    assert isinstance(excinfo.value.__cause__, TypeError), "the original error must be preserved"
+
+
+def test_an_unrelated_type_error_from_a_dataset_constructor_is_not_reworded(tmp_path):
+    """Only the unexpected-keyword case is translated. A TypeError raised by
+    the constructor's own logic must propagate untouched, or a real bug gets
+    reported as a config mistake."""
+
+    def _boom(*args, **kwargs):
+        raise TypeError("something else entirely")
+
+    with patch("sisr.training.datamodule.instantiate_class", side_effect=_boom):
+        dm = SRDataModule(
+            train_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
+            val_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
+        )
+        with pytest.raises(TypeError, match="something else entirely"):
+            dm.setup(stage="fit")
+
+
+def test_non_mapping_init_args_is_refused_by_name(tmp_path):
+    """init_args typed as anything but a mapping cannot be splatted into the
+    constructor, so it is caught at validation rather than at instantiation."""
+    with pytest.raises(ValueError, match=r"data\.train_dataset\.init_args must be a mapping"):
+        SRDataModule(
+            train_dataset={
+                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "init_args": ["img_dir", str(tmp_path)],
+            },
+            val_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
+        )
+
+
+@pytest.mark.parametrize(
+    "class_path",
+    ["sisr.datasets.srresnet.NoSuchDataset", "no_such_module.Thing", "not-a-dotted-path"],
+)
+def test_accepted_init_args_gives_up_quietly_on_an_unresolvable_class(class_path):
+    """The accepted-keys lookup is a courtesy on the error path. If the class
+    cannot be resolved or inspected it must return None so the caller still
+    reports the original constructor error, rather than replacing a real
+    failure with an import error raised while composing the message."""
+    assert _accepted_init_args(class_path) is None

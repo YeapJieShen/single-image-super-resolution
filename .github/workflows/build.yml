@@ -7,11 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Workflow-wide floor. actions: write is NOT here -- it is granted per job, to
+# the ones that actually save an Actions cache, so a job that only checks out
+# and runs a script cannot write to the cache at all.
 permissions:
   contents: read
-  # An explicit permissions block zeroes unlisted scopes; actions: write keeps
-  # Actions-cache saves working (setup-uv enable-cache / setup-python cache: pip).
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,6 +47,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write  # setup-uv enable-cache / setup-python cache: pip
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +83,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write  # setup-uv enable-cache / setup-python cache: pip
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
