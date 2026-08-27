@@ -7,9 +7,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Workflow-wide floor. actions: write is NOT here -- it is granted per job, to
-# the ones that actually save an Actions cache, so a job that only checks out
-# and runs a script cannot write to the cache at all.
+# Floor only: actions: write is granted per job, to the ones that save a cache.
 permissions:
   contents: read
 
@@ -18,11 +16,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Cheap gate: skips the expensive matrices below on a doc-only PR. Deliberately
-  # an allowlist, not a denylist — anything not explicitly listed here (including
-  # this workflow file itself) is treated as code and runs the full matrix.
-  # lint stays ungated: it's a single cheap job, not a matrix, and isn't part of
-  # the `test` required-check's own dependency chain.
+  # Allowlist, not denylist: anything unlisted is treated as code. See docs/configuration.md.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -55,8 +49,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # setup-uv stopped publishing moving major/minor tags at v8.0.0 as supply-chain
-      # hardening, so this pins an exact patch unlike the @v4/@v5 actions above.
+      # setup-uv publishes no moving major tag since v8.0.0, so this pins an exact patch.
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
@@ -68,18 +61,7 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-  # Type-checks only the modules [tool.mypy]'s overrides don't blanket-ignore
-  # (Lightning's hook system and jsonargparse's dynamic CLI/subclass
-  # resolution make sisr/training/, sisr/cli.py resist useful static typing
-  # without a large, separate effort). Installs the dev extra rather than a
-  # bare `mypy` so it type-checks against the same third-party stubs/versions
-  # the rest of CI runs against.
-  # windows-latest, not ubuntu-latest: sisr/utils/cache.py's ctypes.WinDLL Windows
-  # liveness check is genuine platform-specific code, guarded by a runtime
-  # sys.platform == "win32" check -- but typeshed's ctypes stubs only expose
-  # WinDLL under that same platform, so mypy raises attr-defined errors for it
-  # when its own --platform is anything else. test-matrix already treats
-  # windows-latest as first-class, so this matches, not adds, a supported OS.
+  # windows-latest is required: typeshed only exposes ctypes.WinDLL there.
   typecheck:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -129,19 +111,7 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install
         run: uv pip install --system -e ".[dev]"
-      # -n 2, deliberately low: every xdist worker is a fresh interpreter that
-      # cold-imports the whole torch + lightning stack (~10s; torch 3.7s, plus scipy
-      # and sympy via torchmetrics/torchvision), while the suite's own compute is only
-      # ~20s. Past a couple of workers the added startup costs more than the
-      # parallelism wins back. Measured 2026-07-30, 8-core/16-thread Windows:
-      # -n 0 44.0s, -n 2 38.3s, -n 4 38.3s, -n 8 47.1s (-n auto = 16 is far worse).
-      # Re-measure before raising this — "more workers" is not free here, and the
-      # break-even moves whenever the import cost or the suite's compute changes.
-      # GitHub runners have fewer cores than the machine above, so -n 8 (this
-      # workflow's previous setting) already sits past the break-even point measured
-      # as slower than serial there; -n 2 is the safer choice here too.
-      # --dist=loadscope keeps same-module tests on one worker so module-scoped
-      # fixtures (e.g. the shared SRCNN LMDB cache) build once instead of once per worker.
+      # -n 2 is measured, not shy: more workers cost more in cold imports than they win.
       - name: Run tests with coverage
         run: pytest -n 2 --dist=loadscope --cov=sisr --cov-report=xml --cov-report=term --cov-fail-under=90
       - name: Upload coverage to Codecov
@@ -159,11 +129,7 @@ jobs:
           path: coverage.xml
           retention-days: 14
 
-  # Numeric-parity check for the opt-in ONNX export: torch eager vs.
-  # onnxruntime CPU (GitHub runners have no GPU), both architectures. Single
-  # OS/Python leg — a correctness check on one code path, not a compatibility
-  # matrix. Installs the `export` extra explicitly since test-matrix's `.[dev]`
-  # deliberately excludes it (onnx/onnxruntime stay opt-in for contributors).
+  # Numeric parity for the opt-in ONNX export: torch eager vs onnxruntime CPU.
   onnx-export:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -186,9 +152,7 @@ jobs:
       - name: ONNX export parity tests
         run: pytest tests/test_export.py tests/test_cli.py -k export -v
 
-  # Stable required-check context: green only if every matrix leg passed, or
-  # were skipped because `changes` found a doc-only PR (legs report as
-  # "test-matrix (os, ver)", which are not fixed contexts).
+  # Stable required-check context: matrix legs are not fixed contexts themselves.
   test:
     needs: [test-matrix, onnx-export]
     if: always()

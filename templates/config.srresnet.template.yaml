@@ -1,7 +1,8 @@
+# SRResNet -- Ledig et al.'s MSE-trained baseline.
+# Settings are explained in docs/configuration.md. Config files must stay ASCII.
 seed_everything: 42
 
-# TF32 matmul on Ampere+ GPUs. Measured no-op on this repo's conv stacks: conv runs
-# through cuDNN, whose allow_tf32 already defaults True — kept for matmul-heavy archs.
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
 matmul_precision: high
 
 optimizer:
@@ -21,62 +22,20 @@ model:
           kernel_sizes: [9, 3, 9]
           num_residual_blocks: 16
           padding: same
+      # Paper's range (Ledig et al. sec. 3.2): LR [0,1] in, HR/target [-1,1].
       processor:
-        # Paper's range (Ledig et al. §3.2): LR [0,1] in, HR/target [-1,1].
-        # Use RGBProcessor instead to reproduce pre-2026-08-02 runs.
         class_path: sisr.processors.RGBSignedOutputProcessor
-      # Loss. Unset means torch.nn.MSELoss, which is what both papers' baselines use.
-      # Any nn.Module taking (pred, target) works, so L1 needs no sisr class:
-      #   criterion: {class_path: torch.nn.L1Loss}
-      #   criterion: {class_path: sisr.losses.CharbonnierLoss}
-      #
-      # Ledig et al.'s SRResNet-VGG22, faithfully: a VGG22 content loss plus total
-      # variation at 2e-8, with NO pixel term, trained from scratch on the schedule
-      # already configured below (1e6 steps at lr 1e-4). The MSE-initialisation trick
-      # in the paper applies to the SRGAN variants, not to this one.
-      # Two caveats before running it: the first use downloads ~548 MB of VGG19
-      # weights to the torch hub cache, and TV's 2e-8 presumes the [-1, 1] output
-      # range that RGBSignedOutputProcessor above provides.
-      # criterion:
-      #   class_path: sisr.losses.WeightedSumLoss
-      #   init_args:
-      #     terms:
-      #       vgg22:
-      #         class_path: sisr.losses.VGG19FeatureLoss
-      #         init_args:
-      #           layer: vgg22
-      #       tv:
-      #         class_path: sisr.losses.TotalVariationLoss
-      #     weights: {vgg22: 1.0, tv: 2.0e-8}
-      #
-      # phi_{i,j}: blocks 1-2 have 2 convs on both depths (vgg11-vgg22); blocks 3-5
-      # have 4 on VGG19 (up to vgg54) or 3 on VGG16 (up to vgg53). before_activation:
-      # true selects ESRGAN's pre-ReLU features. A perceptual run scores WORSE PSNR
-      # by design; the callbacks below already checkpoint on ssim/val/RGB too, so
-      # the PSNR-monitored "best" no longer tracks the training objective -- decide
-      # which monitored checkpoint you actually want.
+      # criterion unset means torch.nn.MSELoss, the paper's baseline objective.
       training_config:
         class_path: sisr.models.srresnet.SRResNetTrainingConfig
         init_args:
-          # Matches the real training input: RGB at hr_crop_size / scale. Not only a
-          # TensorBoard-graph dummy -- it also shapes the compile warm-up (a wrong size
-          # compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+          # Must match the real training input: RGB at hr_crop_size / scale.
           example_input_shape: [3, 24, 24]
-      # No init_args: the dataclass default already sets ssim_impl: daala, the
-      # convention Ledig et al.'s paper actually used (sigma scales with image height,
-      # not Wang's fixed 11x11 -- see sisr/metrics/ssim.py). That makes this run's SSIM
-      # comparable to the paper and NOT to the Wang-based numbers the rest of the SR
-      # literature reports (EDSR/RCAN/SwinIR/BasicSR lineage). Override with:
-      #   eval_config:
-      #     class_path: sisr.models.srresnet.SRResNetEvalConfig
-      #     init_args:
-      #       ssim_impl: wang
+      # Defaults to ssim_impl: daala, the convention this paper used.
       eval_config:
         class_path: sisr.models.srresnet.SRResNetEvalConfig
 
 data:
-  # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-  # sisr/utils/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srresnet.TrainDataset
     init_args:
@@ -109,10 +68,7 @@ data:
         scale: *scale
   train_dataloader_kwargs:
     batch_size: 16
-    # Workers are load-bearing on real data: per-sample LR derivation is a real
-    # cost, and num_workers=0 hits a hard serial floor (real DIV2K steady-state:
-    # 56.0 ms/step at w0 vs 40.1 ms/step at w16 -- 0.72x). The ~2-minute one-time
-    # spawn cost amortizes to nothing over a full run.
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
     num_workers: 16
     pin_memory: true
     persistent_workers: true
@@ -129,15 +85,9 @@ trainer:
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
   deterministic: false
-  # cuDNN autotunes a conv algorithm per input shape and caches it — free here since
-  # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
-  # above, hence it lives here rather than as a custom key.
+  # Free here: every training step feeds the same fixed crop shape.
   benchmark: true
-  # This config trains eager fp32 -- bit-identical by definition, which is what a
-  # paper reproduction needs. bf16-mixed alone is slower here, not faster; pairing
-  # it with model.training_config.compile_backend: inductor is the opt-in fast path
-  # (inductor additionally needs a C compiler at runtime, not just triton), and its
-  # PSNR/SSIM cost has not been measured.
+  # Trains eager fp32. bf16-mixed alone is SLOWER; see docs/configuration.md.
   # precision: bf16-mixed
   accelerator: cuda
   devices: [0]
@@ -155,9 +105,7 @@ trainer:
       init_args:
         monitor_metric: ssim/val/RGB
         save_top_k: 3
-    # Distributable, optimizer-free weights (.pt) alongside the resumable .ckpt files
-    # above — same monitors/top-k, so every checkpointed best also ships a bare-weights
-    # counterpart safe to hand out without leaking optimizer state.
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
     - class_path: sisr.training.SRWeightsCheckpoint
       init_args:
         monitor_metric: psnr/val/RGB
@@ -172,14 +120,6 @@ trainer:
     - class_path: sisr.training.GradNormLogger
       init_args:
         log_every_n_steps: 5000
-    # Throughput/hardware diagnostics — extra per-step logging overhead, so commented
-    # out by default. DeviceStatsMonitor works as-is; ThroughputMonitor additionally
-    # needs a batch_size_fn (batches are (lr, hr) tuples, not plain tensors — no
-    # project-side helper exists yet).
-    # - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
-    # - class_path: lightning.pytorch.callbacks.ThroughputMonitor
-    #   init_args:
-    #     batch_size_fn: sisr.training.callbacks.batch_size  # example path; add if needed
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:

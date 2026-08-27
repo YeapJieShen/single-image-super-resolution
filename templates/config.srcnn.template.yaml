@@ -1,7 +1,8 @@
+# SRCNN -- Dong et al., pre-upsampled LR, Y-channel only.
+# Settings are explained in docs/configuration.md. Config files must stay ASCII.
 seed_everything: 42
 
-# TF32 matmul on Ampere+ GPUs. Measured no-op on this repo's conv stacks: conv runs
-# through cuDNN, whose allow_tf32 already defaults True — kept for matmul-heavy archs.
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
 matmul_precision: high
 
 optimizer:
@@ -16,7 +17,7 @@ model:
       model:
         class_path: sisr.models.srcnn.SRCNN
         init_args:
-          num_channels: 1                    # Y-channel only (was 3 — latent bug fix)
+          num_channels: 1                    # Y channel only
           num_filters: [64, 32]
           kernel_sizes: [9, 1, 5]
           padding: 0
@@ -25,24 +26,13 @@ model:
       training_config:
         class_path: sisr.models.srcnn.SRCNNTrainingConfig
         init_args:
-          # Must match the real training input: 1-channel Y at subimg_size x subimg_size.
-          # No longer only a TensorBoard-graph dummy -- it also shapes the compile warm-up
-          # (a wrong size compiles once then recompiles on step 1) and ModelSummary's FLOPs.
+          # Must match the real training input: 1-channel Y at subimg_size.
           example_input_shape: [1, 33, 33]
-      # No init_args: the dataclass default leaves ssim_impl at wang -- the field
-      # standard fixed 11x11 gaussian (sigma 1.5), what torchmetrics/MATLAB/BasicSR
-      # compute and what most SR papers report (SRResNet's paper is the exception --
-      # see the daala note in its template). Override with:
-      #   eval_config:
-      #     class_path: sisr.models.srcnn.SRCNNEvalConfig
-      #     init_args:
-      #       ssim_impl: daala
+      # Defaults to ssim_impl: wang, the field standard.
       eval_config:
         class_path: sisr.models.srcnn.SRCNNEvalConfig
 
 data:
-  # LR is derived via MATLAB-compatible antialiased bicubic resizing (see
-  # sisr/utils/imresize.py), comparable to published paper numbers.
   train_dataset:
     class_path: sisr.datasets.srcnn.TrainDataset
     init_args:
@@ -75,10 +65,7 @@ data:
         scale: *scale
   train_dataloader_kwargs:
     batch_size: 64             # not specified by the paper; this project's choice
-    # Workers are load-bearing on real data: per-sample LR derivation measured
-    # ~1.1 ms, so batch 64 is a ~69 ms hard serial floor at num_workers=0 (real
-    # DIV2K steady-state: 79.3 ms/step at w0 vs 14.9 ms/step at w16 -- 0.19x).
-    # The ~2-minute one-time spawn cost amortizes to nothing over a full run.
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
     num_workers: 16
     pin_memory: true
     persistent_workers: true
@@ -89,25 +76,16 @@ data:
 
 trainer:
   max_epochs: -1
-  # Paper gives 8e8 backprops, not steps; reading that as per-sample updates (the
-  # mini-batch reading implies implausible iters/sec on 2014 hardware) puts
-  # 1e7 steps * batch 64 = 6.4e8, ~0.8x the paper's figure. Approximation, not a quote.
+  # ~0.8x the paper's 8e8 backprops, read as per-sample updates. An approximation.
   max_steps: 10000000
-  # 20 validation cycles over the run (max_steps / val_check_interval) — matches the
-  # logging budget. Revisit this if max_steps changes, or event files balloon.
-  val_check_interval: 500000
+  val_check_interval: 500000   # 20 validation cycles over the run
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
   deterministic: false
-  # cuDNN autotunes a conv algorithm per input shape and caches it — free here since
-  # every step feeds the same fixed crop shape. Lightning ties this to `deterministic`
-  # above, hence it lives here rather than as a custom key.
+  # Free here: every training step feeds the same fixed crop shape.
   benchmark: true
-  # bf16-mixed measured as a REGRESSION on this project's other architecture
-  # (0.72x SRResNet b16, full power) -- autocast's cast-churn doesn't saturate
-  # the SMs at these batch sizes. Crossover measured at b32 (bf16+fused wins) --
-  # revisit only if batch_size rises well past this template's 64.
+  # bf16-mixed measured as a REGRESSION at these batch sizes. See the docs.
   # precision: bf16-mixed
   accelerator: cuda
   devices: [0]
@@ -125,9 +103,7 @@ trainer:
       init_args:
         monitor_metric: ssim/val/RGB
         save_top_k: 3
-    # Distributable, optimizer-free weights (.pt) alongside the resumable .ckpt files
-    # above — same monitors/top-k, so every checkpointed best also ships a bare-weights
-    # counterpart safe to hand out without leaking optimizer state.
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
     - class_path: sisr.training.SRWeightsCheckpoint
       init_args:
         monitor_metric: psnr/val/RGB
@@ -142,14 +118,6 @@ trainer:
     - class_path: sisr.training.GradNormLogger
       init_args:
         log_every_n_steps: 5000
-    # Throughput/hardware diagnostics — extra per-step logging overhead, so commented
-    # out by default. DeviceStatsMonitor works as-is; ThroughputMonitor additionally
-    # needs a batch_size_fn (batches are (lr, hr) tuples, not plain tensors — no
-    # project-side helper exists yet).
-    # - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
-    # - class_path: lightning.pytorch.callbacks.ThroughputMonitor
-    #   init_args:
-    #     batch_size_fn: sisr.training.callbacks.batch_size  # example path; add if needed
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
