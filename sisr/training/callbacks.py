@@ -593,68 +593,6 @@ class WeightHistogramLogger(Callback):
                 experiment.add_histogram(tb_name, param, global_step=step)
 
 
-def _validate_monitor_metric(
-    label: str, monitor: str | None, pl_module: lightning.LightningModule, mode: str
-) -> None:
-    """Raise if ``monitor`` names no logged metric, or is monitored in the wrong direction.
-
-    Implementation behind :meth:`_SRCheckpointBase._validate_monitor`, which is
-    how every caller reaches it — ``label``/``monitor``/``mode`` are all ``self``
-    there. Kept as a module-level function only because the rule is pure.
-
-    The direction half exists because both classes default to ``mode='max'``,
-    which is right for PSNR/SSIM and exactly inverted for LPIPS/DISTS — the
-    failure is silent, keeping the worst checkpoint of the run with nothing in
-    the logs or filenames to indicate it. Which perceptual metrics are
-    lower-is-better comes from ``PERCEPTUAL_METRICS`` rather than being
-    restated here, so a future higher-is-better perceptual metric would still
-    be checked in the right direction.
-
-    Args:
-        label: Name of the calling class, for the error message only.
-        monitor: The ``monitor`` value to validate (``self.monitor``). ``None``
-            means rolling mode, which monitors nothing and is always valid.
-        pl_module: The model being trained; must expose ``eval_config``.
-        mode: The callback's ``mode`` — ``'max'`` or ``'min'``.
-
-    Raises:
-        MisconfigurationException: If ``monitor`` does not name a metric
-            ``SRLightning`` will log during ``fit``, or if ``mode`` disagrees
-            with that metric's direction.
-    """
-    if monitor is None:
-        return
-
-    higher_better = {f"psnr/val/{key}" for key in pl_module.eval_config.psnr_keys}
-    higher_better |= {f"ssim/val/{key}" for key in pl_module.eval_config.ssim_keys}
-    higher_better |= {
-        f"{name}/val"
-        for name in pl_module.eval_config.perceptual_keys
-        if not PERCEPTUAL_METRICS[name]
-    }
-    lower_better = {
-        f"{name}/val" for name in pl_module.eval_config.perceptual_keys if PERCEPTUAL_METRICS[name]
-    }
-
-    valid_metrics = higher_better | lower_better
-    if monitor not in valid_metrics:
-        raise MisconfigurationException(
-            f"`{label}(monitor_metric={monitor!r})` does not match any "
-            f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
-            f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, "
-            f"`eval_config.ssim_channels`, or `eval_config.perceptual_metrics`."
-        )
-
-    wanted = "min" if monitor in lower_better else "max"
-    if mode != wanted:
-        direction = "lower-is-better" if wanted == "min" else "higher-is-better"
-        raise MisconfigurationException(
-            f"`{label}(monitor_metric={monitor!r}, mode={mode!r})` monitors a "
-            f"{direction} metric in the wrong direction — it would keep the worst "
-            f"checkpoint of the run, silently. Set mode={wanted!r}."
-        )
-
-
 class _RollingSaveMixin:
     """Oldest-first deletion for the no-monitor (rolling) case.
 
@@ -825,13 +763,54 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
     def _validate_monitor(self, pl_module: lightning.LightningModule) -> None:
         """Raise if this callback's ``monitor``/``mode`` pair is unloggable or inverted.
 
+        The direction half exists because both subclasses default to ``mode='max'``,
+        which is right for PSNR/SSIM and exactly inverted for LPIPS/DISTS — the
+        failure is silent, keeping the worst checkpoint of the run with nothing in
+        the logs or filenames to indicate it. Which perceptual metrics are
+        lower-is-better comes from ``PERCEPTUAL_METRICS`` rather than being
+        restated here, so a future higher-is-better perceptual metric would still
+        be checked in the right direction.
+
         Args:
             pl_module: The model being trained; must expose ``eval_config``.
 
         Raises:
-            MisconfigurationException: Per :func:`_validate_monitor_metric`.
+            MisconfigurationException: If ``monitor`` does not name a metric
+                ``SRLightning`` will log during ``fit``, or if ``mode`` disagrees
+                with that metric's direction. ``monitor=None`` is rolling mode,
+                which monitors nothing and is always valid.
         """
-        _validate_monitor_metric(type(self).__name__, self.monitor, pl_module, mode=self.mode)
+        if self.monitor is None:
+            return
+
+        eval_config = pl_module.eval_config
+        higher_better = {f"psnr/val/{key}" for key in eval_config.psnr_keys}
+        higher_better |= {f"ssim/val/{key}" for key in eval_config.ssim_keys}
+        higher_better |= {
+            f"{name}/val" for name in eval_config.perceptual_keys if not PERCEPTUAL_METRICS[name]
+        }
+        lower_better = {
+            f"{name}/val" for name in eval_config.perceptual_keys if PERCEPTUAL_METRICS[name]
+        }
+
+        label = type(self).__name__
+        valid_metrics = higher_better | lower_better
+        if self.monitor not in valid_metrics:
+            raise MisconfigurationException(
+                f"`{label}(monitor_metric={self.monitor!r})` does not match any "
+                f"metric `SRLightning` will log: {sorted(valid_metrics)}. HINT: check "
+                f"`eval_config.psnr_channels` / `eval_config.separate_psnr`, "
+                f"`eval_config.ssim_channels`, or `eval_config.perceptual_metrics`."
+            )
+
+        wanted = "min" if self.monitor in lower_better else "max"
+        if self.mode != wanted:
+            direction = "lower-is-better" if wanted == "min" else "higher-is-better"
+            raise MisconfigurationException(
+                f"`{label}(monitor_metric={self.monitor!r}, mode={self.mode!r})` monitors a "
+                f"{direction} metric in the wrong direction — it would keep the worst "
+                f"checkpoint of the run, silently. Set mode={wanted!r}."
+            )
 
     def setup(
         self,
@@ -1035,9 +1014,8 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
     ) -> None:
         """Validate ``monitor`` against the metrics ``SRLightning`` will log, and ``attribute``.
 
-        The ``monitor`` check is the same as :meth:`SRCheckpoint.setup` (via the
-        shared ``_validate_monitor_metric`` helper — the two classes are siblings,
-        not parent/child, so the check can't be reused via ``super()`` across them).
+        The ``monitor`` check is inherited unchanged from
+        :meth:`_SRCheckpointBase.setup`; only ``attribute`` is added here.
 
         ``attribute`` is otherwise only read when a checkpoint is written, so a
         typo — or ``attribute='discriminator'`` on a plain
