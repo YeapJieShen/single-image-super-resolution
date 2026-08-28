@@ -10,8 +10,10 @@ from types import SimpleNamespace
 
 import lightning
 import pytest
+import safetensors.torch
 import torch
 
+from sisr import artifacts
 from sisr.losses import AdversarialLoss, VGG19FeatureLoss
 from sisr.models.base import SRModel
 from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
@@ -98,8 +100,8 @@ def write_weights(tmp_path, **meta_overrides):
     for dotted, value in meta_overrides.items():
         section, key = dotted.split(".")
         meta[section][key] = value
-    path = tmp_path / "sr-weights.pt"
-    torch.save({"state_dict": source.model.state_dict(), "meta": meta}, path)
+    path = tmp_path / "sr-weights.safetensors"
+    artifacts.save(path, source.model.state_dict(), meta)
     return path, source
 
 
@@ -755,28 +757,31 @@ def test_init_from_rejects_a_ckpt_and_names_the_pt(tmp_path):
     strict load into the bare generator fails with an unreadable key dump —
     and it carries no ``meta`` to validate against either."""
     path = tmp_path / "sr-42.ckpt"
-    torch.save({"state_dict": {}}, path)
+    safetensors.torch.save_file({}, str(path))  # no provenance header at all
 
     with pytest.raises(ValueError) as excinfo:
         init_gan_from(path)
 
     message = str(excinfo.value)
     assert "sr-42.ckpt" in message
-    assert ".pt" in message, "the message must point at the sibling weights file"
+    assert "sr-weights" in message, "the message must point at the sibling weights file"
 
 
 def test_init_from_refuses_a_pt_with_no_metadata(tmp_path):
     """Without ``meta`` there is nothing to validate against, so accepting the
     file would silently reinstate every mismatch the checks above refuse."""
-    path = tmp_path / "sr-weights.pt"
-    torch.save({"state_dict": build_source_module().model.state_dict()}, path)
+    path = tmp_path / "sr-weights.safetensors"
+    safetensors.torch.save_file(
+        {k: v.contiguous() for k, v in build_source_module().model.state_dict().items()},
+        str(path),
+    )  # tensors, but no provenance header
 
-    with pytest.raises(ValueError, match="meta"):
+    with pytest.raises(ValueError, match="no sisr provenance header"):
         init_gan_from(path)
 
 
 def test_init_from_names_the_component_artifact_it_was_handed(tmp_path):
-    """A ``d-weights-*.pt`` is the likeliest misuse after a ``.ckpt``: the template
+    """A ``d-weights-*`` file is the likeliest misuse after a ``.ckpt``: the template
     writes both files into one dirpath.
 
     It is refused either way — a component's meta has no generator-scoped ``io``
@@ -784,20 +789,18 @@ def test_init_from_names_the_component_artifact_it_was_handed(tmp_path):
     discriminator's weights, which is the whole mistake.
     """
     module = build_gan_module()
-    path = tmp_path / "d-weights-10000.pt"
-    torch.save(
-        {
-            "state_dict": module.discriminator.state_dict(),
-            "meta": build_component_metadata(module, "discriminator"),
-        },
+    path = tmp_path / "d-weights-10000.safetensors"
+    artifacts.save(
         path,
+        module.discriminator.state_dict(),
+        build_component_metadata(module, "discriminator"),
     )
 
     with pytest.raises(ValueError) as excinfo:
         init_gan_from(path)
 
     message = str(excinfo.value)
-    assert "d-weights-10000.pt" in message
+    assert "d-weights-10000.safetensors" in message
     assert "discriminator" in message, "the message must name the component it was handed"
     assert "sr-weights" in message, "...and the generator file that should have been used"
     assert not [name for name in INIT_FROM_FIELDS if name in message], (
@@ -812,8 +815,8 @@ def test_init_from_accepts_a_pt_written_before_kind_existed(tmp_path):
     source = build_source_module()
     meta = build_metadata(source)
     del meta["kind"]
-    path = tmp_path / "sr-weights.pt"
-    torch.save({"state_dict": source.model.state_dict(), "meta": meta}, path)
+    path = tmp_path / "sr-weights.safetensors"
+    artifacts.save(path, source.model.state_dict(), meta)
 
     init_gan_from(path)  # must not raise
 
@@ -840,7 +843,7 @@ def test_init_from_is_only_read_when_the_run_is_fitting(tmp_path):
     A path that does not exist is the whole proof: the non-fit stages must not
     touch it, and ``fit`` must.
     """
-    missing = tmp_path / "absent-sr-weights.pt"
+    missing = tmp_path / "absent-sr-weights.safetensors"
 
     module = build_gan_module(init_from=str(missing))  # construction must not read it
     for stage in ("validate", "test", "predict"):
@@ -950,8 +953,8 @@ def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
             ),
         ],
     )
-    d_meta = torch.load(next(tmp_path.glob("d-weights-*.pt")), weights_only=True)["meta"]
-    g_meta = torch.load(next(tmp_path.glob("sr-weights-*.pt")), weights_only=True)["meta"]
+    d_meta = artifacts.load(next(tmp_path.glob("d-weights-*.safetensors")))[1]
+    g_meta = artifacts.load(next(tmp_path.glob("sr-weights-*.safetensors")))[1]
 
     assert set(d_meta).isdisjoint({"discriminator", "adversarial"})
     assert d_meta["kind"] == "component"

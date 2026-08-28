@@ -59,7 +59,7 @@ model:
         class_path: sisr.models.srgan.SRGANTrainingConfig
         init_args:
           # Bare weights (.pt), never the sibling .ckpt. Mismatches are refused.
-          init_from: "experiments/SRResNet/golden/checkpoints/sr-weights-1000000-psnr_val_RGB=28.8635.pt"
+          init_from: "experiments/SRResNet/golden/checkpoints/sr-weights-1000000-psnr_val_RGB=28.8635.safetensors"
           # Must match the real training input: RGB at hr_crop_size / scale.
           example_input_shape: [3, 24, 24]
           # adversarial_weight 1.0e-3 and d_steps_per_g_step 1 are the defaults.

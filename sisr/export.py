@@ -33,12 +33,13 @@ actually invoked.
 
 from __future__ import annotations
 
-import json
 import warnings
 from os import PathLike
 from typing import TYPE_CHECKING
 
 import torch
+
+from . import artifacts
 
 if TYPE_CHECKING:
     from .training import SRLightning
@@ -217,8 +218,8 @@ def _write_metadata_props(
         monitor_value=monitor_value,
     )
     onnx_model = onnx.load(str(file_path))
-    for key, value in meta.items():
+    for key, value in artifacts.encode_metadata(meta).items():
         entry = onnx_model.metadata_props.add()
         entry.key = key
-        entry.value = value if isinstance(value, str) else json.dumps(value)
+        entry.value = value
     onnx.save(onnx_model, str(file_path))

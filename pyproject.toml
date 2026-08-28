@@ -43,6 +43,9 @@ dependencies = [
     "torchmetrics>=1.9",
     # set_parsing_settings(subclasses_enabled=...) does not exist below 4.50.
     "jsonargparse[signatures]>=4.50",
+    # The distributable weights format. Core, not an extra: it is what every run
+    # writes, so it cannot be conditional on an optional install.
+    "safetensors>=0.4",
     "lmdb>=1.4",
     "pillow>=10",
     "numpy>=1.26",
