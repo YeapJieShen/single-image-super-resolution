@@ -100,7 +100,7 @@ to the torch hub cache, and TV's `2e-8` presumes the `[-1, 1]` output range that
 
 | Field | Notes |
 | --- | --- |
-| `example_input_shape` | Must match the real training input. |
+| `example_input_shape` | **Optional.** Derived from the real training patch when unset; checked against it when set. |
 | `compile_backend` | A `torch._dynamo` backend name, or unset for eager. |
 | `layer_lrs` | Per-`Conv2d` learning rates; requires every trainable parameter to live in a `Conv2d`. |
 | `init_strategy`, `init_mean`, `init_std` | Weight initialisation. |
@@ -121,6 +121,12 @@ resize the input by before feeding it. It is deliberately *not* inferred from th
 `example_input_shape` is **not** only a TensorBoard-graph dummy. It also shapes the
 `torch.compile` warm-up — a wrong size compiles once and then recompiles on step 1 —
 and it drives `ModelSummary`'s FLOPs count.
+
+You may leave it unset: it is derived from the first real training patch. Setting it is
+still useful, because a stated value is *checked* against that patch rather than
+replaced by it — an intent that can be contradicted. **The shipped templates state it**
+for one reason: they are also the input to `sisr export`, which never sees training data
+and so has nothing to derive from.
 
 ### `eval_config` and the two SSIM conventions
 
@@ -317,8 +323,18 @@ does not (5 → still every 5).
 | `BenchmarkImageLogger` | Writes benchmark-set image strips each val run. |
 | `SRCheckpoint` | Resumable `.ckpt`. |
 | `SRWeightsCheckpoint` | Distributable, optimizer-free `.safetensors` weights — roughly a third the size, and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
-| `GradNormLogger` | Logs `diag/grad_norm`. |
+| `GradNormLogger` | Logs `diag/grad_norm` every `every_n_batches`. |
 | `LearningRateMonitor` | Lightning's, logging per step. |
+
+Our own cadence arguments are named `every_n_batches` and `every_n_val_runs`, following
+Lightning's own `every_n_train_steps` / `every_n_epochs`: the unit is in the name. The
+old `log_every_n_steps` on a callback was a homonym of `Trainer.log_every_n_steps`, which
+means the metric *flush* cadence — the same word for two different things in one file.
+
+Lightning's own names cannot change, so the residual asymmetry stays: `max_steps` and
+`every_n_train_steps` count optimizer steps while everything else counts batches. An
+adversarial run now **prints the conversion at start** against its own numbers, rather
+than relying on you to have read this page.
 
 Set `monitor_metric` for a metric-monitored top-k, or `monitor_metric: null` with
 `keep_last` for rolling last-N saves by step. **A monitor's direction is validated at
