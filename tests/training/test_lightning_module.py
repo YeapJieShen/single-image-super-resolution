@@ -35,7 +35,7 @@ def srcnn_rgb_lit() -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -48,7 +48,7 @@ def srcnn_y_lit() -> SRLightning:
     return SRLightning(
         model=model,
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB", "YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -101,7 +101,7 @@ def test_step_y_path_loss_on_y_only():
     lit = SRLightning(
         model=model,
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         criterion=criterion,
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
@@ -121,7 +121,7 @@ def test_step_ycbcr_path():
     lit = SRLightning(
         model=model,
         processor=YCbCrProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -255,7 +255,7 @@ def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
         lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=10),
@@ -295,7 +295,7 @@ def test_build_metric_tensors_rgb_only_when_neither_metric_requests_y():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(psnr_channels=["RGB"], ssim_channels=["RGB"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -314,7 +314,7 @@ def test_build_metric_tensors_union_of_psnr_and_ssim_keys():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(psnr_channels=["RGB"], ssim_channels=["RGB", "Y"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -329,7 +329,7 @@ def test_build_metric_tensors_with_separate_psnr_includes_per_channel():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(psnr_channels=["RGB"], separate_psnr=True),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -344,7 +344,7 @@ def test_build_metric_tensors_ycbcr_does_conversion():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(psnr_channels=["YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -368,7 +368,7 @@ def test_build_metric_tensors_ycbcr_uses_studio_range_not_full_range():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(psnr_channels=["YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -454,7 +454,7 @@ def test_base_training_config_skips_reset_parameters():
     SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),  # init_strategy='default' by default
+        training_config=SRTrainingConfig(scale=2),  # init_strategy='default' by default
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -621,7 +621,7 @@ def test_step_calls_processor_extract_and_reconstruct():
     lit = SRLightning(
         model=model,
         processor=processor,
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -643,7 +643,7 @@ def test_step_loss_uses_extract_target_not_extract():
     lit = SRLightning(
         model=model,
         processor=RGBSignedOutputProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -682,7 +682,7 @@ def test_saved_tb_hparams_contain_processor_name():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -753,7 +753,7 @@ def _overshooting_rgb_lit() -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -858,7 +858,7 @@ def test_tb_hparams_expand_nested_config_fields():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=7),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -882,7 +882,7 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=7),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -942,7 +942,7 @@ def test_predict_step_srresnet_upsamples_by_scale():
     lit = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -987,7 +987,7 @@ def _make_lit_with_ssim_impl(ssim_impl: str) -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0, ssim_channels=["Y"], ssim_impl=ssim_impl),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1238,6 +1238,7 @@ def test_on_save_checkpoint_leaves_monitor_unset():
     lit = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
     checkpoint = {"global_step": 1, "epoch": 0}
@@ -1355,7 +1356,7 @@ def _srcnn_lit() -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )

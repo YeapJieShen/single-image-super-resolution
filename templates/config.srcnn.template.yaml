@@ -26,6 +26,7 @@ model:
       training_config:
         class_path: sisr.models.srcnn.SRCNNTrainingConfig
         init_args:
+          scale: &scale 3
           # Must match the real training input: 1-channel Y at subimg_size.
           example_input_shape: [1, 33, 33]
       # Defaults to ssim_impl: wang, the field standard.
@@ -39,7 +40,7 @@ data:
       img_dir: data/DIV2K_train_HR
       subimg_size: 33
       stride: 14
-      scale: &scale 3
+      scale: *scale
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:

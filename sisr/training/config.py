@@ -95,13 +95,17 @@ class SRTrainingConfig:
 
         scale: The model's upscaling factor, for provenance metadata and
             cross-checking against the model's own ``scale`` hparam (see
-            :meth:`validate_against`). ``None`` (the default) leaves it
-            unchecked and out of exported metadata — appropriate for
-            architectures like SRCNN where scale is a training-data choice,
-            not a fixed property of the model itself. Deliberately not
-            inferred from ``trainer.datamodule.train_dataset.scale``: that
-            attribute lives outside the ``SRDataset`` contract (``PredictDataset``
-            has none at all), whereas per-paper knobs already live here.
+            :meth:`validate_against`). **Required for any run that writes an
+            artifact** on an architecture carrying no ``scale`` hparam of its
+            own — :func:`~sisr.training.metadata.build_metadata` refuses rather
+            than recording a null. It used to be documented as optional there,
+            which held while the metadata was read only by us; a file handed to
+            a stranger has to state the factor, because for a pre-upsampled
+            architecture it is what they must resize the input by. Still
+            deliberately not inferred from
+            ``trainer.datamodule.train_dataset.scale``: that attribute lives
+            outside the ``SRDataset`` contract (``PredictDataset`` has none at
+            all), whereas per-paper knobs already live here.
 
         compile_backend: Name of a ``torch._dynamo`` backend (e.g.
             ``'cudagraphs'``, ``'inductor'``) to compile the training-mode
