@@ -17,7 +17,7 @@ def _make_srcnn_lit() -> SRLightning:
     return SRLightning(
         model=model,
         processor=YChannelProcessor(),
-        training_config=SRCNNTrainingConfig(),
+        training_config=SRCNNTrainingConfig(scale=3),
         eval_config=SRCNNEvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -122,13 +122,6 @@ def test_build_metadata_scale_falls_back_to_model_hparams():
     assert meta["io"]["scale"] == 2
 
 
-def test_build_metadata_scale_is_none_when_neither_source_has_it():
-    """SRCNN has no 'scale' hparam and training_config.scale is unset -> None,
-    not a guessed value."""
-    meta = build_metadata(_make_srcnn_lit())
-    assert meta["io"]["scale"] is None
-
-
 def test_metadata_records_ssim_impl():
     """Which SSIM produced a checkpoint's filename must be answerable from the
     artifact alone. eval_config is serialised wholesale, so this rides along —
@@ -217,6 +210,7 @@ def test_metadata_records_the_criterion_identity():
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=RGBSignedOutputProcessor(),
+        training_config=SRTrainingConfig(scale=3),
         criterion=WeightedSumLoss(
             terms={"vgg22": vgg, "tv": TotalVariationLoss()},
             weights={"vgg22": 1.0, "tv": 2.0e-8},
@@ -233,6 +227,7 @@ def test_metadata_criterion_defaults_to_the_class_name_for_a_plain_loss():
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=3),
     )
 
     meta = build_metadata(module)
@@ -248,6 +243,7 @@ def test_metadata_stays_weights_only_loadable_with_a_criterion_block(tmp_path):
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=3),
     )
     path = tmp_path / "meta.pt"
     torch.save({"meta": build_metadata(module)}, path)
@@ -356,3 +352,23 @@ def test_component_metadata_is_weights_only_safe(tmp_path):
     loaded = torch.load(path, weights_only=True)
 
     assert loaded["meta"] == meta
+
+
+def test_build_metadata_refuses_an_artifact_that_cannot_state_its_scale():
+    """Fails if a saved artifact can record ``io.scale: None``.
+
+    A pre-upsampled architecture carries no ``scale`` hparam, so with
+    ``training_config.scale`` unset the factor is unrecoverable from the file.
+    That is the one thing a consumer of such a model must know -- it is what they
+    have to resize the input by before feeding it -- so writing the artifact at
+    all is worse than refusing.
+    """
+    module = SRLightning(
+        model=SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0),
+        processor=YChannelProcessor(),
+    )
+    assert module.training_config.scale is None
+    assert "scale" not in module.model.hparams
+
+    with pytest.raises(ValueError, match="without a scale"):
+        build_metadata(module)

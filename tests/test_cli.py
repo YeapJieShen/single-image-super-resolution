@@ -865,12 +865,20 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                     },
                 },
                 "processor": {"class_path": "sisr.processors.RGBProcessor"},
+                "training_config": {
+                    "class_path": "sisr.training.SRTrainingConfig",
+                    "init_args": {"scale": 2},
+                },
                 "eval_config": {
                     "class_path": "sisr.training.SREvalConfig",
                     "init_args": {"crop_border": 0},
                 },
             },
         },
+        # Without this the CLI warns "No seed found", which the strict warning
+        # filter makes fatal -- and only when no earlier test has seeded the
+        # process, so the test passed in a full run and failed on its own.
+        "seed_everything": 42,
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
             "train_dataset": {

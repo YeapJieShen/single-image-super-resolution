@@ -592,7 +592,7 @@ def build_module(eval_config: SREvalConfig | None = None) -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=eval_config or SREvalConfig(),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -842,6 +842,7 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
     module = SRLightning(
         model=model,
         processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
     )
@@ -932,6 +933,7 @@ def _run_tiny_fit(
         module = SRLightning(
             model=model,
             processor=RGBProcessor(),
+            training_config=SRTrainingConfig(scale=2),
             eval_config=SREvalConfig(crop_border=0),
             optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
         )
@@ -1209,7 +1211,7 @@ def _make_real_pl_module() -> SRLightning:
     return SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1313,7 +1315,7 @@ def test_collect_batch_metric_values_match_pre_change_host_copy_first_ordering()
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(
             crop_border=3,
             psnr_channels=["RGB", "YCbCr"],
@@ -1387,7 +1389,7 @@ def test_benchmark_logger_uses_module_ssim_impl():
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0, ssim_channels=["Y"], ssim_impl="daala"),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1768,7 +1770,7 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=2, perceptual_metrics=["lpips"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1879,7 +1881,7 @@ def test_benchmark_collect_batch_crops_per_eval_config():
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=3),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1917,7 +1919,7 @@ def test_benchmark_collect_batch_routes_through_processor():
     pl_module = SRLightning(
         model=model,
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB", "YCbCr"]),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -1957,7 +1959,7 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_fals
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(
             crop_border=0, psnr_channels=["RGB", "YCbCr"], separate_psnr=False
         ),
@@ -1989,7 +1991,7 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true
     pl_module = SRLightning(
         model=model,
         processor=RGBProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(crop_border=0, psnr_channels=["RGB"], separate_psnr=True),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
@@ -2279,7 +2281,7 @@ def test_weights_checkpoint_metadata_records_both_axes_distinguishably(tmp_path:
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
     )
     trainer = _manual_optimization_trainer(batches=199_999, optimizer_steps=400_000)
@@ -2308,7 +2310,7 @@ def test_full_checkpoint_metadata_records_both_axes_distinguishably():
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
     )
     checkpoint = {
@@ -2335,7 +2337,7 @@ def test_checkpoint_metadata_batch_step_is_none_when_the_loop_state_is_absent():
     module = SRLightning(
         model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
         processor=YChannelProcessor(),
-        training_config=SRTrainingConfig(),
+        training_config=SRTrainingConfig(scale=2),
         eval_config=SREvalConfig(),
     )
     checkpoint: dict = {}

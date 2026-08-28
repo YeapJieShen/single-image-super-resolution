@@ -26,7 +26,7 @@ from sisr.training import SRLightning  # noqa: E402
 def _make_srcnn_module(example_input_shape: tuple[int, ...] | None) -> SRLightning:
     """Tiny Y-channel SRCNN — small enough to trace/export quickly."""
     model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(5, 1, 3), padding=0)
-    training_config = SRCNNTrainingConfig(example_input_shape=example_input_shape)
+    training_config = SRCNNTrainingConfig(example_input_shape=example_input_shape, scale=2)
     return SRLightning(model=model, processor=YChannelProcessor(), training_config=training_config)
 
 
@@ -93,7 +93,9 @@ def test_to_onnx_requires_example_input_shape_or_input_sample():
 def test_to_onnx_accepts_explicit_input_sample(tmp_path):
     """An explicit input_sample bypasses the training_config.example_input_shape seam."""
     model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(5, 1, 3), padding=0)
-    module = SRLightning(model=model, processor=YChannelProcessor())
+    module = SRLightning(
+        model=model, processor=YChannelProcessor(), training_config=SRCNNTrainingConfig(scale=2)
+    )
     onnx_path = tmp_path / "model.onnx"
 
     to_onnx(module, onnx_path, input_sample=torch.zeros(1, 1, 24, 24))

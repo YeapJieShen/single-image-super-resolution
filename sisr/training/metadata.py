@@ -134,6 +134,10 @@ def build_metadata(
         Contains only ``dict``/``list``/``str``/``int``/``float``/``bool``/``None`` values —
         safe for ``torch.save``/``torch.load(weights_only=True)`` and, per top-level field, for
         JSON-encoding into ONNX ``metadata_props``.
+
+    Raises:
+        ValueError: If the scale cannot be resolved from either
+            ``training_config.scale`` or the model's own hparams.
     """
     model = module.model
     processor = module.processor
@@ -141,6 +145,14 @@ def build_metadata(
     scale = module.training_config.scale
     if scale is None:
         scale = model.hparams.get("scale")
+    if scale is None:
+        raise ValueError(
+            f"Cannot describe a {type(model).__name__} artifact without a scale: "
+            f"training_config.scale is None and the model declares no 'scale' "
+            f"hyperparameter. A reader cannot use the file without it -- for a "
+            f"pre-upsampled architecture the scale is what they must resize the input "
+            f"by before feeding it. Set training_config.scale in your config."
+        )
 
     meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value, batch_step)
     meta["model"] = {
