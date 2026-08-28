@@ -160,6 +160,7 @@ def build_metadata(
     meta["model"] = {
         "class_path": _class_path(model),
         "init_args": _to_plain(model.hparams),
+        "variant": model.variant_tag,
     }
     meta["processor"] = {
         "class_path": _class_path(processor),
@@ -221,6 +222,9 @@ def build_component_metadata(
         "name": attribute,
         "class_path": _class_path(component),
         "init_args": _to_plain(getattr(component, "hparams", {})),
+        # Duck-typed: a co-trained component need not be an SRModel, and one
+        # without a tag simply contributes nothing to the filename.
+        "variant": getattr(component, "variant_tag", None),
     }
     meta["io"] = {
         "input_range": list(processor.output_range),

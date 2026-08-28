@@ -122,6 +122,11 @@ class SRCNN(SRModel):
                 if module.bias is not None:
                     torch.nn.init.constant_(module.bias, 0.0)
 
+    @property
+    def variant_tag(self) -> str:
+        """The kernel-size triple, e.g. ``'915'`` -- how the paper names its variants."""
+        return "".join(str(k) for k in self._hparams["kernel_sizes"])
+
     def forward(
         self,
         x: torch.Tensor,

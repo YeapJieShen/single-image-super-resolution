@@ -374,7 +374,9 @@ def test_srgan_template_ships_a_real_init_from_path():
 
     init_from = data["model"]["init_args"]["training_config"]["init_args"]["init_from"]
     assert init_from.endswith(artifacts.SUFFIX)
-    assert "sr-weights" in init_from
+    # Names a generator, not the sibling discriminator file and not a .ckpt --
+    # both of which SRGANLightning's setup refuses, with different messages.
+    assert Path(init_from).name.startswith("SRResNet_")
 
 
 @_ignore_random_vgg

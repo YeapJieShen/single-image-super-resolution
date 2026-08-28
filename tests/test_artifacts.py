@@ -101,3 +101,36 @@ def test_require_compatible_takes_a_stricter_field_list_when_the_caller_has_more
 
     with pytest.raises(ValueError, match="io.scale"):
         artifacts.require_compatible(found, _META, fields=(("io", "scale"),))
+
+
+def test_stem_names_a_model_by_what_distinguishes_it():
+    """`ls` should answer "which model is this" without opening anything."""
+    meta = {
+        "kind": "sr_model",
+        "model": {"class_path": "sisr.models.srresnet.model.SRResNet", "variant": "16B64F"},
+        "io": {"scale": 4, "output_colorspace": "RGB"},
+    }
+    assert artifacts.stem(meta) == "SRResNet_x4_RGB_16B64F"
+
+
+def test_stem_drops_the_parts_that_do_not_describe_a_critic():
+    """Scale and colourspace describe a generator's output; a discriminator has
+    neither, so naming it with them would assert something untrue."""
+    meta = {
+        "kind": "component",
+        "component": {
+            "class_path": "sisr.models.srgan.discriminator.SRDiscriminator",
+            "variant": "96",
+        },
+    }
+    assert artifacts.stem(meta) == "SRDiscriminator_96"
+
+
+def test_stem_omits_an_absent_part_rather_than_rendering_it():
+    """A missing variant must not produce a literal 'None' in a filename."""
+    meta = {
+        "kind": "sr_model",
+        "model": {"class_path": "a.b.Thing", "variant": None},
+        "io": {"scale": 2, "output_colorspace": "Y"},
+    }
+    assert artifacts.stem(meta) == "Thing_x2_Y"
