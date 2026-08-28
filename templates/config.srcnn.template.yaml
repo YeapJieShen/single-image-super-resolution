@@ -27,7 +27,6 @@ model:
         class_path: sisr.models.srcnn.SRCNNTrainingConfig
         init_args:
           scale: &scale 3
-          # Must match the real training input: 1-channel Y at subimg_size.
           example_input_shape: [1, 33, 33]
       # Defaults to ssim_impl: wang, the field standard.
       eval_config:
@@ -95,7 +94,7 @@ trainer:
   callbacks:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
-        log_every_n_val_runs: 1
+        every_n_val_runs: 1
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: psnr/val/RGB
@@ -118,7 +117,7 @@ trainer:
         logging_interval: step
     - class_path: sisr.training.GradNormLogger
       init_args:
-        log_every_n_steps: 5000
+        every_n_batches: 5000
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:

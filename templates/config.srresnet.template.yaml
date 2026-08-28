@@ -29,7 +29,8 @@ model:
       training_config:
         class_path: sisr.models.srresnet.SRResNetTrainingConfig
         init_args:
-          # Must match the real training input: RGB at hr_crop_size / scale.
+          # Optional when training -- derived from the data. Stated here because
+          # `sisr export` reads this file and has no data to derive it from.
           example_input_shape: [3, 24, 24]
       # Defaults to ssim_impl: daala, the convention this paper used.
       eval_config:
@@ -96,7 +97,7 @@ trainer:
   callbacks:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
-        log_every_n_val_runs: 1
+        every_n_val_runs: 1
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: psnr/val/RGB
@@ -119,7 +120,7 @@ trainer:
         logging_interval: step
     - class_path: sisr.training.GradNormLogger
       init_args:
-        log_every_n_steps: 5000
+        every_n_batches: 5000
   logger:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:

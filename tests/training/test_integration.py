@@ -95,7 +95,7 @@ def test_fast_dev_run_fit_and_test_logs_module_and_callback_metrics(
         enable_checkpointing=False,
         enable_progress_bar=False,
         enable_model_summary=False,
-        callbacks=[BenchmarkImageLogger(log_every_n_val_runs=1)],
+        callbacks=[BenchmarkImageLogger(every_n_val_runs=1)],
     )
 
     trainer.fit(module, datamodule=datamodule)

@@ -19,6 +19,7 @@ from typing import Any
 import torch
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
+from lightning_utilities.core.rank_zero import rank_zero_info
 
 from .. import artifacts
 from ..losses import AdversarialLoss
@@ -407,7 +408,7 @@ class SRGANLightning(SRLightning):
             scheduler.step()
 
     def on_fit_start(self) -> None:
-        """Refuse distributed training, then run the base's compile warm-up.
+        """State the step-axis conversion, refuse distributed training, then warm up.
 
         Manual optimization opts out of Lightning's gradient synchronisation:
         with ``automatic_optimization = False`` the strategy's backward no
@@ -423,6 +424,20 @@ class SRGANLightning(SRLightning):
         Raises:
             RuntimeError: If ``trainer.world_size > 1``.
         """
+        # Lightning's own knobs cannot be renamed, and under this paradigm they
+        # count different things: max_steps and every_n_train_steps are optimizer
+        # steps, everything else is batches. Documentation has not been enough --
+        # a max_steps copied from the SRResNet template trains half as long -- so
+        # the conversion is stated once, against this run's actual numbers.
+        max_steps = self.trainer.max_steps
+        if max_steps and max_steps > 0:
+            rank_zero_info(
+                f"SRGAN takes 2 optimizer steps per batch, so max_steps={max_steps} is "
+                f"{max_steps // 2} batches. val_check_interval, every_n_batches and the "
+                f"hand-stepped scheduler milestones all count batches; max_steps and "
+                f"every_n_train_steps count optimizer steps."
+            )
+
         if self.trainer.world_size > 1:
             raise RuntimeError(
                 f"SRGANLightning does not support distributed training "

@@ -224,10 +224,12 @@ class SRLightning(lightning.LightningModule):
                 self._check_input_contract(s.lr, s.hr, s.source, s.dataset)
                 self._extra_probe(s.lr, s.hr, s.source)
 
-            if self.training_config.example_input_shape is not None:
-                train = probe.train_lr()
-                if train is not None:
-                    train_dataset, train_lr = train
+            train = probe.train_lr()
+            if train is not None:
+                train_dataset, train_lr = train
+                if self.training_config.example_input_shape is None:
+                    self._adopt_example_input_shape(train_lr)
+                else:
                     self._check_example_input_shape(train_lr, train_dataset)
 
     def _check_input_contract(
@@ -308,6 +310,25 @@ class SRLightning(lightning.LightningModule):
             hr: HR sample, ``(C, H, W)``.
             source: Config path the sample came from, for error messages.
         """
+
+    def _adopt_example_input_shape(self, lr: torch.Tensor) -> None:
+        """Take the shape from the real train sample when the config states none.
+
+        The value was previously written out by hand and then checked against this
+        exact tensor — two different rules to compute (crop size over scale for a
+        native-LR dataset, sub-image size for a pre-upsampled one), both derivable
+        from data the probe already holds. A value the code can check is a value
+        the code can supply. An explicit setting still wins, and is still checked,
+        so a config can state an intent and have it verified.
+
+        Args:
+            lr: Real LR sample from the train dataset, shape ``(C, H, W)``.
+        """
+        shape = tuple(int(d) for d in lr.shape)
+        self.training_config.example_input_shape = shape
+        # Drives ModelSummary's FLOPs count and the logged graph; the compile
+        # warm-up reads training_config directly.
+        self.example_input_array = torch.zeros(1, *shape)
 
     def _check_example_input_shape(self, lr: torch.Tensor, train_dataset: Any) -> None:
         """Raise if ``example_input_shape``'s H/W disagrees with the real train LR patch.

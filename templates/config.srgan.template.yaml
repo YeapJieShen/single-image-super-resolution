@@ -16,7 +16,7 @@ optimizer:
 lr_scheduler:
   class_path: torch.optim.lr_scheduler.MultiStepLR
   init_args:
-    milestones: [100000]   # BATCHES, not global steps
+    milestones: [100000]
     gamma: 0.1
 
 model:
@@ -52,16 +52,15 @@ model:
       discriminator_lr_scheduler:
         class_path: torch.optim.lr_scheduler.MultiStepLR
         init_args:
-          milestones: [100000]   # BATCHES, not global steps
+          milestones: [100000]
           gamma: 0.1
       # adversarial_loss unset means sisr.losses.AdversarialLoss, over LOGITS.
       training_config:
         class_path: sisr.models.srgan.SRGANTrainingConfig
         init_args:
           # Bare weights (.pt), never the sibling .ckpt. Mismatches are refused.
-          init_from: "experiments/SRResNet/golden/checkpoints/SRResNet_x4_RGB_16B64F_s1000000.safetensors"
-          # Must match the real training input: RGB at hr_crop_size / scale.
           example_input_shape: [3, 24, 24]
+          init_from: "experiments/SRResNet/golden/checkpoints/SRResNet_x4_RGB_16B64F_s1000000.safetensors"
           # adversarial_weight 1.0e-3 and d_steps_per_g_step 1 are the defaults.
       # Defaults add lpips + dists; 'lpips' needs the [perceptual] extra.
       eval_config:
@@ -111,12 +110,12 @@ data:
 
 trainer:
   max_epochs: -1
-  # !! GLOBAL STEPS; val_check_interval and log_every_n_steps are BATCHES. See the docs.
-  max_steps: 400000            # the paper's 2e5 generator iterations
-  val_check_interval: 5000     # batches = every 10000 global steps
+  # Optimizer steps; the run prints the batch equivalent at start.
+  max_steps: 400000
+  val_check_interval: 5000
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
-  log_every_n_steps: 1000      # batches
+  log_every_n_steps: 1000
   deterministic: false
   # Free here: every training step feeds the same fixed crop shape.
   benchmark: true
@@ -127,7 +126,7 @@ trainer:
   callbacks:
     - class_path: sisr.training.BenchmarkImageLogger
       init_args:
-        log_every_n_val_runs: 1
+        every_n_val_runs: 1
     # Rolling and monitor-free: a PSNR/SSIM top-k would keep the least adversarial state.
     - class_path: sisr.training.SRCheckpoint
       init_args:

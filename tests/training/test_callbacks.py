@@ -288,7 +288,7 @@ def _make_gradnorm_pl_module():
 
 
 def test_grad_norm_logger_logs_on_cadence():
-    cb = GradNormLogger(log_every_n_steps=10)
+    cb = GradNormLogger(every_n_batches=10)
     # batch axis ON cadence, optimizer axis OFF -- the gate must read the former.
     trainer = _make_step_axis_trainer(global_step=17, batches_that_stepped=10)
     pl_module = _make_gradnorm_pl_module()
@@ -300,7 +300,7 @@ def test_grad_norm_logger_logs_on_cadence():
 
 
 def test_grad_norm_logger_skips_off_cadence():
-    cb = GradNormLogger(log_every_n_steps=10)
+    cb = GradNormLogger(every_n_batches=10)
     # batch axis OFF cadence, optimizer axis ON.
     trainer = _make_step_axis_trainer(global_step=20, batches_that_stepped=7)
     pl_module = _make_gradnorm_pl_module()
@@ -309,7 +309,7 @@ def test_grad_norm_logger_skips_off_cadence():
 
 
 def test_grad_norm_logger_handles_none_grads():
-    cb = GradNormLogger(log_every_n_steps=1)
+    cb = GradNormLogger(every_n_batches=1)
     pl_module = MagicMock()
     p = torch.zeros(4, requires_grad=True)
     p.grad = None
@@ -333,7 +333,7 @@ def test_grad_norm_logger_uses_grad_detach_not_grad_data():
     assert ".grad.data" not in src
     assert "p.grad.detach()" in src
 
-    cb = GradNormLogger(log_every_n_steps=1)
+    cb = GradNormLogger(every_n_batches=1)
     trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(trainer, pl_module)
@@ -343,7 +343,7 @@ def test_grad_norm_logger_uses_grad_detach_not_grad_data():
 
 
 def test_grad_norm_logger_cadence_counts_batches_not_optimizer_steps():
-    """``log_every_n_steps`` must gate on the axis ``self.log`` writes to.
+    """``every_n_batches`` must gate on the axis ``self.log`` writes to.
 
     ``trainer.global_step`` counts *optimizer* steps, so under manual
     optimization gating on it makes the configured cadence mean a different
@@ -354,13 +354,13 @@ def test_grad_norm_logger_cadence_counts_batches_not_optimizer_steps():
     single direction, passes under a gate reading either axis.
     """
     # global_step ON cadence, batch count OFF -> must not fire.
-    cb = GradNormLogger(log_every_n_steps=10)
+    cb = GradNormLogger(every_n_batches=10)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(_make_step_axis_trainer(global_step=10, batches_that_stepped=7), pl_module)
     pl_module.log.assert_not_called()
 
     # global_step OFF cadence, batch count ON -> must fire.
-    cb = GradNormLogger(log_every_n_steps=10)
+    cb = GradNormLogger(every_n_batches=10)
     pl_module = _make_gradnorm_pl_module()
     cb.on_after_backward(
         _make_step_axis_trainer(global_step=14, batches_that_stepped=10), pl_module
@@ -397,7 +397,7 @@ def test_weight_histogram_logger_cadence_counts_batches_not_optimizer_steps(
 ):
     """Same gate, same reason as the ``GradNormLogger`` case above."""
     pl_module, tb_logger, add_histogram = _make_histogram_probe(tmp_path, monkeypatch)
-    cb = WeightHistogramLogger(log_every_n_steps=10)
+    cb = WeightHistogramLogger(every_n_batches=10)
 
     # global_step ON cadence, batch count OFF -> must not fire.
     trainer = _make_step_axis_trainer(global_step=10, batches_that_stepped=7)
@@ -424,7 +424,7 @@ def test_weight_histogram_logger_writes_on_the_batch_counted_axis_not_global_ste
     optimizers.
     """
     pl_module, tb_logger, add_histogram = _make_histogram_probe(tmp_path, monkeypatch)
-    cb = WeightHistogramLogger(log_every_n_steps=1)
+    cb = WeightHistogramLogger(every_n_batches=1)
 
     trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
     trainer.loggers = [tb_logger]
@@ -436,7 +436,7 @@ def test_weight_histogram_logger_writes_on_the_batch_counted_axis_not_global_ste
 
 
 def test_weight_histogram_logger_skips_off_cadence():
-    cb = WeightHistogramLogger(log_every_n_steps=10)
+    cb = WeightHistogramLogger(every_n_batches=10)
     trainer = _make_step_axis_trainer(global_step=20, batches_that_stepped=7)
     pl_module = MagicMock()
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
@@ -444,7 +444,7 @@ def test_weight_histogram_logger_skips_off_cadence():
 
 
 def test_weight_histogram_logger_skips_when_no_tb_logger():
-    cb = WeightHistogramLogger(log_every_n_steps=1)
+    cb = WeightHistogramLogger(every_n_batches=1)
     trainer = _make_step_axis_trainer(global_step=2, batches_that_stepped=1)
     pl_module = MagicMock()
     cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=0)
@@ -1301,7 +1301,7 @@ def test_benchmark_validation_batch_end_skips_primary_loader():
 
 def test_benchmark_validation_batch_end_collects_for_test_loader():
     """dataloader_idx >= 1 populates the buffer with a BenchmarkSample per image."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
@@ -1335,7 +1335,7 @@ def test_benchmark_collect_batch_buffers_no_image_tensors():
     LR/SR/HR tensors -- even when should_log_images is True, since image
     strips are now streamed directly from _collect_batch instead of being
     deferred to epoch end."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
@@ -1437,7 +1437,7 @@ def test_benchmark_logger_uses_module_ssim_impl():
     torchmetrics. Guards against the two metric paths drifting apart."""
     import sisr.metrics.ssim
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     pl_module = SRLightning(
@@ -1474,7 +1474,7 @@ def test_benchmark_logger_uses_module_ssim_impl():
 def test_benchmark_validation_epoch_end_logs_means():
     """on_validation_epoch_end consumes the buffer and emits per-dataset mean
     PSNR + SSIM via pl_module.log (verified by mocking the log method)."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=99)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=99)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
@@ -1510,7 +1510,7 @@ def test_benchmark_collect_batch_emits_add_image_and_add_scalar(tmp_path: Path, 
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
     cb = BenchmarkImageLogger(
-        dataset_names=["Set5"], log_every_n_val_runs=1, log_per_image_metrics=True
+        dataset_names=["Set5"], every_n_val_runs=1, log_per_image_metrics=True
     )
     trainer = SimpleNamespace(
         datamodule=None,
@@ -1565,7 +1565,7 @@ def test_benchmark_collect_batch_default_omits_per_image_scalars_but_keeps_image
     monkeypatch.setattr(experiment, "add_image", add_image)
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     assert cb.log_per_image_metrics is False
     trainer = SimpleNamespace(
         datamodule=None,
@@ -1600,7 +1600,7 @@ def test_benchmark_collect_batch_log_per_image_metrics_decoupled_from_image_stri
     tmp_path: Path, monkeypatch
 ):
     """log_per_image_metrics=True must emit per-image scalars even on a val run
-    where should_log_images is False (log_every_n_val_runs throttles images,
+    where should_log_images is False (every_n_val_runs throttles images,
     not per-image metrics) — proving the two concerns are independently gated."""
     import lightning.pytorch.loggers as pl_loggers
 
@@ -1612,7 +1612,7 @@ def test_benchmark_collect_batch_log_per_image_metrics_decoupled_from_image_stri
     monkeypatch.setattr(experiment, "add_scalar", add_scalar)
 
     cb = BenchmarkImageLogger(
-        dataset_names=["Set5"], log_every_n_val_runs=99, log_per_image_metrics=True
+        dataset_names=["Set5"], every_n_val_runs=99, log_per_image_metrics=True
     )
     trainer = SimpleNamespace(
         datamodule=None,
@@ -1667,7 +1667,7 @@ def test_benchmark_collect_batch_image_strip_first_panel_is_bicubic_at_hr_size(
     monkeypatch.setattr(torchvision.utils, "make_grid", spy_make_grid)
 
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=str(tmp_path), name="run", version="v")
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     trainer = SimpleNamespace(
         datamodule=None,
         loggers=[tb_logger],
@@ -1724,7 +1724,7 @@ def test_benchmark_collect_batch_image_strip_upsamples_lr_to_hr_size(tmp_path: P
     add_image = MagicMock(wraps=experiment.add_image)
     monkeypatch.setattr(experiment, "add_image", add_image)
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     trainer = SimpleNamespace(
         datamodule=None,
         loggers=[tb_logger],
@@ -1818,7 +1818,7 @@ def test_benchmark_collect_batch_populates_perceptual_dict(monkeypatch):
         "sisr.metrics.scoring.perceptual_score",
         lambda name, sr, hr, lpips_net: sr.sum() - hr.sum(),
     )
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     pl_module = SRLightning(
@@ -1864,7 +1864,7 @@ def test_benchmark_logs_perceptual_per_set():
     MagicMock pl_module is enough here, mirroring
     test_benchmark_validation_epoch_end_logs_means.
     """
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=99)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=99)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = MagicMock()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
@@ -1892,7 +1892,7 @@ def test_weight_histogram_logger_calls_add_histogram_for_model_params_only(
     broken `model.` filter or a missing emit would have passed."""
     import lightning.pytorch.loggers as pl_loggers
 
-    cb = WeightHistogramLogger(log_every_n_steps=1)
+    cb = WeightHistogramLogger(every_n_batches=1)
     pl_module = MagicMock()
     pl_module.named_parameters = MagicMock(
         return_value=[
@@ -1928,7 +1928,7 @@ def test_crop_border_init_arg_rejected():
 def test_benchmark_collect_batch_crops_per_eval_config():
     """When eval_config.crop_border=3, _collect_batch crops 3 pixels per edge
     before computing per-image PSNR/SSIM."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     # Real SRLightning with crop_border=3 in eval_config.
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
@@ -1966,7 +1966,7 @@ def test_benchmark_collect_batch_routes_through_processor():
     model forward, then reconstruct SR back to RGB. Bypassing the processor would
     feed 3-channel RGB to a 1-channel Conv2d and crash with a shape mismatch (proven
     here by the forward completing and yielding the expected metric key sets)."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     # 1-channel SRCNN paired with YChannelProcessor — production SRCNN template shape.
     model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
@@ -2007,7 +2007,7 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_fals
     `_build_psnr_tensors` populates for the colorspace *family*, not the
     configured key set. The emitted key set must equal `eval_config.psnr_keys`
     exactly."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     pl_module = SRLightning(
@@ -2039,7 +2039,7 @@ def test_benchmark_collect_batch_psnr_dict_matches_configured_keys_separate_true
     """separate_psnr=True must surface per-channel keys alongside the
     aggregate key for the requested colorspace only — no keys from an
     unrequested colorspace family leak in."""
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     pl_module = SRLightning(
@@ -2079,7 +2079,7 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
     spy = MagicMock(wraps=pl_module.predict_rgb)
     pl_module.predict_rgb = spy
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
     ds = _stub_dataset_with_img_paths(n=2, name="Set5")
@@ -2192,7 +2192,7 @@ def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert isinstance(ds, SRDataset)
 
-    cb = BenchmarkImageLogger(dataset_names=["Set5"], log_every_n_val_runs=1)
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
     cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
     pl_module = _make_real_pl_module()
     cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)

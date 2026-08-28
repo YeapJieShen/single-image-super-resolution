@@ -572,7 +572,7 @@ def test_matching_discriminator_channels_are_accepted():
 
 def test_ddp_refused():
     module = build_gan_module()
-    module.trainer = SimpleNamespace(world_size=2, precision="32-true")
+    module.trainer = SimpleNamespace(world_size=2, precision="32-true", max_steps=-1)
 
     with pytest.raises(RuntimeError, match="world_size"):
         module.on_fit_start()
