@@ -243,13 +243,44 @@ So the units differ, and you must read this before changing any of them:
 | In **global steps** | In **batches** |
 | --- | --- |
 | `max_steps` | `val_check_interval` |
-| checkpoint filenames | `log_every_n_steps` |
-| `every_n_train_steps` | hand-stepped LR scheduler `milestones` |
+| `every_n_train_steps` | `log_every_n_steps` |
+| | checkpoint filenames and metadata |
+| | hand-stepped LR scheduler `milestones` |
 
 `_batches_that_stepped` is also the **default x-axis every logged metric is plotted
-against**. Under SRGAN, TensorBoard therefore shows the run in batches while checkpoint
-filenames carry global steps — `sr-weights-10000.pt` is the state at TensorBoard
-x=5000, not x=10000.
+against**, which is why checkpoints are stamped with it: a saved file exists to be
+located on a curve, and one named in optimizer steps cannot be. So
+`sr-weights-10000.safetensors` is the state at TensorBoard x=10000 under every
+paradigm. The artifact's own metadata records **both** counters under distinct names —
+`global_step` keeps meaning the optimizer count, `batch_step` is the axis above — so a
+reader that only knows the older field still reads a true value.
+
+Note the asymmetry in the table: `every_n_train_steps` is Lightning's own and counts
+optimizer steps, while the filename it produces counts batches. Under SRGAN that means
+a cadence of 10000 writes a file named for batch 5000.
+
+### The distributable artifact
+
+`SRWeightsCheckpoint` writes **safetensors**, and it is the only format it writes — the
+`.pt` form no longer exists. The resumable `.ckpt` is unaffected: Lightning owns that
+file, and it carries optimizer moments, loop state and hyperparameters that a flat
+tensor map cannot represent.
+
+The reason is not that our own loading was unsafe. Every `torch.load` here passes
+`weights_only=True` and the torch floor is pinned for it. The exposure is a *consumer*
+opening a published file with that turned off, or on an older torch; safetensors removes
+it by construction. Note the consequence: **this makes the file you hand out
+pickle-free, not the repository** — a `.ckpt` is still a pickle.
+
+Provenance travels in the file's header, one entry per top-level field rather than one
+opaque blob, so anything that can open the artifact gets a readable table. The ONNX
+export writes the same fields the same way.
+
+Mismatches are checked on read. Fields that change what the output *means* — the
+processor and the output range — are refused, because being wrong about either produces
+a plausible image and no error. Library-version drift is warned about and loaded, since
+it cannot change what the tensors mean and refusing would expire every artifact on the
+next dependency bump.
 
 One further trap: `every_n_train_steps`' condition is checked once per batch, so an
 **even** value halves the batch cadence (10000 → every 5000 batches) while an odd one
@@ -261,7 +292,7 @@ does not (5 → still every 5).
 | --- | --- |
 | `BenchmarkImageLogger` | Writes benchmark-set image strips each val run. |
 | `SRCheckpoint` | Resumable `.ckpt`. |
-| `SRWeightsCheckpoint` | Distributable, optimizer-free `.pt` weights — roughly a third the size, and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
+| `SRWeightsCheckpoint` | Distributable, optimizer-free `.safetensors` weights — roughly a third the size, and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
 | `GradNormLogger` | Logs `diag/grad_norm`. |
 | `LearningRateMonitor` | Lightning's, logging per step. |
 
@@ -303,7 +334,7 @@ optimization does not step them. **Milestones are therefore counted in batches.*
 
 Ledig et al. scope the MSE-initialisation trick to "when training the actual GAN", so a
 paper-faithful run starts from an MSE-trained SRResNet. Point `init_from` at a **bare
-weights `.pt`**, never the sibling `.ckpt` — a `.ckpt` holds the whole LightningModule.
+weights `.safetensors`**, never the sibling `.ckpt` — a `.ckpt` holds the whole LightningModule.
 
 The generator's architecture, processor, output range and scale are all checked against
 the file's own metadata and **refused on any mismatch**: weights trained under a
@@ -357,7 +388,7 @@ were for.
 ### Dependency floors
 
 - **`torch>=2.6` is a security floor, not a convenience one.** `torch.load(weights_only=True)`
-  is this project's entire load-time safety contract for third-party `.ckpt`/`.pt` files,
+  is this project's load-time safety contract for `.ckpt` files, which stay pickles,
   and GHSA-53q9-r3pm-6pq6 / CVE-2025-32434 lets that check be bypassed for arbitrary code
   execution on torch ≤ 2.5.1. Do not lower it.
 - `torchmetrics>=1.9`, `jsonargparse>=4.50` — the versions the relevant APIs were verified
