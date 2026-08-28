@@ -445,13 +445,25 @@ class BenchmarkImageLogger(Callback):
 
             for key in psnr_keys:
                 mean_psnr = sum(s.psnr[key] for s in samples) / len(samples)
-                pl_module.log(f"psnr/{dataset_name}/{key}", mean_psnr, add_dataloader_idx=False)
+                pl_module.log(
+                    f"psnr/{dataset_name}/{key}",
+                    mean_psnr,
+                    add_dataloader_idx=False,
+                    sync_dist=True,
+                )
             for key in ssim_keys:
                 mean_ssim = sum(s.ssim[key] for s in samples) / len(samples)
-                pl_module.log(f"ssim/{dataset_name}/{key}", mean_ssim, add_dataloader_idx=False)
+                pl_module.log(
+                    f"ssim/{dataset_name}/{key}",
+                    mean_ssim,
+                    add_dataloader_idx=False,
+                    sync_dist=True,
+                )
             for name in samples[0].perceptual:
                 mean = sum(s.perceptual[name] for s in samples) / len(samples)
-                pl_module.log(f"{name}/{dataset_name}", mean, add_dataloader_idx=False)
+                pl_module.log(
+                    f"{name}/{dataset_name}", mean, add_dataloader_idx=False, sync_dist=True
+                )
 
         self._buffer.clear()
 
@@ -530,7 +542,7 @@ class GradNormLogger(Callback):
             torch.linalg.vector_norm(torch.stack(grad_norms), ord=2).item() if grad_norms else 0.0
         )
 
-        pl_module.log("diag/grad_norm", total_norm, on_step=True, on_epoch=False)
+        pl_module.log("diag/grad_norm", total_norm, on_step=True, on_epoch=False, sync_dist=True)
 
 
 class WeightHistogramLogger(Callback):

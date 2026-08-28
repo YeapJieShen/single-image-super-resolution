@@ -12,8 +12,9 @@ import inspect
 from typing import Any
 
 import lightning
+import torch.distributed as dist
 from lightning.pytorch.cli import instantiate_class
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 _SPEC_KEYS = frozenset({"class_path", "init_args"})
 
@@ -258,15 +259,29 @@ class SRDataModule(lightning.LightningDataModule):
             self._predict_ds = _instantiate_spec("data.predict_dataset", self._predict_spec)
 
     def train_dataloader(self) -> DataLoader:
-        """Build the training DataLoader.
+        """Build the training DataLoader, sharded across processes when distributed.
 
         ``shuffle=True`` is forced — any ``shuffle`` entry the user supplies
         in ``train_dataloader_kwargs`` would be a TypeError (duplicate
         kwarg) and the YAML schema does not expose ``shuffle``.
 
+        **Training is the only loader this module shards, and it shards it here
+        rather than letting Lightning do it.** Lightning's injection is a single
+        trainer-wide switch, and it would also split the validation and benchmark
+        loaders — which must not be split. ``DistributedSampler`` pads a set to a
+        multiple of the world size by *repeating* samples, so a five-image
+        benchmark across four processes becomes eight, three of them counted
+        twice, and the reported figure is no longer that set's score. Every
+        process therefore evaluates every benchmark image, and the reduction
+        across them is a no-op that also catches divergence.
+
         Returns:
-            DataLoader over the train spec, shuffled.
+            DataLoader over the train spec: shuffled, and split per process when
+            a process group is running.
         """
+        if dist.is_available() and dist.is_initialized():
+            sampler = DistributedSampler(self._train_ds, shuffle=True)
+            return DataLoader(self._train_ds, sampler=sampler, **self._train_dl_kwargs)
         return DataLoader(self._train_ds, shuffle=True, **self._train_dl_kwargs)
 
     def val_dataloader(self) -> list[DataLoader]:
