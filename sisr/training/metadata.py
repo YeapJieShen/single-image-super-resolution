@@ -41,8 +41,10 @@ import sisr
 if TYPE_CHECKING:
     from .lightning_module import SRLightning
 
-#: Bumped whenever the metadata shape changes incompatibly.
-FORMAT_VERSION = "sisr-meta-v1"
+#: Bumped whenever the metadata shape changes incompatibly. v2: the distributable
+#: artifact became safetensors, so the block is carried as a flat string header
+#: rather than a pickled dict, and the `.pt` form stopped existing.
+FORMAT_VERSION = "sisr-meta-v2"
 
 
 def _to_plain(obj: Any) -> Any:

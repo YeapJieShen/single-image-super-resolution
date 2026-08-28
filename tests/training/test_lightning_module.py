@@ -1225,7 +1225,7 @@ def test_on_save_checkpoint_injects_sisr_meta(srcnn_rgb_lit: SRLightning):
     checkpoint = {"global_step": 500, "epoch": 2, "state_dict": srcnn_rgb_lit.state_dict()}
     srcnn_rgb_lit.on_save_checkpoint(checkpoint)
     meta = checkpoint["sisr_meta"]
-    assert meta["format"] == "sisr-meta-v1"
+    assert meta["format"] == "sisr-meta-v2"
     assert meta["model"]["class_path"] == "sisr.models.srcnn.model.SRCNN"
     assert meta["training"]["global_step"] == 500
     assert meta["training"]["epoch"] == 2

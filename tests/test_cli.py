@@ -16,6 +16,8 @@ import pytest
 import torch
 import yaml
 
+from sisr import artifacts
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
@@ -366,12 +368,12 @@ def test_srgan_template_ships_a_real_init_from_path():
     """The template's own init_from is exercised nowhere else — the test above
     overrides it to a missing path so it can run without the gitignored
     experiments/ tree. Assert the shipped value at least names a bare-weights
-    .pt, which is one of the artifacts SRGANLightning's setup refuses."""
+    artifact, which is the one kind SRGANLightning's setup accepts."""
     with SRGAN_TEMPLATE.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     init_from = data["model"]["init_args"]["training_config"]["init_args"]["init_from"]
-    assert init_from.endswith(".pt")
+    assert init_from.endswith(artifacts.SUFFIX)
     assert "sr-weights" in init_from
 
 

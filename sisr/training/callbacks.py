@@ -7,7 +7,7 @@ N val cycles) and ``cli test`` (one-shot final eval).
 training signals; :class:`SRCheckpoint` is a thin
 :class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics;
 :class:`SRWeightsCheckpoint` is a sibling preset that saves bare, optimizer-free
-``.pt`` weights instead; :class:`SRPredictionWriter` writes ``cli predict``
+safetensors weights instead; :class:`SRPredictionWriter` writes ``cli predict``
 output to disk as PNGs.
 """
 
@@ -24,6 +24,7 @@ import torchvision
 from lightning.pytorch.callbacks import BasePredictionWriter, Callback, ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
+from .. import artifacts
 from ..metrics.perceptual import PERCEPTUAL_METRICS
 from .metadata import build_component_metadata, build_metadata
 
@@ -953,7 +954,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
             :class:`~lightning.pytorch.callbacks.ModelCheckpoint`.
     """
 
-    FILE_EXTENSION = ".pt"
+    FILE_EXTENSION = artifacts.SUFFIX
 
     def __init__(
         self,
@@ -1100,7 +1101,14 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
                 monitor=self.monitor,
                 monitor_value=monitor_value,
             )
-        torch.save({"state_dict": component.state_dict(), "meta": meta}, filepath)
+        # Rank-gated to match what ModelCheckpoint's own save path gets for free:
+        # it writes through Strategy.save_checkpoint, which gates on is_global_zero,
+        # and this override replaces exactly that method. Without the gate every
+        # process writes the same path at once. The bookkeeping below stays
+        # unconditional, as it is in the base implementation, and the rolling
+        # window's deletes are gated inside Strategy.remove_checkpoint already.
+        if trainer.is_global_zero:
+            artifacts.save(filepath, component.state_dict(), meta)
 
         self._last_global_step_saved = trainer.global_step
         self._last_checkpoint_saved = filepath

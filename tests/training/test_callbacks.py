@@ -15,6 +15,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from PIL import Image
 
+from sisr import artifacts
 from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
@@ -644,7 +645,7 @@ def test_monitor_error_names_the_actual_callback_class(cls):
 
 def test_sr_weights_checkpoint_file_extension_is_pt():
     ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath="/tmp/x")
-    assert ckpt.FILE_EXTENSION == ".pt"
+    assert ckpt.FILE_EXTENSION == ".safetensors"
 
 
 def test_sr_weights_checkpoint_default_filename_prefix_is_sr_weights():
@@ -759,17 +760,17 @@ def test_weights_checkpoint_can_save_a_named_component(tmp_path):
     )
     cb.current_score = None
 
-    cb._save_checkpoint(trainer, str(tmp_path / "d-weights-7.pt"))
+    cb._save_checkpoint(trainer, str(tmp_path / "d-weights-7.safetensors"))
 
-    saved = torch.load(tmp_path / "d-weights-7.pt", weights_only=True)
-    assert set(saved["state_dict"]) == set(module.discriminator.state_dict())
+    saved_tensors, saved_meta = artifacts.load(tmp_path / "d-weights-7.safetensors")
+    assert set(saved_tensors) == set(module.discriminator.state_dict())
     # build_module()'s generator is SRCNN, whose top-level submodules are
     # feat/mapping/recon -- a "feat."-prefixed key here would mean the
     # generator's weights leaked into what must be a discriminator-only file.
-    assert not any(key.startswith("feat.") for key in saved["state_dict"]), (
+    assert not any(key.startswith("feat.") for key in saved_tensors), (
         "generator weights must not appear in a discriminator file"
     )
-    assert saved["meta"]["kind"] == "component"
+    assert saved_meta["kind"] == "component"
 
 
 def test_two_weights_checkpoints_can_watch_different_components():
@@ -828,13 +829,13 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
     """End-to-end proof that Lightning's real save path invokes our
     ``_save_checkpoint`` override, that ``SRCheckpoint``/``SRWeightsCheckpoint``
     coexist in one ``dirpath`` without deleting each other's files, and that the
-    bare ``.pt`` payload is exactly what the spec requires: no optimizer state,
+    bare payload is exactly what the spec requires: no optimizer state,
     no ``model.``-prefixed keys, and the state_dict loads strict into a fresh
     bare model.
 
     This is the loud-failure guard for the private ``_save_checkpoint`` hook: if
-    a future Lightning release stops routing saves through it, the ``.pt`` file
-    would instead contain a full Lightning checkpoint dict (``optimizer_states``,
+    a future Lightning release stops routing saves through it, the artifact
+    would instead be a full Lightning checkpoint dict (``optimizer_states``,
     ``callbacks``, ``model.``-prefixed ``state_dict``, ...) and every assertion
     below would fail.
     """
@@ -873,7 +874,7 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
     trainer.fit(module, datamodule=datamodule)
 
     ckpt_files = list(ckpt_dir.glob("sr-*.ckpt"))
-    pt_files = list(ckpt_dir.glob("sr-weights-*.pt"))
+    pt_files = list(ckpt_dir.glob("sr-weights-*.safetensors"))
     all_files = list(ckpt_dir.iterdir())
     # save_top_k=1 on each: exactly one file per callback survives repeated
     # val-triggered saves, and coexisting in one dirpath produced no cross-deletion.
@@ -886,15 +887,14 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
     assert "sisr_meta" in full_checkpoint  # on_save_checkpoint fired here too
     assert all(k.startswith("model.") for k in full_checkpoint["state_dict"])
 
-    bare = torch.load(pt_files[0], weights_only=True)
-    assert set(bare.keys()) == {"state_dict", "meta"}
-    assert "optimizer_states" not in bare
-    assert not any(k.startswith("model.") for k in bare["state_dict"])
-    assert bare["meta"]["format"] == "sisr-meta-v1"
-    assert bare["meta"]["training"]["monitor"] == "psnr/val/RGB"
+    bare_tensors, bare_meta = artifacts.load(pt_files[0])
+    assert "optimizer_states" not in bare_tensors
+    assert not any(k.startswith("model.") for k in bare_tensors)
+    assert bare_meta["format"] == "sisr-meta-v2"
+    assert bare_meta["training"]["monitor"] == "psnr/val/RGB"
 
     fresh_model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
-    fresh_model.load_state_dict(bare["state_dict"], strict=True)  # the real proof
+    fresh_model.load_state_dict(bare_tensors, strict=True)  # the real proof
 
 
 # ---------------------------------------------------------------------------
@@ -1017,8 +1017,8 @@ def test_sr_weights_checkpoint_rolling_mode_keeps_only_the_last_n(tmp_path):
         monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
     )
     _run_tiny_fit(callbacks=[cb], n_batches=20)
-    files = sorted(p.name for p in tmp_path.glob("*.pt"))
-    assert files == ["sr-weights-17.pt", "sr-weights-19.pt"], files
+    files = sorted(p.name for p in tmp_path.glob("*.safetensors"))
+    assert files == ["sr-weights-17.safetensors", "sr-weights-19.safetensors"], files
 
 
 def test_sr_weights_checkpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path):
@@ -1043,10 +1043,10 @@ def test_rolling_checkpoints_coexist_without_cross_deletion(tmp_path):
     )
     _run_tiny_fit(callbacks=[sr_ckpt, sr_weights_ckpt], n_batches=20)
     ckpt_files = sorted(p.name for p in tmp_path.glob("sr-*.ckpt"))
-    pt_files = sorted(p.name for p in tmp_path.glob("sr-weights-*.pt"))
+    pt_files = sorted(p.name for p in tmp_path.glob("sr-weights-*.safetensors"))
     all_files = sorted(p.name for p in tmp_path.iterdir())
     assert ckpt_files == ["sr-17.ckpt", "sr-19.ckpt"], ckpt_files
-    assert pt_files == ["sr-weights-17.pt", "sr-weights-19.pt"], pt_files
+    assert pt_files == ["sr-weights-17.safetensors", "sr-weights-19.safetensors"], pt_files
     assert len(all_files) == 4, all_files
 
 
@@ -1118,17 +1118,23 @@ def test_rolling_seed_only_adopts_this_callbacks_own_files(tmp_path: Path):
     """Seeding must not let one rolling callback delete another's files.
 
     The shipped adversarial template puts three rolling callbacks in one
-    ``dirpath`` (``sr-*.ckpt``, ``sr-weights-*.pt``, ``d-weights-*.pt``), and
+    ``dirpath`` (``sr-*.ckpt``, ``sr-weights-*``, ``d-weights-*``), and
     ``sr-weights`` is a strict prefix extension of ``sr`` — a prefix-only or
     extension-only filter adopts a sibling's files and eventually deletes them.
     """
-    for name in ("sr-weights-2.pt", "d-weights-2.pt", "sr-2.ckpt", "last.ckpt", "sr-weights-x.pt"):
+    for name in (
+        "sr-weights-2.safetensors",
+        "d-weights-2.safetensors",
+        "sr-2.ckpt",
+        "last.ckpt",
+        "sr-weights-x.safetensors",
+    ):
         (tmp_path / name).touch()
     cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=3, dirpath=str(tmp_path))
 
     cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
 
-    assert cb._rolling == [str(tmp_path / "sr-weights-2.pt")]
+    assert cb._rolling == [str(tmp_path / "sr-weights-2.safetensors")]
 
 
 def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
@@ -1137,7 +1143,7 @@ def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
     Seeding unconditionally would make a from-scratch run adopt — and, on its
     third save, silently delete — checkpoints a previous run wrote.
     """
-    (tmp_path / "sr-weights-2.pt").touch()
+    (tmp_path / "sr-weights-2.safetensors").touch()
     cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
 
     cb.on_train_start(MagicMock(ckpt_path=None), MagicMock())
@@ -1148,7 +1154,7 @@ def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
 def test_rolling_seed_is_noop_when_monitor_is_set(tmp_path: Path):
     """With a monitor, Lightning's top-k owns retention — seeding would evict
     files top-k still wants, exactly as ``_enforce_rolling_window`` must not."""
-    (tmp_path / "sr-weights-2.pt").touch()
+    (tmp_path / "sr-weights-2.safetensors").touch()
     cb = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(tmp_path))
 
     cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
@@ -1160,14 +1166,16 @@ def test_seeded_window_deletes_the_oldest_pre_resume_file(tmp_path: Path):
     """Seeding is only worth anything if the next save then evicts a pre-resume
     file — the orphaning this fixes is a deletion that never happens."""
     for step in (2, 4):
-        (tmp_path / f"sr-weights-{step}.pt").touch()
+        (tmp_path / f"sr-weights-{step}{SRWeightsCheckpoint.FILE_EXTENSION}").touch()
     cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
     trainer = MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt"))
 
     cb.on_train_start(trainer, MagicMock())
-    cb._enforce_rolling_window(trainer, str(tmp_path / "sr-weights-6.pt"))
+    cb._enforce_rolling_window(trainer, str(tmp_path / "sr-weights-6.safetensors"))
 
-    trainer.strategy.remove_checkpoint.assert_called_once_with(str(tmp_path / "sr-weights-2.pt"))
+    trainer.strategy.remove_checkpoint.assert_called_once_with(
+        str(tmp_path / "sr-weights-2.safetensors")
+    )
 
 
 @_ignore_gpu_warning
@@ -2269,7 +2277,7 @@ def test_every_checkpoint_stamp_is_a_step_the_metrics_were_logged_at(tmp_path: P
 
 
 def test_weights_checkpoint_metadata_records_both_axes_distinguishably(tmp_path: Path):
-    """The ``.pt`` path: the callback builds the metadata itself.
+    """The bare-artifact path: the callback builds the metadata itself.
 
     Both counters are real, so the artifact must say which is which.
     ``global_step`` keeps meaning the optimizer count -- that is what it factually
@@ -2293,7 +2301,7 @@ def test_weights_checkpoint_metadata_records_both_axes_distinguishably(tmp_path:
     path = tmp_path / f"probe{SRWeightsCheckpoint.FILE_EXTENSION}"
     cb._save_checkpoint(trainer, str(path))
 
-    training = torch.load(path, weights_only=True, map_location="cpu")["meta"]["training"]
+    training = artifacts.load(path)[1]["training"]
     assert training["global_step"] == 400_000, "the optimizer count must keep its own name"
     assert training["batch_step"] == 199_999, "the metric axis must be recorded too"
 
@@ -2345,3 +2353,32 @@ def test_checkpoint_metadata_batch_step_is_none_when_the_loop_state_is_absent():
     module.on_save_checkpoint(checkpoint)
 
     assert checkpoint["sisr_meta"]["training"]["batch_step"] is None
+
+
+@pytest.mark.parametrize("is_global_zero", [True, False])
+def test_bare_weights_are_written_by_one_process_only(tmp_path: Path, is_global_zero: bool):
+    """Fails if every process in a distributed run writes the artifact.
+
+    ``ModelCheckpoint``'s own save path gets this for free -- it writes through
+    ``Strategy.save_checkpoint``, which gates on ``is_global_zero``. This callback
+    overrides exactly that method, so the gate has to be restated here or every
+    process races to write the same path. Both directions are asserted: a test
+    that only checked the ``False`` case would also pass if saving were broken
+    outright.
+    """
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(),
+    )
+    trainer = _manual_optimization_trainer(batches=10, optimizer_steps=20)
+    trainer.lightning_module = module
+    trainer.is_global_zero = is_global_zero
+    trainer.loggers = []
+
+    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    path = tmp_path / f"sr-weights-10{SRWeightsCheckpoint.FILE_EXTENSION}"
+    cb._save_checkpoint(trainer, str(path))
+
+    assert path.exists() is is_global_zero

@@ -49,7 +49,7 @@ def test_build_metadata_top_level_shape():
         "eval_config",
         "training",
     }
-    assert meta["format"] == "sisr-meta-v1"
+    assert meta["format"] == "sisr-meta-v2"
 
 
 def test_build_metadata_versions_are_plain_strings():

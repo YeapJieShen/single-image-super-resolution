@@ -20,6 +20,7 @@ import torch
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
+from .. import artifacts
 from ..losses import AdversarialLoss
 from ..models.base import SRModel
 from ..models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
@@ -199,7 +200,7 @@ class SRGANLightning(SRLightning):
             self._init_generator_from(self.training_config.init_from)
 
     def _init_generator_from(self, init_from: str) -> None:
-        """Initialise the **generator only** from a bare-weights ``.pt``.
+        """Initialise the **generator only** from a bare-weights artifact.
 
         Ledig et al. scope the MSE-initialisation trick to "when training the
         actual GAN", so a paper-faithful SRGAN run starts from an MSE-trained
@@ -212,14 +213,14 @@ class SRGANLightning(SRLightning):
         the numbers are wrong, which is indistinguishable from a bad run.
 
         Args:
-            init_from: Path to a ``.pt`` written by
+            init_from: Path to a ``.safetensors`` written by
                 :class:`~sisr.training.callbacks.SRWeightsCheckpoint` with
-                ``attribute='model'`` — a ``{'state_dict', 'meta'}`` payload.
+                ``attribute='model'``.
 
         Raises:
             ValueError: If ``init_from`` is the string ``'None'`` a CLI
                 ``=null`` collapses to; if it names a ``.ckpt`` or another
-                network's component ``.pt``; if the payload carries no ``meta``
+                network's component file; if the payload carries no ``meta``
                 to validate against; or if any of :data:`_INIT_FROM_FIELDS`
                 disagrees with this run.
             RuntimeError: From ``load_state_dict(strict=True)`` if the metadata
@@ -237,26 +238,16 @@ class SRGANLightning(SRLightning):
         path = Path(init_from)
         if path.suffix == ".ckpt":
             raise ValueError(
-                f"init_from expects a bare-weights .pt, but got the resumable checkpoint "
+                f"init_from expects a bare-weights artifact, but got the resumable checkpoint "
                 f"{path.name!r}. A .ckpt holds the whole LightningModule under "
                 f"'model.'-prefixed keys (plus optimizer state, and no per-network "
                 f"provenance to validate), so loading it into the bare generator is an "
                 f"unreadable key dump at best. Point init_from at the sibling "
-                f"sr-weights-*.pt that SRWeightsCheckpoint writes alongside it, or resume "
+                f"sr-weights file that SRWeightsCheckpoint writes alongside it, or resume "
                 f"the whole run with --ckpt_path instead."
             )
 
-        payload = torch.load(path, weights_only=True, map_location="cpu")
-        meta = payload.get("meta") if isinstance(payload, dict) else None
-        if meta is None or "state_dict" not in payload:
-            raise ValueError(
-                f"init_from={path.name!r} is not a sisr weights file: it has no "
-                f"'state_dict'/'meta' pair. Without the meta block none of the checks "
-                f"that decide whether these weights mean anything in this run "
-                f"(architecture, processor, output range, upscaling factor) can run, so "
-                f"accepting it would reinstate exactly the silent mistraining they exist "
-                f"to prevent."
-            )
+        tensors, meta = artifacts.load(path)
 
         # Only when 'kind' is present: it is an additive field, and the golden
         # artifact the template ships predates it. Absent means generator.
@@ -268,25 +259,19 @@ class SRGANLightning(SRLightning):
                 f"the SRGAN template writes both kinds into one dirpath. Its metadata "
                 f"describes only that component, so none of the generator checks "
                 f"(architecture, processor, output range, upscaling factor) can run "
-                f"against it. Point init_from at the sr-weights-*.pt sibling."
+                f"against it. Point init_from at the sr-weights sibling."
             )
 
-        expected = build_metadata(self)
-        for section, key in _INIT_FROM_FIELDS:
-            want = expected[section][key]
-            got = meta.get(section, {}).get(key)
-            if got == want:
-                continue
-            raise ValueError(
-                f"init_from={path.name!r} was written by a run whose {section}.{key} is "
-                f"{got!r}, but this run's is {want!r}. A generator initialised from "
-                f"weights trained under a different architecture, processor, output range "
-                f"or upscaling factor trains and scores without ever erroring — only the "
-                f"numbers are wrong. Point init_from at a matching artifact, or align "
-                f"this run's config with the one that produced it."
-            )
+        # Stricter than the module default on purpose: initialising a generator from
+        # the wrong weights is not merely unlabelled, it silently mistrains.
+        artifacts.require_compatible(
+            meta,
+            build_metadata(self),
+            fields=_INIT_FROM_FIELDS,
+            source=f"init_from={path.name!r}",
+        )
 
-        self.model.load_state_dict(payload["state_dict"], strict=True)
+        self.model.load_state_dict(tensors, strict=True)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build the generator and discriminator optimizers, in that order.

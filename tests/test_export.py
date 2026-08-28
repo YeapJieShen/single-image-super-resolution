@@ -183,7 +183,7 @@ def test_to_onnx_writes_metadata_props(tmp_path):
         "eval_config",
         "training",
     }
-    assert props["format"] == "sisr-meta-v1"  # stored as-is: already a str
+    assert props["format"] == "sisr-meta-v2"  # stored as-is: already a str
     assert props["kind"] == "sr_model"  # stored as-is: already a str
 
     model_field = json.loads(props["model"])
