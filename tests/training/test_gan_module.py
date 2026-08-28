@@ -227,6 +227,10 @@ class ShrinkingGenerator(SRModel):
 
     input_contract = "pre_upsampled"
 
+    @property
+    def variant_tag(self) -> str:
+        return "shrink"
+
     def __init__(self, channels=3, shrink=16):
         super().__init__()
         self.conv = torch.nn.Conv2d(channels, channels, kernel_size=shrink + 1, padding="valid")
@@ -953,8 +957,8 @@ def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
             ),
         ],
     )
-    d_meta = artifacts.load(next(tmp_path.glob("d-weights-*.safetensors")))[1]
-    g_meta = artifacts.load(next(tmp_path.glob("sr-weights-*.safetensors")))[1]
+    d_meta = artifacts.load(next(tmp_path.glob("d-weights_s*.safetensors")))[1]
+    g_meta = artifacts.load(next(tmp_path.glob("sr-weights_s*.safetensors")))[1]
 
     assert set(d_meta).isdisjoint({"discriminator", "adversarial"})
     assert d_meta["kind"] == "component"

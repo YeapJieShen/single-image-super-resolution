@@ -175,3 +175,39 @@ def require_compatible(
             UserWarning,
             stacklevel=2,
         )
+
+
+def stem(meta: dict[str, Any]) -> str:
+    """Filename identity for an artifact, derived from its own provenance.
+
+    Deliberately a projection of the metadata rather than a second description
+    built from the module: a filename and a header that disagree is precisely the
+    class of defect this project keeps finding, and deriving one from the other
+    makes it unrepresentable.
+
+    ``SRResNet_x4_RGB_16B64F`` — architecture, scale, colourspace, variant. A
+    component drops scale and colourspace, neither of which describes a critic:
+    ``SRDiscriminator_96``.
+
+    Args:
+        meta: A block from :func:`~sisr.training.metadata.build_metadata` or
+            :func:`~sisr.training.metadata.build_component_metadata`.
+
+    Returns:
+        The identity, with any absent part simply omitted rather than rendered
+        as ``None``.
+    """
+    if meta.get("kind") == "component":
+        block = meta.get("component", {})
+        parts = [block.get("class_path", "").rsplit(".", 1)[-1], block.get("variant")]
+    else:
+        block = meta.get("model", {})
+        io = meta.get("io", {})
+        scale = io.get("scale")
+        parts = [
+            block.get("class_path", "").rsplit(".", 1)[-1],
+            f"x{scale}" if scale is not None else None,
+            io.get("output_colorspace"),
+            block.get("variant"),
+        ]
+    return "_".join(p for p in parts if p)

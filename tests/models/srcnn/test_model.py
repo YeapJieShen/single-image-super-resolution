@@ -178,3 +178,9 @@ def test_forward_multilayer_mapping_builds_extra_conv_and_preserves_shape():
     x = torch.zeros(2, 3, 16, 16)
     out = model(x)
     assert out.shape == (2, 3, 16, 16)
+
+
+def test_variant_tag_is_the_kernel_triple():
+    """The paper names its variants by kernel sizes, so the artifact does too."""
+    assert SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5)).variant_tag == "915"
+    assert SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 5, 5)).variant_tag == "955"

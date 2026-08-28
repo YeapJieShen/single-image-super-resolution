@@ -631,7 +631,7 @@ class _RollingSaveMixin:
         # sibling callback in the same dirpath differs in prefix or extension, and
         # `last.ckpt`/a monitored callback's metric-bearing name never match.
         self._rolling_pattern = re.compile(
-            rf"{re.escape(filename_prefix)}-(\d+){re.escape(self.FILE_EXTENSION)}"
+            rf"{re.escape(filename_prefix)}_s(\d+){re.escape(self.FILE_EXTENSION)}"
         )
 
     def on_train_start(
@@ -736,30 +736,49 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         monitor_metric: str | None = "psnr/val/RGB",
         save_top_k: int = 3,
         dirpath: str | None = None,
-        filename_prefix: str = "sr",
+        filename_prefix: str | None = None,
         mode: str = "max",
         keep_last: int = 3,
         **kwargs: Any,
     ):
         if monitor_metric is None:
-            # Rolling: no metric in the filename (there is none), and step
-            # must be in it or every save overwrites the last.
-            filename = f"{filename_prefix}-{{step}}"
+            # Lightning refuses save_top_k > 1 with nothing to rank by; the
+            # window is enforced by _RollingSaveMixin instead.
             save_top_k = -1
-        else:
-            # '/' is a path separator; a monitor tag carries several.
-            label = monitor_metric.replace("/", "_")
-            filename = f"{filename_prefix}-{{step}}-{label}={{{monitor_metric}:.4f}}"
         super().__init__(
             monitor=monitor_metric,
             mode=mode,
             save_top_k=save_top_k,
             dirpath=dirpath,
-            filename=filename,
             auto_insert_metric_name=False,
             **kwargs,
         )
-        self._init_rolling(keep_last, filename_prefix)
+        self._keep_last = keep_last
+        self._explicit_prefix = filename_prefix
+        # A usable name before setup() can derive the real one -- direct
+        # construction in a test never reaches setup.
+        self._apply_naming(filename_prefix or self.DEFAULT_PREFIX)
+
+    #: Placeholder identity used until setup() can derive the real one. Distinct
+    #: per subclass so two sinks sharing a dirpath cannot collide before then.
+    DEFAULT_PREFIX: str = "sr"
+
+    def _apply_naming(self, prefix: str) -> None:
+        """Set the filename template and the rolling window's matching pattern together.
+
+        They must agree: the window finds this callback's own files by matching
+        exactly what it writes, so a prefix change that touched only one of them
+        would either orphan every save or adopt a sibling callback's.
+
+        Args:
+            prefix: Identity portion of the filename, without the step.
+        """
+        self.filename = f"{prefix}_s{{step}}"
+        self._init_rolling(self._keep_last, prefix)
+
+    def _describe(self, pl_module: lightning.LightningModule) -> dict[str, Any]:
+        """Provenance for whatever this callback saves. Overridden per component."""
+        return build_metadata(pl_module)
 
     def _validate_monitor(self, pl_module: lightning.LightningModule) -> None:
         """Raise if this callback's ``monitor``/``mode`` pair is unloggable or inverted.
@@ -843,6 +862,15 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
             return
+        self._validate(pl_module)
+        # Derived here rather than in __init__ because it comes from the module,
+        # which does not exist when a callback is built from YAML -- and after
+        # _validate, because it reads whatever that just checked.
+        if self._explicit_prefix is None:
+            self._apply_naming(artifacts.stem(self._describe(pl_module)))
+
+    def _validate(self, pl_module: lightning.LightningModule) -> None:
+        """Everything that must hold before this callback can name or write anything."""
         self._validate_monitor(pl_module)
 
 
@@ -955,13 +983,14 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
     """
 
     FILE_EXTENSION = artifacts.SUFFIX
+    DEFAULT_PREFIX = "sr-weights"
 
     def __init__(
         self,
         monitor_metric: str | None = "psnr/val/RGB",
         save_top_k: int = 3,
         dirpath: str | None = None,
-        filename_prefix: str = "sr-weights",
+        filename_prefix: str | None = None,
         mode: str = "max",
         keep_last: int = 3,
         attribute: str = "model",
@@ -977,6 +1006,12 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
             **kwargs,
         )
         self.attribute = attribute
+
+    def _describe(self, pl_module: lightning.LightningModule) -> dict[str, Any]:
+        """Component-scoped when this callback saves anything but the generator."""
+        if self.attribute == "model":
+            return build_metadata(pl_module)
+        return build_component_metadata(pl_module, self.attribute)
 
     @property
     def state_key(self) -> str:
@@ -1039,8 +1074,15 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
                 ``pl_module`` has no attribute named ``attribute``.
         """
         super().setup(trainer, pl_module, stage)
-        if stage != "fit":
-            return
+
+    def _validate(self, pl_module: lightning.LightningModule) -> None:
+        """The base's monitor check, plus that ``attribute`` names something real.
+
+        Runs before the filename is derived, which reads the very component this
+        confirms exists -- otherwise a typo surfaces as a bare ``AttributeError``
+        from inside the naming code rather than as this message.
+        """
+        super()._validate(pl_module)
         if not hasattr(pl_module, self.attribute):
             raise MisconfigurationException(
                 f"`SRWeightsCheckpoint(attribute={self.attribute!r})` has nothing to save: "

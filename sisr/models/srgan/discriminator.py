@@ -98,6 +98,15 @@ class SRDiscriminator(torch.nn.Module):
         """Architecture hyperparameters, for provenance metadata."""
         return self._hparams
 
+    @property
+    def variant_tag(self) -> str:
+        """The HR input size it was built for -- the one knob that must match the data.
+
+        Not an ``SRModel``, so this is duck-typed rather than inherited. The
+        artifact naming reads it the same way either way.
+        """
+        return str(self._hparams["hr_input_size"])
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Score a batch of HR-sized images.
 

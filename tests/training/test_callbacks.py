@@ -456,11 +456,16 @@ def test_weight_histogram_logger_skips_when_no_tb_logger():
 # ---------------------------------------------------------------------------
 
 
-def test_srcheckpoint_filename_pattern():
-    """monitor_metric='val_psnr(RGB)' -> filename pattern uses that metric."""
+def test_srcheckpoint_filename_carries_the_step_and_not_the_metric():
+    """The monitored metric is deliberately absent from the name.
+
+    Runs monitor different metrics and adversarial runs monitor none, so a metric
+    token would make otherwise-identical files look unrelated. The value lives in
+    the artifact's own provenance instead. ``{step}`` must stay, or every save
+    overwrites the last.
+    """
     ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", save_top_k=3, dirpath="/tmp/x")
-    # ModelCheckpoint stores `filename` — verify the metric appears in the format.
-    assert "val_psnr(RGB)" in ckpt.filename
+    assert "val_psnr(RGB)" not in ckpt.filename
     assert "step" in ckpt.filename
 
 
@@ -476,14 +481,14 @@ def test_srcheckpoint_custom_filename_prefix():
         dirpath="/tmp/x",
         filename_prefix="myrun",
     )
-    assert ckpt.filename.startswith("myrun-")
+    assert ckpt.filename.startswith("myrun_s")
 
 
 def test_srcheckpoint_default_filename_prefix_is_neutral_sr():
     """The generic checkpoint's default prefix must be arch-neutral 'sr',
     not the SRCNN-specific 'srcnn'."""
     ckpt = SRCheckpoint(monitor_metric="val_psnr(RGB)", dirpath="/tmp/x")
-    assert ckpt.filename.startswith("sr-")
+    assert ckpt.filename.startswith("sr_s")
 
 
 def test_srcheckpoint_disables_auto_insert_metric_name():
@@ -504,13 +509,15 @@ def test_srcheckpoint_slash_monitor_renders_flat_filename(tmp_path: Path):
     silently create a nested directory tree (one per save) instead of a flat
     checkpoint file. The `metrics` dict lookup that supplies the *value* is
     unaffected by the `/` — it's just a dict key."""
-    ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path), filename_prefix="sr")
     rendered = ckpt.format_checkpoint_name(
         {"step": torch.tensor(1000), "psnr/val/RGB": torch.tensor(30.1234)}
     )
     basename = Path(rendered).name
     assert "/" not in basename
-    assert basename == "sr-1000-psnr_val_RGB=30.1234.ckpt"
+    # The metric no longer appears in the name at all -- identity plus step only --
+    # so the monitor tag cannot reach the path however many separators it carries.
+    assert basename == "sr_s1000.ckpt"
 
 
 # ---------------------------------------------------------------------------
@@ -652,14 +659,14 @@ def test_sr_weights_checkpoint_default_filename_prefix_is_sr_weights():
     """Distinct from SRCheckpoint's 'sr' default so a shared dirpath's top-k
     deletion passes can never mistake one callback's files for the other's."""
     ckpt = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath="/tmp/x")
-    assert ckpt.filename.startswith("sr-weights-")
+    assert ckpt.filename.startswith("sr-weights_s")
 
 
 def test_sr_weights_checkpoint_custom_filename_prefix():
     ckpt = SRWeightsCheckpoint(
         monitor_metric="psnr/val/RGB", dirpath="/tmp/x", filename_prefix="myrun"
     )
-    assert ckpt.filename.startswith("myrun-")
+    assert ckpt.filename.startswith("myrun_s")
 
 
 def test_sr_weights_checkpoint_default_max_mode():
@@ -756,13 +763,17 @@ def test_weights_checkpoint_can_save_a_named_component(tmp_path):
     # auto-attribute would reach torch.save and fail there, not here.
     trainer.fit_loop.epoch_loop._batches_that_stepped = 6
     cb = SRWeightsCheckpoint(
-        monitor_metric=None, keep_last=1, attribute="discriminator", dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=1,
+        attribute="discriminator",
+        dirpath=str(tmp_path),
+        filename_prefix="d-weights",
     )
     cb.current_score = None
 
-    cb._save_checkpoint(trainer, str(tmp_path / "d-weights-7.safetensors"))
+    cb._save_checkpoint(trainer, str(tmp_path / "d-weights_s7.safetensors"))
 
-    saved_tensors, saved_meta = artifacts.load(tmp_path / "d-weights-7.safetensors")
+    saved_tensors, saved_meta = artifacts.load(tmp_path / "d-weights_s7.safetensors")
     assert set(saved_tensors) == set(module.discriminator.state_dict())
     # build_module()'s generator is SRCNN, whose top-level submodules are
     # feat/mapping/recon -- a "feat."-prefixed key here would mean the
@@ -853,9 +864,14 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
     # (-> error, under this suite's strict filter) if dirpath is non-empty at startup.
     ckpt_dir = tmp_path / "checkpoints"
 
-    sr_ckpt = SRCheckpoint(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(ckpt_dir))
+    sr_ckpt = SRCheckpoint(
+        monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(ckpt_dir), filename_prefix="sr"
+    )
     sr_weights_ckpt = SRWeightsCheckpoint(
-        monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(ckpt_dir)
+        monitor_metric="psnr/val/RGB",
+        save_top_k=1,
+        dirpath=str(ckpt_dir),
+        filename_prefix="sr-weights",
     )
     trainer = lightning.Trainer(
         max_epochs=-1,
@@ -873,8 +889,8 @@ def test_sr_weights_checkpoint_writes_bare_payload_via_real_fit(
 
     trainer.fit(module, datamodule=datamodule)
 
-    ckpt_files = list(ckpt_dir.glob("sr-*.ckpt"))
-    pt_files = list(ckpt_dir.glob("sr-weights-*.safetensors"))
+    ckpt_files = list(ckpt_dir.glob("sr_s*.ckpt"))
+    pt_files = list(ckpt_dir.glob("sr-weights_s*.safetensors"))
     all_files = list(ckpt_dir.iterdir())
     # save_top_k=1 on each: exactly one file per callback survives repeated
     # val-triggered saves, and coexisting in one dirpath produced no cross-deletion.
@@ -965,7 +981,11 @@ def test_rolling_mode_keeps_only_the_last_n(tmp_path):
     likely one from the first few thousand steps.
     """
     cb = SRCheckpoint(
-        monitor_metric=None, keep_last=3, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=3,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr",
     )
     _run_tiny_fit(callbacks=[cb], n_batches=20)
     files = sorted(p.name for p in tmp_path.glob("*.ckpt"))
@@ -976,7 +996,7 @@ def test_rolling_mode_keeps_only_the_last_n(tmp_path):
     # Stamps are the batch axis, which is what every logged metric uses -- so
     # 15/17/19, not the 16/18/20 `trainer.global_step` would give. Those older
     # numbers named steps that appear on no curve; see the step-axis tests below.
-    assert files == ["sr-15.ckpt", "sr-17.ckpt", "sr-19.ckpt"], files
+    assert files == ["sr_s15.ckpt", "sr_s17.ckpt", "sr_s19.ckpt"], files
 
 
 @_ignore_gpu_warning
@@ -1001,7 +1021,7 @@ def test_srcheckpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path)
     step-only — MEASURED FACT 3: omitting {step} would make every save
     overwrite the last."""
     ckpt = SRCheckpoint(monitor_metric=None, dirpath=str(tmp_path))
-    assert ckpt.filename == "sr-{step}"
+    assert ckpt.filename == "sr_s{step}"
     assert ckpt.save_top_k == -1
     assert ckpt.monitor is None
     assert ckpt.keep_last == 3
@@ -1014,16 +1034,20 @@ def test_sr_weights_checkpoint_rolling_mode_keeps_only_the_last_n(tmp_path):
     ModelCheckpoint's save path the way SRCheckpoint does, so this is the
     place a mixin-only implementation would silently do nothing."""
     cb = SRWeightsCheckpoint(
-        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr-weights",
     )
     _run_tiny_fit(callbacks=[cb], n_batches=20)
     files = sorted(p.name for p in tmp_path.glob("*.safetensors"))
-    assert files == ["sr-weights-17.safetensors", "sr-weights-19.safetensors"], files
+    assert files == ["sr-weights_s17.safetensors", "sr-weights_s19.safetensors"], files
 
 
 def test_sr_weights_checkpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path):
     ckpt = SRWeightsCheckpoint(monitor_metric=None, dirpath=str(tmp_path))
-    assert ckpt.filename == "sr-weights-{step}"
+    assert ckpt.filename == "sr-weights_s{step}"
     assert ckpt.save_top_k == -1
     assert ckpt.monitor is None
     assert ckpt.keep_last == 3
@@ -1036,17 +1060,25 @@ def test_rolling_checkpoints_coexist_without_cross_deletion(tmp_path):
     of its own filepaths, and FILE_EXTENSION/filename_prefix already keep the
     two from colliding by name."""
     sr_ckpt = SRCheckpoint(
-        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr",
     )
     sr_weights_ckpt = SRWeightsCheckpoint(
-        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr-weights",
     )
     _run_tiny_fit(callbacks=[sr_ckpt, sr_weights_ckpt], n_batches=20)
-    ckpt_files = sorted(p.name for p in tmp_path.glob("sr-*.ckpt"))
-    pt_files = sorted(p.name for p in tmp_path.glob("sr-weights-*.safetensors"))
+    ckpt_files = sorted(p.name for p in tmp_path.glob("sr_s*.ckpt"))
+    pt_files = sorted(p.name for p in tmp_path.glob("sr-weights_s*.safetensors"))
     all_files = sorted(p.name for p in tmp_path.iterdir())
-    assert ckpt_files == ["sr-17.ckpt", "sr-19.ckpt"], ckpt_files
-    assert pt_files == ["sr-weights-17.safetensors", "sr-weights-19.safetensors"], pt_files
+    assert ckpt_files == ["sr_s17.ckpt", "sr_s19.ckpt"], ckpt_files
+    assert pt_files == ["sr-weights_s17.safetensors", "sr-weights_s19.safetensors"], pt_files
     assert len(all_files) == 4, all_files
 
 
@@ -1102,15 +1134,15 @@ def test_rolling_window_is_seeded_from_disk_on_resume(cls, prefix, tmp_path: Pat
     an error under this suite's strict filter).
     """
     for step in (4, 20, 12):
-        (tmp_path / f"{prefix}-{step}{cls.FILE_EXTENSION}").touch()
-    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+        (tmp_path / f"{prefix}_s{step}{cls.FILE_EXTENSION}").touch()
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix=prefix)
 
     cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
 
     # Ordered by step, not lexicographically -- "12" sorts before "4" as text,
     # and deletion is oldest-first, so a string sort would evict the newest file.
     assert cb._rolling == [
-        str(tmp_path / f"{prefix}-{step}{cls.FILE_EXTENSION}") for step in (4, 12, 20)
+        str(tmp_path / f"{prefix}_s{step}{cls.FILE_EXTENSION}") for step in (4, 12, 20)
     ]
 
 
@@ -1123,18 +1155,20 @@ def test_rolling_seed_only_adopts_this_callbacks_own_files(tmp_path: Path):
     extension-only filter adopts a sibling's files and eventually deletes them.
     """
     for name in (
-        "sr-weights-2.safetensors",
-        "d-weights-2.safetensors",
-        "sr-2.ckpt",
+        "sr-weights_s2.safetensors",
+        "d-weights_s2.safetensors",
+        "sr_s2.ckpt",
         "last.ckpt",
-        "sr-weights-x.safetensors",
+        "sr-weights_sx.safetensors",
     ):
         (tmp_path / name).touch()
-    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=3, dirpath=str(tmp_path))
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=3, dirpath=str(tmp_path), filename_prefix="sr-weights"
+    )
 
     cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
 
-    assert cb._rolling == [str(tmp_path / "sr-weights-2.safetensors")]
+    assert cb._rolling == [str(tmp_path / "sr-weights_s2.safetensors")]
 
 
 def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
@@ -1143,8 +1177,10 @@ def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
     Seeding unconditionally would make a from-scratch run adopt — and, on its
     third save, silently delete — checkpoints a previous run wrote.
     """
-    (tmp_path / "sr-weights-2.safetensors").touch()
-    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    (tmp_path / "sr-weights_s2.safetensors").touch()
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix="sr-weights"
+    )
 
     cb.on_train_start(MagicMock(ckpt_path=None), MagicMock())
 
@@ -1154,7 +1190,7 @@ def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
 def test_rolling_seed_is_noop_when_monitor_is_set(tmp_path: Path):
     """With a monitor, Lightning's top-k owns retention — seeding would evict
     files top-k still wants, exactly as ``_enforce_rolling_window`` must not."""
-    (tmp_path / "sr-weights-2.safetensors").touch()
+    (tmp_path / "sr-weights_s2.safetensors").touch()
     cb = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", save_top_k=1, dirpath=str(tmp_path))
 
     cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
@@ -1166,15 +1202,17 @@ def test_seeded_window_deletes_the_oldest_pre_resume_file(tmp_path: Path):
     """Seeding is only worth anything if the next save then evicts a pre-resume
     file — the orphaning this fixes is a deletion that never happens."""
     for step in (2, 4):
-        (tmp_path / f"sr-weights-{step}{SRWeightsCheckpoint.FILE_EXTENSION}").touch()
-    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+        (tmp_path / f"sr-weights_s{step}{SRWeightsCheckpoint.FILE_EXTENSION}").touch()
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix="sr-weights"
+    )
     trainer = MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt"))
 
     cb.on_train_start(trainer, MagicMock())
-    cb._enforce_rolling_window(trainer, str(tmp_path / "sr-weights-6.safetensors"))
+    cb._enforce_rolling_window(trainer, str(tmp_path / "sr-weights_s6.safetensors"))
 
     trainer.strategy.remove_checkpoint.assert_called_once_with(
-        str(tmp_path / "sr-weights-2.safetensors")
+        str(tmp_path / "sr-weights_s2.safetensors")
     )
 
 
@@ -1194,17 +1232,25 @@ def test_real_resume_keeps_the_window_at_keep_last(tmp_path: Path):
     exactly ``keep_last`` files; unseeded, 3 and 5 are orphaned and six survive.
     """
     ckpt_cb = SRCheckpoint(
-        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr",
     )
     _run_tiny_fit(callbacks=[ckpt_cb], n_batches=6)
-    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-3.ckpt", "sr-5.ckpt"]
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr_s3.ckpt", "sr_s5.ckpt"]
 
     resumed_cb = SRCheckpoint(
-        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="sr",
     )
-    _run_tiny_fit(callbacks=[resumed_cb], n_batches=12, ckpt_path=str(tmp_path / "sr-5.ckpt"))
+    _run_tiny_fit(callbacks=[resumed_cb], n_batches=12, ckpt_path=str(tmp_path / "sr_s5.ckpt"))
 
-    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr-11.ckpt", "sr-9.ckpt"]
+    assert sorted(p.name for p in tmp_path.glob("*.ckpt")) == ["sr_s11.ckpt", "sr_s9.ckpt"]
 
 
 # ---------------------------------------------------------------------------
@@ -2201,7 +2247,7 @@ def test_checkpoint_step_placeholder_uses_the_batch_axis(cls, prefix, tmp_path: 
     curve. Measured on the real runs before this fix: ``experiments/SRGAN/golden``
     held ``sr-400000`` against its own metrics maxing at 199,999.
     """
-    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix=prefix)
     trainer = _manual_optimization_trainer(batches=200_000, optimizer_steps=400_000)
 
     assert int(cb._monitor_candidates(trainer)["step"]) == 200_000
@@ -2216,12 +2262,12 @@ def test_checkpoint_filename_renders_the_batch_axis(cls, prefix, tmp_path: Path)
     what a human actually reads off ``ls``, and what the rolling window parses
     back out.
     """
-    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix=prefix)
     trainer = _manual_optimization_trainer(batches=200_000, optimizer_steps=400_000)
 
     name = Path(cb.format_checkpoint_name(cb._monitor_candidates(trainer))).name
 
-    assert name == f"{prefix}-200000{cls.FILE_EXTENSION}"
+    assert name == f"{prefix}_s200000{cls.FILE_EXTENSION}"
 
 
 @pytest.mark.parametrize("cls, prefix", _CKPT_CLASSES)
@@ -2234,12 +2280,12 @@ def test_checkpoint_name_introduces_no_scaling_of_its_own(cls, prefix, tmp_path:
     test above and fail here the moment a paradigm used one optimizer per batch
     under manual optimization.
     """
-    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    cb = cls(monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix=prefix)
     trainer = _manual_optimization_trainer(batches=1_000_000, optimizer_steps=1_000_000)
 
     name = Path(cb.format_checkpoint_name(cb._monitor_candidates(trainer))).name
 
-    assert name == f"{prefix}-1000000{cls.FILE_EXTENSION}"
+    assert name == f"{prefix}_s1000000{cls.FILE_EXTENSION}"
 
 
 @_ignore_gpu_warning
@@ -2261,11 +2307,15 @@ def test_every_checkpoint_stamp_is_a_step_the_metrics_were_logged_at(tmp_path: P
 
     logger = CSVLogger(str(tmp_path / "logs"), name="r", version="v")
     cb = SRCheckpoint(
-        monitor_metric=None, keep_last=10, every_n_train_steps=2, dirpath=str(tmp_path / "ck")
+        monitor_metric=None,
+        keep_last=10,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path / "ck"),
+        filename_prefix="sr",
     )
     _run_tiny_fit(callbacks=[cb], n_batches=12, logger=logger, log_every_n_steps=2)
 
-    stamps = sorted(int(p.stem.split("-")[1]) for p in (tmp_path / "ck").glob("*.ckpt"))
+    stamps = sorted(int(p.stem.split("_s")[1]) for p in (tmp_path / "ck").glob("*.ckpt"))
     with open(tmp_path / "logs" / "r" / "v" / "metrics.csv") as fh:
         logged = {int(row["step"]) for row in csv.DictReader(fh) if row.get("step")}
 
@@ -2297,7 +2347,9 @@ def test_weights_checkpoint_metadata_records_both_axes_distinguishably(tmp_path:
     trainer.is_global_zero = True
     trainer.loggers = []
 
-    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix="sr-weights"
+    )
     path = tmp_path / f"probe{SRWeightsCheckpoint.FILE_EXTENSION}"
     cb._save_checkpoint(trainer, str(path))
 
@@ -2377,8 +2429,48 @@ def test_bare_weights_are_written_by_one_process_only(tmp_path: Path, is_global_
     trainer.is_global_zero = is_global_zero
     trainer.loggers = []
 
-    cb = SRWeightsCheckpoint(monitor_metric=None, keep_last=2, dirpath=str(tmp_path))
-    path = tmp_path / f"sr-weights-10{SRWeightsCheckpoint.FILE_EXTENSION}"
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, dirpath=str(tmp_path), filename_prefix="sr-weights"
+    )
+    path = tmp_path / f"sr-weights_s10{SRWeightsCheckpoint.FILE_EXTENSION}"
     cb._save_checkpoint(trainer, str(path))
 
     assert path.exists() is is_global_zero
+
+
+@_ignore_gpu_warning
+def test_a_real_fit_names_its_artifacts_after_the_model(tmp_path: Path):
+    """The identity is derived from the run, not configured, and it survives to disk.
+
+    The name is a projection of the artifact's own provenance rather than a second
+    description assembled beside it, so a file whose name and header disagree is
+    not representable.
+    """
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, every_n_train_steps=2, dirpath=str(tmp_path)
+    )
+    _run_tiny_fit(callbacks=[cb], n_batches=6)
+
+    names = sorted(p.name for p in tmp_path.glob(f"*{SRWeightsCheckpoint.FILE_EXTENSION}"))
+    assert names, "no artifact was written -- the test proves nothing"
+    for name in names:
+        assert name.startswith("SRCNN_x2_RGB_313_s"), name
+    # And the header agrees with the name it was given.
+    assert artifacts.stem(artifacts.load(tmp_path / names[0])[1]) == "SRCNN_x2_RGB_313"
+
+
+@_ignore_gpu_warning
+def test_an_explicit_prefix_still_wins_over_the_derived_identity(tmp_path: Path):
+    """The derivation is a default, not a policy -- a run that wants its own
+    naming keeps it."""
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None,
+        keep_last=2,
+        every_n_train_steps=2,
+        dirpath=str(tmp_path),
+        filename_prefix="myrun",
+    )
+    _run_tiny_fit(callbacks=[cb], n_batches=6)
+
+    names = sorted(p.name for p in tmp_path.glob(f"*{SRWeightsCheckpoint.FILE_EXTENSION}"))
+    assert names and all(n.startswith("myrun_s") for n in names), names

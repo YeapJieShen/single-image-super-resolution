@@ -148,3 +148,9 @@ def test_clamp_output_default_bounds_are_the_paper_signed_range():
     assert torch.isclose(out.min(), torch.tensor(-1.0), atol=1e-6), (
         f"floor was {out.min().item()}; a (0.0, 1.0) default floors at 0.0"
     )
+
+
+def test_variant_tag_is_blocks_and_width():
+    """The two knobs that move capacity, and the two a reader wants off `ls`."""
+    assert SRResNet(scale=4).variant_tag == "16B64F"
+    assert SRResNet(scale=4, num_residual_blocks=8, hidden_channel=32).variant_tag == "8B32F"

@@ -22,6 +22,10 @@ def test_srmodel_subclass_inherits_nn_module():
             self._hparams = {"trivial": True}
             self.conv = nn.Conv2d(3, 3, 1)
 
+        @property
+        def variant_tag(self):
+            return "t"
+
         def forward(self, x):
             return self.conv(x)
 
@@ -37,6 +41,10 @@ def test_srmodel_hparams_returns_underlying_dict():
         def __init__(self):
             super().__init__()
             self._hparams = {"foo": 1, "bar": "two"}
+
+        @property
+        def variant_tag(self):
+            return "t"
 
         def forward(self, x):
             return x
@@ -60,6 +68,10 @@ def test_srmodel_reset_parameters_default_is_noop():
             self._hparams = {}
             self.conv = nn.Conv2d(3, 3, 1)
 
+        @property
+        def variant_tag(self):
+            return "t"
+
         def forward(self, x):
             return self.conv(x)
 
@@ -68,3 +80,22 @@ def test_srmodel_reset_parameters_default_is_noop():
     assert m.reset_parameters() is None  # no kwargs
     assert m.reset_parameters(mean=0.5, std=0.1) is None  # kwargs absorbed
     assert torch.equal(m.conv.weight, before)
+
+
+def test_srmodel_refuses_a_subclass_with_no_variant_tag():
+    """The tag is abstract on purpose: an inherited default would silently label
+    two different configurations identically, which is what filenames exist to
+    prevent."""
+
+    class _NoTag(SRModel):
+        input_contract = "native_lr"
+
+        def __init__(self):
+            super().__init__()
+            self._hparams = {}
+
+        def forward(self, x):
+            return x
+
+    with pytest.raises(TypeError, match="variant_tag"):
+        _NoTag()

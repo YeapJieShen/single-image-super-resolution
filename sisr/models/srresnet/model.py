@@ -182,6 +182,11 @@ class SRResNet(SRModel):
                 f"num_residual_blocks must be a positive integer. Got {num_residual_blocks}."
             )
 
+    @property
+    def variant_tag(self) -> str:
+        """Blocks and width, e.g. ``'16B64F'`` -- the two knobs that move capacity."""
+        return f"{self._hparams['num_residual_blocks']}B{self._hparams['hidden_channel']}F"
+
     def forward(
         self,
         x: torch.Tensor,
