@@ -265,6 +265,43 @@ Note the asymmetry in the table: `every_n_train_steps` is Lightning's own and co
 optimizer steps, while the filename it produces counts batches. Under SRGAN that means
 a cadence of 10000 writes a file named for batch 5000.
 
+### Multi-GPU
+
+`SRLightning` runs distributed. Two settings are required together:
+
+```yaml
+trainer:
+  devices: 2
+  strategy: ddp
+  use_distributed_sampler: false     # required -- see below
+```
+
+**`use_distributed_sampler: false` is not optional, and a distributed run refuses to
+start without it.** This project shards the *training* loader itself and leaves the
+validation and benchmark loaders whole on every process. Lightning's injection is a
+single trainer-wide switch, so leaving it on would split those too — and
+`DistributedSampler` pads a set to a multiple of the world size by **repeating** samples.
+A five-image benchmark across four processes becomes eight, three counted twice, and the
+reported figure is no longer that set's score. Every process therefore evaluates every
+benchmark image; the cross-process reduction on those metrics is then exact, and doubles
+as a check that the processes have not diverged.
+
+Every validation metric is reduced across processes. Without that each process reports
+its own value as though it were global, and the checkpoint monitors read those and pick
+different checkpoints on different processes. The bare-weights artifact is written by one
+process only.
+
+**`SRGANLightning` still refuses multi-GPU.** Manual optimization opts out of Lightning's
+gradient synchronisation, so the two networks' gradients would not be reduced and each
+process would train its own divergent pair with nothing failing. Supporting it means
+writing that synchronisation explicitly; that is separate work.
+
+**What has been proven, and what has not.** The rank-correctness above is verified on two
+real processes over the gloo backend on CPU, which is what the test suite runs. NCCL
+behaviour, device placement on real GPUs and multi-GPU throughput are **not** covered —
+those need genuine multi-GPU hardware, and containers do not substitute since they share
+the host's devices.
+
 ### The distributable artifact
 
 `SRWeightsCheckpoint` writes **safetensors**, and it is the only format it writes — the
