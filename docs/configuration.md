@@ -276,6 +276,30 @@ Provenance travels in the file's header, one entry per top-level field rather th
 opaque blob, so anything that can open the artifact gets a readable table. The ONNX
 export writes the same fields the same way.
 
+Filenames say what the model is, so a directory of weights can be read without
+opening anything:
+
+```
+SRCNN_x2_Y_915_s500000.safetensors
+SRResNet_x4_RGB_16B64F_s500000.safetensors
+SRDiscriminator_96_s500000.safetensors
+```
+
+Architecture, scale, colourspace, variant, step. The **variant** is
+architecture-specific — SRCNN's kernel triple, SRResNet's block and filter counts — and
+each architecture supplies its own via `variant_tag`; no generic rule over
+hyperparameters produces a readable tag for all of them. A component drops scale and
+colourspace, since neither describes a critic.
+
+The name is **derived from the artifact's own provenance**, not assembled separately, so
+a file whose name and header disagree is not representable. Set `filename_prefix` to
+override it for a run that wants its own naming.
+
+Two things are deliberately absent. There is **no metric token**: runs monitor different
+metrics and adversarial runs monitor none, so it would make otherwise-identical files
+look unrelated — the value is in the header instead. And `s<step>` is the **batch** axis,
+which is the axis every logged metric uses, so the number can be found on a curve.
+
 Mismatches are checked on read. Fields that change what the output *means* — the
 processor and the output range — are refused, because being wrong about either produces
 a plausible image and no error. Library-version drift is warned about and loaded, since
