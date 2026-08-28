@@ -170,7 +170,8 @@ sisr fit --config templates/config.srgan.template.yaml
 
 **The generator starts from an MSE-trained SRResNet.** Ledig et al. scope the
 MSE-initialisation trick to "when training the actual GAN", so a paper-faithful run
-points `training_config.init_from` at a finished SRResNet run's bare-weights `.pt` —
+points `training_config.init_from` at a finished SRResNet run's bare-weights
+`.safetensors` —
 never the sibling `.ckpt`, which holds the whole LightningModule. That file's own
 provenance metadata is checked against this run's generator, processor, output range and
 scale, and refused on any mismatch: weights trained under a different one produce a model
