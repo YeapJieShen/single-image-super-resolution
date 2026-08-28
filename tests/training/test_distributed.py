@@ -212,3 +212,48 @@ def test_a_single_process_run_is_unaffected_by_the_check() -> None:
     )
 
     module.on_fit_start()  # must not raise
+
+
+def test_the_train_loader_gets_a_distributed_sampler_and_the_eval_loaders_do_not(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+) -> None:
+    """The sampler decision, asserted in-process against a real process group.
+
+    The two-process test above proves the *effect*; this pins the mechanism where
+    it can be read and measured, since that one does its work in processes this
+    one never sees.
+    """
+    datamodule = _make_datamodule(tiny_rgb_image_dir, tmp_path)
+    datamodule.setup(stage="fit")
+
+    # A file-backed rendezvous rather than an in-memory one: HashStore does not
+    # exist in the Windows build, and CI runs there.
+    torch.distributed.init_process_group(
+        backend="gloo",
+        init_method=f"file:///{(tmp_path / 'pg_store').as_posix().lstrip('/')}",
+        world_size=1,
+        rank=0,
+    )
+    try:
+        train = datamodule.train_dataloader()
+        val_loaders = datamodule.val_dataloader()
+        assert isinstance(train.sampler, torch.utils.data.DistributedSampler)
+        # Every evaluation loader, the primary and the benchmark sets alike.
+        assert not any(
+            isinstance(loader.sampler, torch.utils.data.DistributedSampler)
+            for loader in val_loaders
+        )
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_the_train_loader_is_plain_when_no_process_group_is_running(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+) -> None:
+    """A single-process run must not pay for machinery it is not using."""
+    datamodule = _make_datamodule(tiny_rgb_image_dir, tmp_path)
+    datamodule.setup(stage="fit")
+
+    assert not isinstance(
+        datamodule.train_dataloader().sampler, torch.utils.data.DistributedSampler
+    )
