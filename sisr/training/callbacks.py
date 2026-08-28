@@ -81,7 +81,7 @@ class BenchmarkImageLogger(Callback):
       returns ``[primary_val] + [test_loaders...]``; this callback ignores
       ``dataloader_idx == 0`` (handled by `SRLightning.validation_step`) and
       processes indices ``1..N`` against ``dataset_names``.  Images are
-      logged every *n*-th val run (controlled by ``log_every_n_val_runs``)
+      logged every *n*-th val run (controlled by ``every_n_val_runs``)
       so TensorBoard storage stays bounded over long training schedules.
     * **During `cli test`** — `SRDataModule.test_dataloader()` returns the
       test loaders only (no primary), so indices ``0..N-1`` map straight to
@@ -120,7 +120,7 @@ class BenchmarkImageLogger(Callback):
             ``SRDataModule.test_dataloader()`` / the trailing entries of
             ``val_dataloader()``.  When ``None`` the callback auto-discovers
             from ``trainer.datamodule.test_names``.
-        log_every_n_val_runs: Image-strip throttle for the val stage.  With
+        every_n_val_runs: Image-strip throttle for the val stage.  With
             step-based training (e.g. ``val_check_interval=1000``,
             ``max_steps=100_000``) val fires ~100 times, so logging every 5
             runs gives ~20 image snapshots — enough to track visual
@@ -138,12 +138,12 @@ class BenchmarkImageLogger(Callback):
     def __init__(
         self,
         dataset_names: list[str] | None = None,
-        log_every_n_val_runs: int = 5,
+        every_n_val_runs: int = 5,
         log_per_image_metrics: bool = False,
     ):
         super().__init__()
         self.dataset_names = list(dataset_names) if dataset_names else None
-        self.log_every_n_val_runs = log_every_n_val_runs
+        self.every_n_val_runs = every_n_val_runs
         self.log_per_image_metrics = log_per_image_metrics
 
         # Val: primary val is at idx 0, test sets at 1..N → {1: 'Set5', ...}
@@ -317,7 +317,7 @@ class BenchmarkImageLogger(Callback):
 
     def _on_image_log_interval(self) -> bool:
         """Return True when this val run should also log image strips."""
-        return self._val_run_count % self.log_every_n_val_runs == 0
+        return self._val_run_count % self.every_n_val_runs == 0
 
     def _collect_batch(
         self,
@@ -496,16 +496,19 @@ class GradNormLogger(Callback):
     after the backward pass and logs it as the ``"diag/grad_norm"`` scalar.
 
     Args:
-        log_every_n_steps (int): Compute and log every *n* **batches**.
-            Defaults to ``100``. The unit is batches, not optimizer steps, so
-            the configured cadence means the same thing under automatic and
-            manual optimization — and matches the axis the emitted scalar is
-            plotted on. See :func:`_logger_step`.
+        every_n_batches (int): Compute and log every *n* batches. Defaults to
+            ``100``. The unit is in the name deliberately: Lightning's own
+            callbacks do the same (``every_n_train_steps``, ``every_n_epochs``),
+            and the old name was a homonym of ``Trainer.log_every_n_steps``,
+            which means something else — the metric *flush* cadence. Batches
+            also make the setting mean one thing under both automatic and manual
+            optimization, and match the axis the emitted scalar is plotted on.
+            See :func:`_logger_step`.
     """
 
-    def __init__(self, log_every_n_steps: int = 100):
+    def __init__(self, every_n_batches: int = 100):
         super().__init__()
-        self.log_every_n_steps = log_every_n_steps
+        self.every_n_batches = every_n_batches
 
     def on_after_backward(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
         """Compute and log gradient norm if on the right step cadence.
@@ -519,7 +522,7 @@ class GradNormLogger(Callback):
             trainer: The trainer instance.
             pl_module: The model being trained.
         """
-        if _logger_step(trainer) % self.log_every_n_steps != 0:
+        if _logger_step(trainer) % self.every_n_batches != 0:
             return
 
         grad_norms = [p.grad.detach().norm(2) for p in pl_module.parameters() if p.grad is not None]
@@ -536,9 +539,9 @@ class WeightHistogramLogger(Callback):
     Groups by prefix, e.g. ``model.feat``, ``model.mapping``, ``model.recon``.
 
     Args:
-        log_every_n_steps (int): Log histograms every *n* **batches**.
-            The unit is batches, not optimizer steps, matching the axis the
-            histograms are written on — see :func:`_logger_step`.
+        every_n_batches (int): Log histograms every *n* batches, matching the
+            axis they are written on — see :func:`_logger_step`. Named for its
+            unit, following Lightning's own ``every_n_*`` callback arguments.
             Defaults to ``10000``. Histograms dominate event-file size, and
             one is written per tracked parameter on every cadence hit — at
             the templates' 1M-step schedule the old default of ``100`` was
@@ -549,9 +552,9 @@ class WeightHistogramLogger(Callback):
             trend across a full run.
     """
 
-    def __init__(self, log_every_n_steps: int = 10000):
+    def __init__(self, every_n_batches: int = 10000):
         super().__init__()
-        self.log_every_n_steps = log_every_n_steps
+        self.every_n_batches = every_n_batches
 
     def on_train_batch_end(
         self,
@@ -571,7 +574,7 @@ class WeightHistogramLogger(Callback):
             batch_idx: Unused.
         """
         step = _logger_step(trainer)
-        if step % self.log_every_n_steps != 0:
+        if step % self.every_n_batches != 0:
             return
 
         tb_logger = next(

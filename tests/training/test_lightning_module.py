@@ -1889,3 +1889,50 @@ def test_no_perceptual_tags_when_unrequested(monkeypatch):
     logged = capture_logged_metrics(module)
     module.validation_step((torch.rand(1, 3, 8, 8), torch.rand(1, 3, 32, 32)), 0)
     assert not [tag for tag in logged if tag.startswith(("lpips", "dists"))]
+
+
+def test_example_input_shape_is_derived_from_the_real_train_sample(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """A value the code already checks is a value the code can supply.
+
+    It used to be written out by hand under two different rules -- crop size over
+    scale for a native-LR dataset, sub-image size for a pre-upsampled one -- and
+    then validated against the very tensor those rules describe.
+    """
+    lit = SRLightning(
+        model=SRResNet(scale=2, num_residual_blocks=1),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.training_config.example_input_shape is None
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    lit.setup(stage="fit")
+
+    # hr_crop_size 24 over scale 2, in 3 channels -- never stated anywhere.
+    assert lit.training_config.example_input_shape == (3, 12, 12)
+    assert tuple(lit.example_input_array.shape) == (1, 3, 12, 12)
+
+
+def test_an_explicit_example_input_shape_is_still_checked_not_overwritten(
+    tiny_rgb_image_dir: Path, tmp_path: Path
+):
+    """Stating an intent and having it verified is the reason the field survives."""
+    lit = SRLightning(
+        model=SRResNet(scale=2, num_residual_blocks=1),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2, example_input_shape=(3, 99, 99)),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    dm = _srresnet_datamodule(tiny_rgb_image_dir, tmp_path, scale=2, hr_crop_size=24)
+    dm.setup(stage="fit")
+    lit.trainer = SimpleNamespace(datamodule=dm)
+
+    with pytest.raises(ValueError, match="example_input_shape"):
+        lit.setup(stage="fit")
