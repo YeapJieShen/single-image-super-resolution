@@ -620,6 +620,9 @@ class SRLightning(lightning.LightningModule):
                 on_step=on_step,
                 on_epoch=not on_step,
                 add_dataloader_idx=False,
+                # Epoch-level only: a per-step training scalar is already the
+                # process's own and reducing it would stall every step.
+                sync_dist=not on_step,
             )
 
     def validation_step(
@@ -646,7 +649,14 @@ class SRLightning(lightning.LightningModule):
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
-        self.log("loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False)
+        # sync_dist on every validation metric: without it each process reports
+        # its own value as though it were global, and the checkpoint monitors
+        # then read those and diverge. Exact here rather than approximate,
+        # because the validation loaders are deliberately not split -- see
+        # SRDataModule.train_dataloader.
+        self.log(
+            "loss/val", loss, prog_bar=True, on_step=False, add_dataloader_idx=False, sync_dist=True
+        )
         self._log_loss_terms("val")
         # prog_bar is a display choice, so it stays with the caller rather than
         # moving into the scorer — the scorer decides values, not presentation.
@@ -661,6 +671,7 @@ class SRLightning(lightning.LightningModule):
                 prog_bar=(tag in prog_bar_tags),
                 on_step=False,
                 add_dataloader_idx=False,
+                sync_dist=True,
             )
 
     def on_fit_start(self) -> None:
@@ -679,11 +690,43 @@ class SRLightning(lightning.LightningModule):
         ``training_config.example_input_shape`` is unset — there is then no
         input shape to probe with (both shipped templates set it).
         """
+        self._check_sampler_ownership()
         if self._compiled is None or self.training_config.example_input_shape is None:
             return
         dummy = torch.zeros(1, *self.training_config.example_input_shape, device=self.device)
         with torch.no_grad():
             self._compiled(dummy)
+
+    def _check_sampler_ownership(self) -> None:
+        """Refuse a distributed run that would let Lightning split the eval loaders.
+
+        :meth:`~sisr.training.datamodule.SRDataModule.train_dataloader` shards the
+        training set itself, precisely so the validation and benchmark loaders are
+        left whole. Lightning's injection is one trainer-wide switch, so leaving it
+        on both double-shards training and splits the benchmark sets --
+        ``DistributedSampler`` pads by repeating samples, so a five-image set across
+        four processes reports a figure that is not that set's score. Silent, and on
+        the metric path, so it is refused rather than warned about.
+
+        Raises:
+            RuntimeError: If running distributed with Lightning's sampler
+                injection still enabled.
+        """
+        # Same degradation as setup(): direct construction in a test attaches no
+        # trainer, and there is then no distributed run to refuse.
+        if self._trainer is None or self.trainer.world_size <= 1:
+            return
+        connector = getattr(self.trainer, "_accelerator_connector", None)
+        if getattr(connector, "use_distributed_sampler", False):
+            raise RuntimeError(
+                "Distributed training needs `trainer.use_distributed_sampler: false`. "
+                "This project shards the training loader itself so the validation and "
+                "benchmark loaders stay whole on every process; leaving Lightning's "
+                "injection on splits those too, and DistributedSampler pads a set by "
+                "repeating samples -- a five-image benchmark across four processes "
+                "would report a score for eight images, three of them counted twice. "
+                "Set trainer.use_distributed_sampler to false in your config."
+            )
 
     def on_train_start(self) -> None:
         """Register val metric tags with TensorBoard's HParams tab.
