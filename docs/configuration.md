@@ -104,7 +104,19 @@ to the torch hub cache, and TV's `2e-8` presumes the `[-1, 1]` output range that
 | `compile_backend` | A `torch._dynamo` backend name, or unset for eager. |
 | `layer_lrs` | Per-`Conv2d` learning rates; requires every trainable parameter to live in a `Conv2d`. |
 | `init_strategy`, `init_mean`, `init_std` | Weight initialisation. |
-| `scale` | Upscaling factor, for provenance and cross-checks. |
+| `scale` | Upscaling factor. **Required whenever a run writes an artifact and the model has no `scale` of its own.** |
+
+`scale` is stated here for SRCNN and inherited from the network for SRResNet, and that
+asymmetry is real rather than an inconsistency to tidy away. SRResNet upsamples internally, so
+its scale is a property of the network and lives in its hyperparameters. SRCNN is
+resolution-preserving — it refines an input that has *already* been upsampled — so its scale is
+a property of the **data**, and nothing about the network records it.
+
+Set it anyway. Saving an artifact whose scale cannot be resolved from either source is refused
+rather than recorded as null: a file that cannot state its factor is unusable by anyone who did
+not train it, because for a pre-upsampled architecture the factor is exactly what they must
+resize the input by before feeding it. It is deliberately *not* inferred from the datamodule —
+`scale` is not part of the dataset contract, and a predict-only dataset has none at all.
 
 `example_input_shape` is **not** only a TensorBoard-graph dummy. It also shapes the
 `torch.compile` warm-up — a wrong size compiles once and then recompiles on step 1 —
