@@ -392,6 +392,17 @@ both are pinned:
   14-image variant from that distribution — published SR papers' "Set14" numbers have been
   reported over 11-, 12- and 14-image subsets depending on source, so this count is worth
   stating explicitly for anyone comparing numbers against this project's own.
+  **Urban100 and Manga109 are not used**, so no figure here is over either — a table that
+  reports them is measuring something this project has not measured.
+- **The upscale leg has its own reference data, generated rather than downloaded.** The
+  distribution above ships HR and MATLAB-`imresize` LR pairs, which covers the downscale
+  leg only. SRCNN's degradation is bicubic-down *then* bicubic-up, so the second leg is
+  verified against `Bicubic_up` references generated in MATLAB from those same LR images —
+  the exact expression, sizes and directory layout are recorded in
+  [`tests/utils/test_imresize.py`](tests/utils/test_imresize.py)'s module docstring, so the
+  data can be regenerated rather than trusted. Byte-equality currently holds on both legs,
+  21 cases, none skipped. The tests skip cleanly when the reference data is absent, which
+  keeps CI hermetic — **a skip there means a leg was not exercised, not that it passed**.
 - **`pyiqa` (IQA-PyTorch) does not default to these conventions.** Its PSNR metric
   defaults to full RGB (`test_y_channel=False`), and its SSIM defaults to Y-channel but in
   full-range YIQ (`color_space='yiq'`) — not the studio-range BT.601 YCbCr that MATLAB's
