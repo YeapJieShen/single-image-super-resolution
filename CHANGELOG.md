@@ -11,6 +11,21 @@ notice.
 
 ### Added
 
+- **`sisr/artifacts.py`, one owner for the distributable weights artifact** — save, load,
+  metadata encoding, the compatibility check a reader runs before trusting a file, and the
+  filename stem. The checkpoint callback, `sisr export` and the CLI all go through it, so
+  the three cannot disagree about what an artifact is. It sits at the top level rather than
+  under `training/` because exporting and loading a published file are not training.
+- **Multi-GPU (DDP) correctness across the metric path.** Validation and test metrics
+  reduce across ranks, so a multi-process run reports the metric over the whole dataset
+  instead of over whichever shard rank zero happened to hold. The datamodule owns the
+  training `DistributedSampler`, and the run refuses to start rather than let Lightning
+  inject a second one alongside it. **Evaluation loaders are deliberately never sharded**:
+  `DistributedSampler` pads the last shard by *repeating* samples, which would quietly
+  double-count images in a published figure.
+- **A two-process test harness**, so distributed code paths are provable on a
+  single-GPU machine — gloo over spawned CPU processes, asserting both that a reduced
+  metric agrees across ranks and that an unreduced one does not.
 - **SRResNet** and **SRCNN**, both fully wired — model, dataset pipeline, config
   dataclasses, and an experiment template each.
 - **SRGAN** (`sisr/models/srgan/`, `sisr/training/gan_module.py`) — the SRResNet
@@ -55,16 +70,46 @@ notice.
   axes and provenance written into `metadata_props`.
 - **Provenance metadata** (`sisr/training/metadata.py`) — one builder feeding checkpoints,
   bare weight files, and ONNX exports, so the three cannot drift.
-- **`SRWeightsCheckpoint`** — distributable optimizer-free `.pt` weights, roughly a third
-  the size of a full checkpoint. `attribute` picks which component gets saved, with
-  matching provenance, so a GAN run can hand out the generator and retain the critic in
-  separate files.
+- **`SRWeightsCheckpoint`** — distributable optimizer-free `.safetensors` weights,
+  roughly a third the size of a full checkpoint. `attribute` picks which component gets
+  saved, with matching provenance, so a GAN run can hand out the generator and retain the
+  critic in separate files. Under DDP only rank zero writes.
 - **LR-only prediction path** — `PredictDataset`, `predict_step`, and `SRPredictionWriter`.
 - **LMDB HR caching** shared by both architectures, with an advisory build lock so
   concurrent builds do not duplicate work.
 
 ### Changed
 
+Three of these break existing setups. Nothing is released yet, so they break no version
+— but they do break anyone tracking `main`, which is why they are called out.
+
+- **BREAKING — distributable weights are `.safetensors`, and `.pt` is removed.** The
+  provenance metadata rides in the safetensors header, so a file states its own
+  architecture, scale, colorspace and output range and a reader can refuse a mismatch
+  before loading. `torch.load` is no longer on any read path for a published artifact,
+  which removes the pickle-execution surface entirely rather than relying on
+  `weights_only=True` being left on. **Existing `.pt` files cannot be read**, and there is
+  no converter in the tree by decision — regenerate them by retraining.
+- **BREAKING — artifact and checkpoint filenames say what the model is.**
+  `SRResNet_x4_RGB_16B64F_s1000000.safetensors` names the architecture, the scale, the
+  colorspace, the variant and the step, so a file is identifiable without opening it.
+  Every `SRModel` subclass now has to supply a `variant_tag`.
+- **BREAKING — config keys name their own unit.** `log_every_n_steps` appeared twice in
+  every template with two different meanings: the trainer's metric-flush cadence, and a
+  diagnostic callback's sampling cadence. This project's own are now `every_n_batches`
+  (`GradNormLogger`, `WeightHistogramLogger`) and `every_n_val_runs`
+  (`BenchmarkImageLogger`). That follows Lightning's convention rather than breaking it —
+  its callbacks already name the unit — and copying a *trainer* argument name onto a
+  *callback* was the deviation. Lightning's own names cannot change, so the residual
+  asymmetry stays: `max_steps` and `every_n_train_steps` count optimizer steps and
+  everything else counts batches, and a run now prints the conversion at start against its
+  own numbers instead of relying on a warning comment nobody reads.
+- **`example_input_shape` is optional.** It was hand-written under two different rules and
+  then validated against the very tensor those rules describe; a value the code can check
+  is a value the code can supply. An explicit value still wins and is still checked, so a
+  config can state an intent and be told it is wrong. The templates keep an explicit one
+  because they are also the input to `sisr export`, which never sees training data and has
+  nothing to derive from.
 - **Type checking is a required status check**, and the package ships a `py.typed`
   marker, so the annotations are a checked promise to downstream users rather than an
   internal convention. The modules exempted from it are now named one by one instead
@@ -84,6 +129,10 @@ notice.
 
 ### Fixed
 
+- **An SRCNN artifact recorded no scale**, so a published file could not say what it
+  upscales. SRCNN takes an already-upsampled input, so its scale lives on the dataset
+  rather than the model, and the metadata builder had nowhere to read it from. Writing an
+  artifact that cannot state its own scale is now refused rather than written silently.
 - **`--ckpt_path` could not reload any checkpoint this project had ever saved.**
 - **`--ckpt_path` rebuilt an architecture's `eval_config` as the base class**, so every
   default the subclass had overridden reverted on reload — a resumed SRResNet run could
