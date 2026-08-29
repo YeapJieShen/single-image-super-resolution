@@ -234,6 +234,89 @@ The template also records a host-RAM OOM in the validation dataloader workers, h
 first validation rather than at step 0; read the comment beside its
 `val_dataloader_kwargs` before choosing worker counts.
 
+## Reproduction results
+
+Both architectures are scored against the source paper's own tables, under the source
+paper's own metric convention. **One reproduces and one does not**, and both are published
+here — a table that shows only the win is not evidence of anything.
+
+### SRResNet reproduces Ledig et al.
+
+Ledig et al., ["Photo-Realistic Single Image Super-Resolution Using a Generative Adversarial
+Network"](https://arxiv.org/abs/1609.04802), Table 2, SRResNet row, ×4. Ours is trained on
+DIV2K-800; theirs on 350k ImageNet images. Same 1e6 iterations, same 1e-4 learning rate.
+
+| Set | PSNR-Y | paper | Δ | SSIM-Y (daala) | paper | Δ |
+|---|---|---|---|---|---|---|
+| Set5 | **32.0571** | 32.05 | **+0.007** | **0.9002** | 0.9019 | **−0.0017** |
+| Set14 | **28.4899** | 28.49 | **−0.000** | **0.8167** | 0.8184 | **−0.0017** |
+| BSD100 | **27.5142** | 27.58 | −0.066 | **0.7588** | 0.7620 | **−0.0032** |
+
+**Read the SSIM column as daala**, the convention Ledig et al. used — see
+[Comparability](#comparability) for why that is not interchangeable with the Wang
+convention most later papers report. Under Wang the same weights score 0.8916 / 0.7799 /
+0.7346, which is a different measurement of the same model and **not** comparable to the
+table above.
+
+The residual is small *and uniform* (−0.0017 / −0.0017 / −0.0032) rather than varying
+several-fold, which is what a dataset-size offset looks like and what a convention mismatch
+does not. Correcting PSNR by a training-free bicubic control — scoring plain bicubic
+upsampling through this stack and comparing to the paper's own bicubic row — leaves
++0.008 / −0.098 / −0.081 dB. The honest summary is **within ~0.1 dB of the paper, on 800
+images against their 350k**.
+
+### SRGAN-VGG54 does not, and the cause is isolated
+
+Same paper, Table 2, SRGAN-VGG54 row. This run completed the paper's stated schedule
+(2×10⁵ update iterations) with every documented hyperparameter matched.
+
+| Set | PSNR-Y | paper | Δ | SSIM-Y (daala) | paper | Δ |
+|---|---|---|---|---|---|---|
+| Set5 | 25.654 | 29.40 | **−3.75** | 0.7850 | 0.8472 | **−0.0622** |
+| Set14 | 23.797 | 26.02 | **−2.22** | 0.6657 | 0.7397 | **−0.0740** |
+| BSD100 | 23.065 | 25.16 | **−2.10** | 0.5910 | 0.6688 | **−0.0778** |
+
+**The adversarial pipeline itself is sound.** A single-variable ablation — the same run with
+`torch.nn.MSELoss` as the content loss and everything else identical — replicates the
+paper's SRGAN-MSE row (Table 1, Set5/Set14 only):
+
+| | ours | paper | Δ |
+|---|---|---|---|
+| SRGAN-MSE, Set5 | 30.460 / 0.8603 | 30.64 / 0.8701 | −0.18 dB / −0.0098 |
+| SRGAN-MSE, Set14 | 27.571 / 0.7791 | 26.92 / 0.7611 | **+0.65 dB / +0.0180** |
+
+So `SRGANLightning`, `SRDiscriminator`, `AdversarialLoss` and the manual-optimization step
+order are exercised end to end and land on the paper. The defect is isolated to the
+**VGG54 content-loss configuration**.
+
+**The mechanism is a scale-matching constant that does not hold on this data.** The paper
+rescales VGG feature maps by 1/12.75 with a stated purpose: *"to obtain VGG losses of a
+scale that is comparable to the MSE loss"*. The implementation here is faithful to that
+description, but measured on DIV2K-800 the VGG54 content term comes out **5.55× smaller**
+than the MSE content term — so the same `adversarial_weight` buys a ~5.5× stronger
+adversarial pull, and the paper's stated comparability is not achieved. Tracked in **#120**;
+the corrective run has not been made, so no fixed number is claimed here.
+
+### SRCNN has no publishable row
+
+SRCNN is fully wired and trains, but every SRCNN run in this project predates the
+MATLAB-`imresize` switch, all three metric-convention fixes, and a correction to the paper's
+weight-init standard deviation. Those numbers are not comparable to anything, including to
+each other, so none are published. A comparable SRCNN row needs a fresh run.
+
+### What these were computed against
+
+- **Weights**: the reference SRResNet run at step 1,000,000 (converged; plateau from ~500k)
+  and the adversarial runs at 200,000 batches. Rescored through the `test` path rather than
+  read from training logs, with PSNR reproducing to ~1e-4 dB as the control that the
+  rescoring path agrees with the training path.
+- **Training data**: DIV2K-800 HR, LR derived at load by the vendored MATLAB `imresize`.
+- **Benchmark data**: the EDSR authors' benchmark distribution — the exact archive, its
+  SHA-256 and this project's Set14 variant are pinned under [Comparability](#comparability).
+- **Metrics**: Y-channel, BT.601 studio range, output clamped to `[0, 1]`, per-image PSNR
+  averaged over the set (not pooled-MSE). All four choices are consequential and all four
+  are justified under [Comparability](#comparability).
+
 ## Comparability
 
 Benchmark numbers only mean something if the inputs and the metrics match the papers', so
@@ -314,7 +397,20 @@ both are pinned:
   full-range YIQ (`color_space='yiq'`) — not the studio-range BT.601 YCbCr that MATLAB's
   own `rgb2ycbcr.m` and this project's Y-channel figures use. To reproduce this project's
   Y-channel PSNR/SSIM using `pyiqa`, pass `color_space='ycbcr'` explicitly; the library's
-  own default will not match.
+  own default will not match. Which of this project's figures are checkable with it:
+
+  | this project's figure | `pyiqa` equivalent | matches out of the box? |
+  |---|---|---|
+  | `psnr/*/RGB` | `psnr`, default arguments | yes |
+  | `psnr/*/Y` | `psnr` with `test_y_channel=True`, `color_space='ycbcr'` | **no** — defaults to full RGB |
+  | `ssim/*/Y` at `ssim_impl: 'wang'` | `ssim` with `color_space='ycbcr'` | **no** — defaults to full-range YIQ |
+  | `ssim/*/Y` at `ssim_impl: 'daala'` | *none* | **not reproducible** — no fixed-window SSIM implements daala's height-scaled sigma |
+  | `lpips/*` | `lpips` with the matching backbone | only if the backbone matches; see above |
+  | `dists/*` | `dists`, default arguments | yes |
+
+  **The daala row is the one that matters most**, because it is the convention every
+  SRResNet figure in this project is reported under. A `pyiqa` SSIM cannot check those
+  numbers, only the `'wang'` ones.
 
 ## Config overrides and subclass defaults
 
