@@ -138,7 +138,6 @@ module = [
     "sisr.training.callbacks",
     "sisr.training.gan_module",
     "sisr.training.lightning_module",
-    "sisr.cli",
 ]
 ignore_errors = true
 
