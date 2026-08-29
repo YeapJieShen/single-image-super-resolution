@@ -136,7 +136,6 @@ check_untyped_defs = true
 # Lightning's hook system and jsonargparse's subclass resolution fight a checker.
 module = [
     "sisr.training.callbacks",
-    "sisr.training.datamodule",
     "sisr.training.gan_module",
     "sisr.training.lightning_module",
     "sisr.cli",
