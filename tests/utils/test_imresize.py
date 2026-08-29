@@ -53,9 +53,11 @@ under::
     data/reference/Set14/Bicubic_up/{X2,X3,X4}
     data/reference/B100/Bicubic_up/{X2,X3,X4}
 
-**Current limitation:** only the downscale leg has byte-equality evidence
-as of this writing -- the upscale test below stays dormant (skipped) until
-the ``Bicubic_up`` data above is generated and dropped in place.
+Both legs now have byte-equality evidence -- the ``Bicubic_up`` data above was
+generated and is in place, so the upscale test below runs rather than skipping.
+It stays a conditional skip so a contributor without the archive still gets a
+green suite; **a skip here means the leg was not exercised, never that it
+passed**, so check the skip count, not just the exit code.
 
 Both byte-equality tests skip cleanly (not an error, not a silent no-op)
 when their respective reference data is absent, so CI stays hermetic and
