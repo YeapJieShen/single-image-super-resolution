@@ -713,7 +713,7 @@ def test_sr_weights_checkpoint_setup_accepts_a_present_component(tmp_path: Path)
 def test_sr_weights_checkpoint_save_checkpoint_is_actually_overridden():
     """Cheap static guard: the override must exist as a distinct method, not
     silently inherit ModelCheckpoint's (which would write full, optimizer-bearing
-    checkpoints under the .pt extension). The real, functional guard against a
+    checkpoints under the .safetensors extension). The real, functional guard against a
     Lightning release routing saves through a different private method entirely
     is test_sr_weights_checkpoint_writes_bare_payload_via_real_fit below, which
     exercises the actual save path end-to-end."""
@@ -1029,7 +1029,7 @@ def test_srcheckpoint_rolling_filename_has_no_metric_placeholder(tmp_path: Path)
 
 @_ignore_gpu_warning
 def test_sr_weights_checkpoint_rolling_mode_keeps_only_the_last_n(tmp_path):
-    """SRWeightsCheckpoint's own _save_checkpoint override (bare .pt weights)
+    """SRWeightsCheckpoint's own _save_checkpoint override (bare .safetensors weights)
     must still compose with rolling deletion — it doesn't inherit
     ModelCheckpoint's save path the way SRCheckpoint does, so this is the
     place a mixin-only implementation would silently do nothing."""

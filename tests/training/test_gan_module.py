@@ -80,7 +80,7 @@ def build_source_module():
     """The realistic ``init_from`` source: a plain, MSE-trained SRResNet run.
 
     Its generator and processor match :func:`build_gan_module`'s exactly, so a
-    ``.pt`` written from it is the one artifact ``init_from`` must accept.
+    ``.safetensors`` written from it is the one artifact ``init_from`` must accept.
     """
     return SRLightning(
         model=SRResNet(scale=4, num_residual_blocks=1),
@@ -90,7 +90,7 @@ def build_source_module():
 
 
 def write_weights(tmp_path, **meta_overrides):
-    """A generator-weights ``.pt`` whose meta can be corrupted one field at a time.
+    """A generator-weights ``.safetensors`` whose meta can be corrupted one field at a time.
 
     Written with the same :func:`~sisr.training.metadata.build_metadata` that
     ``SRWeightsCheckpoint`` uses, so what is exercised is the real payload shape.
@@ -926,7 +926,7 @@ def test_the_bare_weights_sink_stays_component_scoped(tmp_path):
 
     ``SRWeightsCheckpoint`` writes one network's weights and describes exactly
     that network; adding this run's whole adversarial setup to a discriminator's
-    (or a generator's) ``.pt`` would describe things the file does not contain.
+    (or a generator's) artifact would describe things the file does not contain.
     Both sinks are checked — the template runs one of each side by side, and the
     generator's is the distributable artifact ``init_from`` consumes.
 

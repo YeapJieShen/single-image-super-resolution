@@ -454,7 +454,7 @@ class SRGANLightning(SRLightning):
 
         The base builds ``sisr_meta`` around ``module.model`` — still correct,
         since the generator is the distributable artifact. These blocks are
-        added only to the ``.ckpt``: the bare ``.pt`` written by
+        added only to the ``.ckpt``: the bare ``.safetensors`` written by
         :class:`~sisr.training.callbacks.SRWeightsCheckpoint` holds one
         network's weights and gets metadata describing *that* network, not this
         run's whole adversarial setup.

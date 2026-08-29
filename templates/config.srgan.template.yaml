@@ -58,7 +58,7 @@ model:
       training_config:
         class_path: sisr.models.srgan.SRGANTrainingConfig
         init_args:
-          # Bare weights (.pt), never the sibling .ckpt. Mismatches are refused.
+          # Bare weights (.safetensors), never the sibling .ckpt. Mismatches are refused.
           example_input_shape: [3, 24, 24]
           init_from: "experiments/SRResNet/golden/checkpoints/SRResNet_x4_RGB_16B64F_s1000000.safetensors"
           # adversarial_weight 1.0e-3 and d_steps_per_g_step 1 are the defaults.

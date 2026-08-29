@@ -624,7 +624,7 @@ class _RollingSaveMixin:
     across both. The window bookkeeping itself lives in
     :meth:`_enforce_rolling_window`, a seam distinct from ``_save_checkpoint``:
     :class:`SRWeightsCheckpoint` already overrides ``_save_checkpoint`` to
-    write a bare ``.pt`` payload instead of Lightning's full checkpoint, and
+    write a bare ``.safetensors`` payload instead of Lightning's full checkpoint, and
     that override does not call ``super()._save_checkpoint()`` — so a version
     of this mixin that put the bookkeeping inside its own ``_save_checkpoint``
     would be shadowed by that override and silently never run. Each
@@ -945,11 +945,11 @@ class SRCheckpoint(_SRCheckpointBase):
 
 
 class SRWeightsCheckpoint(_SRCheckpointBase):
-    """Model checkpoint that saves bare, optimizer-free weights as ``.pt`` files.
+    """Model checkpoint that saves bare, optimizer-free weights as ``.safetensors``.
 
     A distributable sibling to :class:`SRCheckpoint`: that class produces resumable
     ``.ckpt`` files (full training state — optimizer moments, LR scheduler, callback
-    state); this one produces ``.pt`` files containing only
+    state); this one produces ``.safetensors`` files containing only
     ``getattr(pl_module, attribute).state_dict()`` plus a matching provenance dict.
     By default ``attribute='model'`` — the bare :class:`~sisr.models.base.SRModel` (so
     keys carry no ``model.`` wrapper prefix), described by
@@ -969,7 +969,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
     ``test_sr_weights_checkpoint_writes_bare_payload_via_real_fit`` guards against a
     future Lightning release routing saves through a different method: that test fails
     loudly rather than silently letting saves fall back to full, optimizer-bearing
-    checkpoints under a misleadingly bare ``.pt`` extension.
+    checkpoints under a misleadingly bare ``.safetensors`` extension.
 
     ``FILE_EXTENSION`` (public) and a distinct default ``filename_prefix`` keep this
     callback's top-k deletion pass — and, in rolling mode, its own oldest-first deletion
@@ -1122,7 +1122,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
         ``'model'`` (the default) uses :func:`~sisr.training.metadata.build_metadata`,
         which describes the generator; anything else uses
         :func:`~sisr.training.metadata.build_component_metadata`, so a discriminator's
-        ``.pt`` never carries metadata describing a network it does not contain.
+        artifact never carries metadata describing a network it does not contain.
 
         Rolling-mode deletion (:meth:`_RollingSaveMixin._enforce_rolling_window`) runs
         last, after this method's own writes — it does not go through ``super()``
@@ -1134,7 +1134,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
             trainer: The active trainer — supplies ``lightning_module`` (for the
                 component's ``state_dict()`` and metadata) and ``global_step``/``current_epoch``.
             filepath: Destination path, already formatted by ``ModelCheckpoint``
-                (``.pt`` via ``FILE_EXTENSION``).
+                (``.safetensors`` via ``FILE_EXTENSION``).
         """
         pl_module = trainer.lightning_module
         component = getattr(pl_module, self.attribute)
