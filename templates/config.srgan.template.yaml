@@ -60,7 +60,11 @@ model:
         init_args:
           # Bare weights (.safetensors), never the sibling .ckpt. Mismatches are refused.
           example_input_shape: [3, 24, 24]
-          init_from: "experiments/SRResNet/golden/checkpoints/SRResNet_x4_RGB_16B64F_s1000000.safetensors"
+          # NOTE: s999999, not s1000000, for a 1e6-step run. The step in an artifact
+          # filename is the metric axis -- the index of the step just completed --
+          # while max_steps counts completed steps, so the two differ by exactly one.
+          # Naming the round number points at a file no run can produce.
+          init_from: "experiments/SRResNet/golden/checkpoints/SRResNet_x4_RGB_16B64F_s999999.safetensors"
           # adversarial_weight 1.0e-3 and d_steps_per_g_step 1 are the defaults.
       # Defaults add lpips + dists; 'lpips' needs the [perceptual] extra.
       eval_config:
