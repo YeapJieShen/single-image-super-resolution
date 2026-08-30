@@ -45,6 +45,25 @@ def test_save_and_load_round_trip_tensors_and_provenance(tmp_path):
     assert torch.equal(loaded["b"], tensors["b"])
 
 
+def test_save_creates_the_directory_it_is_given(tmp_path):
+    """The caller owns the filename; this module owns the directory.
+
+    Lightning creates a checkpoint's directory inside its own IO plugin, and
+    SRWeightsCheckpoint._save_checkpoint deliberately bypasses that path to write a
+    different payload — so nothing created this one. It worked only while a sibling
+    SRCheckpoint happened to run first and make the directory, which made a weights-only
+    configuration fail on its very first save.
+    """
+    path = tmp_path / "run" / "checkpoints" / f"m{artifacts.SUFFIX}"
+    assert not path.parent.exists()
+
+    artifacts.save(path, {"a": torch.ones(2)}, _META)
+
+    loaded, meta = artifacts.load(path)
+    assert meta == _META
+    assert torch.equal(loaded["a"], torch.ones(2))
+
+
 def test_save_accepts_a_non_contiguous_tensor(tmp_path):
     """A state_dict may hand back views, which safetensors refuses outright."""
     view = torch.randn(4, 4).t()

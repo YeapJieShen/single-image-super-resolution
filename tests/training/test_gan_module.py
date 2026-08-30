@@ -493,6 +493,50 @@ def test_training_keeps_updating_across_a_validation_boundary():
 # ---------------------------------------------------------------------------
 
 
+def plateau():
+    return lambda opt: torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
+
+
+@pytest.mark.parametrize("which", ["lr_scheduler", "discriminator_lr_scheduler"])
+def test_a_plateau_scheduler_is_refused_where_it_cannot_be_stepped(which):
+    """ReduceLROnPlateau.step() takes a metric; this module steps by hand with none.
+
+    Manual optimization opts out of Lightning's `monitor` plumbing, so a plateau
+    scheduler configured here does not fail at setup -- it fails on the first
+    on_train_batch_end, part-way into a run, with a bare TypeError about a missing
+    positional argument. Refusing it at configure_optimizers turns a mid-run crash
+    into a startup error that says what to use instead.
+    """
+    module = build_gan_module(**{which: plateau()})
+
+    with pytest.raises(ValueError, match="ReduceLROnPlateau is not supported"):
+        module.configure_optimizers()
+
+
+def test_a_plateau_scheduler_reaching_the_step_hook_is_refused_too():
+    """The refusal above lives in configure_optimizers, which a subclass may replace.
+
+    _time_schedulers is what actually steps them, so it re-checks rather than
+    trusting a guarantee it does not own.
+    """
+    module = build_gan_module()
+    opt = torch.optim.SGD(module.model.parameters(), lr=0.1)
+    module.lr_schedulers = lambda: torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
+
+    with pytest.raises(RuntimeError, match="needs a monitored metric"):
+        module._time_schedulers()
+
+
+def test_optimizers_are_unpacked_by_a_checked_pair_not_positionally():
+    """training_step unpacks two optimizers positionally, which is silent if a
+    subclass's configure_optimizers returns a different shape."""
+    module = build_gan_module()
+    module.optimizers = lambda: torch.optim.SGD(module.model.parameters(), lr=0.1)
+
+    with pytest.raises(RuntimeError, match="exactly two optimizers"):
+        module._paired_optimizers()
+
+
 @_ignore_cpu_fit_warnings
 def test_a_single_lr_scheduler_steps_once_per_batch():
     """With exactly one scheduler configured, LightningModule.lr_schedulers()

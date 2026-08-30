@@ -83,10 +83,16 @@ def save(path: str | PathLike, tensors: dict[str, torch.Tensor], meta: dict[str,
     """Write one component's weights plus its provenance.
 
     Args:
-        path: Destination. The caller owns the filename.
+        path: Destination. The caller owns the filename; this owns the directory.
         tensors: A component's ``state_dict()``.
         meta: Provenance to carry in the header.
     """
+    # Lightning creates a checkpoint's directory inside its own IO plugin, and
+    # SRWeightsCheckpoint._save_checkpoint deliberately bypasses that path to write a
+    # different payload -- so nothing was creating this one. It worked only while a sibling
+    # SRCheckpoint happened to run first and make the directory; a weights-only
+    # configuration failed on its first save.
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     # safetensors stores raw buffers and so refuses a view; a state_dict is free
     # to hand back non-contiguous tensors.
     save_file(

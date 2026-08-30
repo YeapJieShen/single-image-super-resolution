@@ -85,6 +85,29 @@ def _accepted_init_args(class_path: str) -> list[str] | None:
     )
 
 
+def _require(ds: Dataset | None, which: str, stage: str) -> Dataset:
+    """Narrow a lazily-instantiated dataset, naming what should have created it.
+
+    Args:
+        ds: The dataset attribute, ``None`` until ``setup`` has run.
+        which: Loader name, used to build the error message.
+        stage: The ``setup`` stage that instantiates this dataset.
+
+    Returns:
+        ``ds``, narrowed to non-optional.
+
+    Raises:
+        RuntimeError: If ``setup`` has not instantiated it yet.
+    """
+    if ds is None:
+        raise RuntimeError(
+            f"SRDataModule.{which}_dataloader() called before setup({stage!r}) "
+            f"instantiated the {which} dataset. Lightning calls setup() itself; a "
+            "direct caller has to."
+        )
+    return ds
+
+
 def _instantiate_spec(field_name: str, spec: dict[str, Any]) -> Any:
     """Materialises a dataset spec, naming the field when an init_arg is wrong.
 
@@ -278,11 +301,15 @@ class SRDataModule(lightning.LightningDataModule):
         Returns:
             DataLoader over the train spec: shuffled, and split per process when
             a process group is running.
+
+        Raises:
+            RuntimeError: If ``setup('fit')`` has not run.
         """
+        train_ds = _require(self._train_ds, "train", "fit")
         if dist.is_available() and dist.is_initialized():
-            sampler = DistributedSampler(self._train_ds, shuffle=True)
-            return DataLoader(self._train_ds, sampler=sampler, **self._train_dl_kwargs)
-        return DataLoader(self._train_ds, shuffle=True, **self._train_dl_kwargs)
+            sampler: DistributedSampler[Any] = DistributedSampler(train_ds, shuffle=True)
+            return DataLoader(train_ds, sampler=sampler, **self._train_dl_kwargs)
+        return DataLoader(train_ds, shuffle=True, **self._train_dl_kwargs)
 
     def val_dataloader(self) -> list[DataLoader]:
         """Primary validation loader followed by every test loader.
@@ -294,8 +321,12 @@ class SRDataModule(lightning.LightningDataModule):
         Returns:
             List ``[primary_val_loader, test_loader_1, test_loader_2,
             ...]``. Length is ``1 + len(test_names)``.
+
+        Raises:
+            RuntimeError: If ``setup('fit')`` has not run.
         """
-        loaders = [DataLoader(self._val_ds, shuffle=False, **self._val_dl_kwargs)]
+        val_ds = _require(self._val_ds, "val", "fit")
+        loaders = [DataLoader(val_ds, shuffle=False, **self._val_dl_kwargs)]
         for ds in self._test_ds.values():
             loaders.append(DataLoader(ds, shuffle=False, **self._test_dl_kwargs))
         return loaders

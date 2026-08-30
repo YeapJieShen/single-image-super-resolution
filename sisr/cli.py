@@ -161,7 +161,9 @@ class SRLightningCLI(LightningCLI):
     ``Trainer`` subclass), as long as it also provides ``export``.
     """
 
-    def __init__(self, *args, trainer_class: type[Trainer] = _ExportTrainer, **kwargs):
+    def __init__(
+        self, *args: Any, trainer_class: type[Trainer] = _ExportTrainer, **kwargs: Any
+    ) -> None:
         # LightningCLI resolves a parser for *every* registered subcommand during
         # __init__, so a trainer_class without `export` fails as a bare AttributeError
         # from inside Lightning. Say what is actually wrong instead.
@@ -182,7 +184,11 @@ class SRLightningCLI(LightningCLI):
         # disabling the selector by name instead would change parsing for every
         # dataclass-typed field in Lightning and jsonargparse too.
         set_parsing_settings(subclasses_enabled=[SREvalConfig, SRTrainingConfig])
-        super().__init__(*args, trainer_class=trainer_class, **kwargs)
+        # mypy cannot rule out a positional *args long enough to reach the parent's own
+        # trainer_class parameter. No caller does that -- every one of ours passes model
+        # and datamodule classes by keyword -- and narrowing *args to forbid it would mean
+        # restating LightningCLI's whole signature here.
+        super().__init__(*args, trainer_class=trainer_class, **kwargs)  # type: ignore[misc]
 
     def parse_arguments(self, parser: LightningArgumentParser, args: ArgsType) -> None:
         """Parse CLI arguments, turning a known jsonargparse crash into an actionable error.
@@ -231,7 +237,7 @@ class SRLightningCLI(LightningCLI):
                 "in your YAML config instead of overriding an existing one from the CLI."
             ) from e
 
-    def add_arguments_to_parser(self, parser):
+    def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
         Subclass mode (``subclass_mode_model=True``) means the module's init args
@@ -253,7 +259,7 @@ class SRLightningCLI(LightningCLI):
             ),
         )
 
-    def before_instantiate_classes(self):
+    def before_instantiate_classes(self) -> None:
         """Apply process-global flags (``matmul_precision``) before class instantiation."""
         if self.subcommand is None:
             return

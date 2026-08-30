@@ -9,7 +9,7 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 
 import dataclasses
-from typing import Any
+from typing import Any, Literal, overload
 
 import lightning
 import torch
@@ -59,6 +59,13 @@ class SRLightning(lightning.LightningModule):
         TypeError: If ``model`` is not an :class:`SRModel` subclass, or
             if ``processor`` is not an :class:`SRProcessor` subclass.
     """
+
+    model: SRModel
+    processor: SRProcessor
+    criterion: torch.nn.Module
+    # Not a registered submodule -- object.__setattr__ in __init__ deliberately bypasses
+    # nn.Module's registration, so this declaration is the only type it has.
+    _compiled: torch.nn.Module | None
 
     def __init__(
         self,
@@ -214,7 +221,9 @@ class SRLightning(lightning.LightningModule):
                 ``training_config.example_input_shape``'s spatial dims don't
                 match the real train LR sample.
         """
-        dm = self._trainer.datamodule if self._trainer is not None else None
+        # Lightning assigns `datamodule` dynamically -- the data connector's __init__
+        # sets it to None -- so it is not on Trainer's class surface.
+        dm = getattr(self._trainer, "datamodule", None) if self._trainer is not None else None
         if dm is None:
             return
 
@@ -227,10 +236,11 @@ class SRLightning(lightning.LightningModule):
             train = probe.train_lr()
             if train is not None:
                 train_dataset, train_lr = train
-                if self.training_config.example_input_shape is None:
+                expected = self.training_config.example_input_shape
+                if expected is None:
                     self._adopt_example_input_shape(train_lr)
                 else:
-                    self._check_example_input_shape(train_lr, train_dataset)
+                    self._check_example_input_shape(expected, train_lr, train_dataset)
 
     def _check_input_contract(
         self, lr: torch.Tensor, hr: torch.Tensor, source: str, dataset: Any
@@ -330,10 +340,15 @@ class SRLightning(lightning.LightningModule):
         # warm-up reads training_config directly.
         self.example_input_array = torch.zeros(1, *shape)
 
-    def _check_example_input_shape(self, lr: torch.Tensor, train_dataset: Any) -> None:
+    def _check_example_input_shape(
+        self, expected: tuple[int, ...], lr: torch.Tensor, train_dataset: Any
+    ) -> None:
         """Raise if ``example_input_shape``'s H/W disagrees with the real train LR patch.
 
         Args:
+            expected: The configured ``example_input_shape``. Passed in by the
+                caller that already branched on it being set, rather than re-read
+                here, so it is a shape and not a maybe-shape.
             lr: Real LR sample from the train dataset, shape ``(C, H, W)``.
             train_dataset: The train dataset instance, for its class name in
                 the error.
@@ -341,7 +356,7 @@ class SRLightning(lightning.LightningModule):
         Raises:
             ValueError: If ``example_input_shape[1:] != lr.shape[-2:]``.
         """
-        expected_hw = tuple(self.training_config.example_input_shape[1:])
+        expected_hw = tuple(expected[1:])
         actual_hw = tuple(lr.shape[-2:])
         if expected_hw == actual_hw:
             return
@@ -360,9 +375,9 @@ class SRLightning(lightning.LightningModule):
         None values are dropped (they add noise without aiding comparison).
         Class objects are reduced to their ``__name__``.
         """
-        result = {}
+        result: dict[str, int | float | str] = {}
 
-        def _recurse(obj, prefix: str) -> None:
+        def _recurse(obj: Any, prefix: str) -> None:
             if obj is None:
                 return
             if isinstance(obj, type):
@@ -409,6 +424,25 @@ class SRLightning(lightning.LightningModule):
             :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
         """
         return self.model(x)
+
+    # `need_sr_rgb` decides whether sr_rgb exists at all, so the Optional in the
+    # implementation signature is a fact about the ARGUMENT, not about the result.
+    # Overloading on the literal states that, which is what lets validation, scoring
+    # and predict_step use the value without each re-proving it is not None.
+    @overload
+    def _forward_lr(
+        self, lr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    @overload
+    def _forward_lr(
+        self, lr_img: torch.Tensor, need_sr_rgb: Literal[False]
+    ) -> tuple[torch.Tensor, None]: ...
+
+    @overload
+    def _forward_lr(
+        self, lr_img: torch.Tensor, need_sr_rgb: bool
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
     def _forward_lr(
         self, lr_img: torch.Tensor, need_sr_rgb: bool = True
@@ -461,6 +495,21 @@ class SRLightning(lightning.LightningModule):
         # the bound would depend on training colorspace again.
         sr_rgb = sr_rgb.clamp(0.0, 1.0)
         return sr_model_out, sr_rgb
+
+    @overload
+    def _forward_sr(
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    @overload
+    def _forward_sr(
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[False]
+    ) -> tuple[torch.Tensor, None, torch.Tensor]: ...
+
+    @overload
+    def _forward_sr(
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
 
     def _forward_sr(
         self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool = True
@@ -537,6 +586,16 @@ class SRLightning(lightning.LightningModule):
         """
         _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
         return sr_rgb, hr_cropped
+
+    @overload
+    def _step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], need_sr_rgb: Literal[True] = True
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    @overload
+    def _step(
+        self, batch: tuple[torch.Tensor, torch.Tensor], need_sr_rgb: Literal[False]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, torch.Tensor]: ...
 
     def _step(
         self, batch: tuple[torch.Tensor, torch.Tensor], need_sr_rgb: bool = True

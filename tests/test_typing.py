@@ -15,11 +15,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 #: resolution) makes them fight a type checker rather than benefit from one.
 #: Narrowing this list is the point; widening it needs a reason in the diff.
 EXPECTED_IGNORED = {
-    "sisr.cli",
     "sisr.training.callbacks",
-    "sisr.training.datamodule",
-    "sisr.training.gan_module",
-    "sisr.training.lightning_module",
 }
 
 
