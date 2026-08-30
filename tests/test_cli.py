@@ -34,7 +34,7 @@ def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
     a ``null`` CLI value for a ``str | None`` field to the *string* ``'None'``,
     which is exactly the silent-wrong-value class these two settings guard.
 
-    ``init_from`` points at a golden ``.pt`` under the gitignored ``experiments/``
+    ``init_from`` points at a golden ``.safetensors`` under the gitignored ``experiments/``
     tree — present on a training box, absent in CI and in every worktree.
     ``criterion.weights`` would otherwise download ~548 MB of VGG19 weights just
     to resolve a config; ``null`` builds a random VGG (and warns).
@@ -334,7 +334,7 @@ def test_srgan_template_ships_the_papers_full_two_phase_schedule():
 def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
     """Instantiating the model is what every subcommand does — ``validate``/``test``/
     ``export --ckpt_path`` included — so reading ``init_from`` at construction made
-    all of them depend on the gitignored golden ``.pt``. This resolves the shipped
+    all of them depend on the gitignored golden ``.safetensors``. This resolves the shipped
     template with ``init_from`` pointed at a file that does not exist: it must build,
     because nothing here is fitting.
     """
@@ -345,7 +345,7 @@ def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
                 "model": {
                     "init_args": {
                         "training_config": {
-                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                            "init_args": {"init_from": str(tmp_path / "absent.safetensors")}
                         },
                         "criterion": {
                             "class_path": "sisr.losses.VGG19FeatureLoss",
@@ -361,7 +361,7 @@ def test_srgan_template_resolves_without_the_init_from_artifact(tmp_path: Path):
 
     cli = _resolve("--config", str(SRGAN_TEMPLATE), "--config", str(overlay))
 
-    assert cli.model.training_config.init_from == str(tmp_path / "absent.pt")
+    assert cli.model.training_config.init_from == str(tmp_path / "absent.safetensors")
 
 
 def test_srgan_template_ships_a_real_init_from_path():
@@ -414,7 +414,7 @@ def test_dotted_override_keeps_the_config_subclass(tmp_path: Path):
                 "model": {
                     "init_args": {
                         "training_config": {
-                            "init_args": {"init_from": str(tmp_path / "absent.pt")}
+                            "init_args": {"init_from": str(tmp_path / "absent.safetensors")}
                         },
                         "criterion": {
                             "class_path": "sisr.losses.VGG19FeatureLoss",
@@ -434,7 +434,7 @@ def test_dotted_override_keeps_the_config_subclass(tmp_path: Path):
     assert kept.training_config.adversarial_weight == pytest.approx(0.5)
     # Both are absent from the base class or default differently there, so their
     # survival is what says no rebuild happened.
-    assert kept.training_config.init_from == str(tmp_path / "absent.pt")
+    assert kept.training_config.init_from == str(tmp_path / "absent.safetensors")
     assert kept.training_config.example_input_shape == (3, 24, 24)
 
     kept_eval = _resolve(*args, "--model.init_args.eval_config.crop_border=0").model
