@@ -137,7 +137,6 @@ check_untyped_defs = true
 module = [
     "sisr.training.callbacks",
     "sisr.training.gan_module",
-    "sisr.training.lightning_module",
 ]
 ignore_errors = true
 
