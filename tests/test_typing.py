@@ -17,7 +17,6 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 EXPECTED_IGNORED = {
     "sisr.cli",
     "sisr.training.callbacks",
-    "sisr.training.datamodule",
     "sisr.training.gan_module",
     "sisr.training.lightning_module",
 }
