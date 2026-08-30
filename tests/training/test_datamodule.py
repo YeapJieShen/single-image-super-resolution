@@ -279,6 +279,23 @@ def test_predict_dataloader_default_kwargs(tiny_rgb_image_dir: Path):
     assert dm._predict_dl_kwargs == {"batch_size": 1, "num_workers": 0}
 
 
+@pytest.mark.parametrize("loader", ["train", "val"])
+def test_dataloader_before_setup_names_the_stage_that_was_missed(
+    tiny_rgb_image_dir: Path, loader: str
+):
+    """Loader called before setup() -> a RuntimeError naming setup, not a NoneType crash.
+
+    Lightning calls setup() itself, so this only fires for a direct caller — a test,
+    a notebook, or a script driving the module by hand. Before the guard the call
+    **did not raise at all**: DataLoader wraps ``None`` without complaint because its
+    sampler only takes ``len()`` on iteration, so the failure surfaced later and
+    somewhere else, naming neither the module nor the call that was skipped.
+    """
+    dm = _make_dm(tiny_rgb_image_dir)
+    with pytest.raises(RuntimeError, match=r"setup\('fit'\)"):
+        getattr(dm, f"{loader}_dataloader")()
+
+
 def test_predict_dataloader_without_predict_dataset_raises(tiny_rgb_image_dir: Path):
     """No predict_dataset configured -> a clear RuntimeError, not a silent None loader."""
     dm = _make_dm(tiny_rgb_image_dir)
