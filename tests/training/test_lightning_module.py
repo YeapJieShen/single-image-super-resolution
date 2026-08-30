@@ -1192,6 +1192,86 @@ def test_compile_backend_off_uses_eager_model_regardless_of_training_flag():
     torch.testing.assert_close(out_train, out_eval)
 
 
+# ---------------------------------------------------------------------------
+# compile_mode -- the inductor mode a YAML run could not previously select
+# ---------------------------------------------------------------------------
+
+
+def test_compile_mode_reaches_torch_compile(monkeypatch):
+    """The whole point of the field: a mode set in YAML must arrive at
+    `torch.compile`.
+
+    Every published `reduce-overhead` / `max-autotune` figure described something
+    no config could select, because the call site passed `backend` and nothing
+    else -- so a configured run silently got inductor's default mode.
+    """
+    seen = {}
+
+    def spy(model, **kwargs):
+        # Records rather than compiles: a real inductor compile here would only
+        # add a slow, toolchain-dependent step to a question about argument
+        # passing. That inductor accepts the mode is pinned separately, by
+        # test_compile_mode_unrecognised_by_torch_raises_at_construction.
+        seen.update(kwargs)
+        return model
+
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    monkeypatch.setattr(torch, "compile", spy)
+    SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(
+            compile_backend="inductor", compile_mode="reduce-overhead"
+        ),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert seen["mode"] == "reduce-overhead"
+
+
+def test_compile_mode_defaults_to_none_so_compiled_runs_are_unchanged(monkeypatch):
+    """Adding the field must not renumber any existing compiled run: unset means
+    `mode=None`, which is what `torch.compile` already defaulted to."""
+    seen = {}
+    real_compile = torch.compile
+
+    def spy(model, **kwargs):
+        seen.update(kwargs)
+        return real_compile(model, **kwargs)
+
+    monkeypatch.setattr(torch, "compile", spy)
+    _make_compilable_lit(compile_backend="eager")
+    assert seen["mode"] is None
+
+
+@pytest.mark.parametrize("backend", [None, "cudagraphs", "aot_eager"])
+def test_compile_mode_without_the_inductor_backend_is_refused(backend):
+    """`mode` is an inductor concept. With no backend nothing is compiled and the
+    mode is dead config; with another backend torch forwards `mode` as a keyword
+    to a compiler function that does not take one, which fails on the first
+    compiled call -- a mid-run crash, which is exactly what this project's
+    compile plumbing exists to convert into a startup one.
+    """
+    with pytest.raises(ValueError, match="compile_mode"):
+        SRTrainingConfig(compile_backend=backend, compile_mode="reduce-overhead")
+
+
+def test_compile_mode_unrecognised_by_torch_raises_at_construction():
+    """A typo'd mode must fail at `SRLightning` construction, like a typo'd
+    backend already does -- not 12 hours into a run."""
+    model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding="same")
+    with pytest.raises(RuntimeError, match="mode"):
+        SRLightning(
+            model=model,
+            processor=RGBProcessor(),
+            training_config=SRTrainingConfig(
+                compile_backend="inductor", compile_mode="not_a_real_mode"
+            ),
+            eval_config=SREvalConfig(),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
 def test_on_fit_start_warms_up_compiled_path():
     """on_fit_start must actually invoke the compiled callable once, so a
     missing-toolchain backend fails at fit-start rather than mid-run."""

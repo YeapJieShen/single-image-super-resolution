@@ -58,6 +58,7 @@ def test_sr_training_config_field_names():
         "init_std",
         "scale",
         "compile_backend",
+        "compile_mode",
     }
 
 
