@@ -14,7 +14,7 @@ output to disk as PNGs.
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from weakref import proxy
 
 import lightning
@@ -27,6 +27,32 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from .. import artifacts
 from ..metrics.perceptual import PERCEPTUAL_METRICS
 from .metadata import build_component_metadata, build_metadata
+
+if TYPE_CHECKING:  # `SRLightning` is referenced in annotations only, and a
+    # runtime import would be circular -- it imports this module's package.
+    from .lightning_module import SRLightning
+
+
+def _sr(pl_module: lightning.LightningModule) -> "SRLightning":
+    """Narrow Lightning's hook parameter to the module these callbacks require.
+
+    Every hook here is typed by Lightning as taking a bare ``LightningModule``,
+    while everything they read -- ``eval_config``, ``scorer``, ``predict_rgb``,
+    the provenance builders -- belongs to :class:`SRLightning`. Overriding a hook
+    with a narrower parameter type is unsound and rejected, so the narrowing
+    happens at the boundary instead, once, with a name.
+
+    A cast rather than an ``isinstance`` check on purpose: a module without those
+    attributes already fails at exactly the same call today, and turning that into
+    a different failure is a behaviour change this seam has no business making.
+
+    Args:
+        pl_module: The module Lightning handed the hook.
+
+    Returns:
+        The same object, typed as what it has to be.
+    """
+    return cast("SRLightning", pl_module)
 
 
 class BenchmarkSample(NamedTuple):
@@ -142,7 +168,10 @@ class BenchmarkImageLogger(Callback):
         log_per_image_metrics: bool = False,
     ):
         super().__init__()
-        self.dataset_names = list(dataset_names) if dataset_names else None
+        # [] rather than None for 'not given': an empty list already reached the
+        # same auto-discovery branch in setup(), so the second sentinel bought
+        # nothing but an Optional every reader had to re-narrow.
+        self.dataset_names: list[str] = list(dataset_names) if dataset_names else []
         self.every_n_val_runs = every_n_val_runs
         self.log_per_image_metrics = log_per_image_metrics
 
@@ -165,7 +194,7 @@ class BenchmarkImageLogger(Callback):
         trainer: lightning.Trainer,
         pl_module: lightning.LightningModule,
         stage: str,
-    ):
+    ) -> None:
         """Resolve ``dataset_names``, both dataloader_idx mappings, and the TB experiment.
 
         Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
@@ -176,7 +205,7 @@ class BenchmarkImageLogger(Callback):
             pl_module: Unused.
             stage: Unused — both val and test mappings are built up-front.
         """
-        if self.dataset_names is None:
+        if not self.dataset_names:
             dm = getattr(trainer, "datamodule", None)
             names = getattr(dm, "test_names", None) if dm is not None else None
             self.dataset_names = list(names or [])
@@ -195,7 +224,7 @@ class BenchmarkImageLogger(Callback):
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
-    ):
+    ) -> None:
         """Clear buffers and bump the val-run counter.
 
         Args:
@@ -213,7 +242,7 @@ class BenchmarkImageLogger(Callback):
         batch: Any,
         batch_idx: int,
         dataloader_idx: int = 0,
-    ):
+    ) -> None:
         """Collect LR/SR/HR + per-image metrics for one test loader's batch.
 
         Only runs for ``dataloader_idx`` in ``_val_mapping`` (i.e. test
@@ -244,7 +273,7 @@ class BenchmarkImageLogger(Callback):
 
     def on_validation_epoch_end(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
-    ):
+    ) -> None:
         """Log per-set mean PSNR/SSIM for the val epoch.
 
         Image strips and per-image scalars were already streamed to
@@ -257,7 +286,9 @@ class BenchmarkImageLogger(Callback):
         """
         self._flush_buffer(pl_module=pl_module)
 
-    def on_test_epoch_start(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
+    def on_test_epoch_start(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
         """Clear buffers ahead of a test run.
 
         Args:
@@ -274,7 +305,7 @@ class BenchmarkImageLogger(Callback):
         batch: Any,
         batch_idx: int,
         dataloader_idx: int = 0,
-    ):
+    ) -> None:
         """Collect LR/SR/HR + per-image metrics for one test loader's batch.
 
         ``cli test`` runs the test loaders only, so all dataloader indices
@@ -302,7 +333,9 @@ class BenchmarkImageLogger(Callback):
             should_log_images=True,
         )
 
-    def on_test_epoch_end(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
+    def on_test_epoch_end(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
         """Log per-set mean PSNR/SSIM at the end of ``cli test``.
 
         Image strips and per-image scalars were already streamed to
@@ -326,10 +359,10 @@ class BenchmarkImageLogger(Callback):
         batch: Any,
         batch_idx: int,
         dataset_name: str,
-        source_dataloaders,
+        source_dataloaders: Sequence[Any] | None,
         dataloader_idx: int,
         should_log_images: bool,
-    ):
+    ) -> None:
         """Forward one batch, compute per-image metrics on-device, and stream image strips.
 
         Shared between :meth:`on_validation_batch_end` and
@@ -359,9 +392,12 @@ class BenchmarkImageLogger(Callback):
         lr_img, hr_img = batch
 
         with torch.no_grad():
-            sr, hr_cropped = pl_module.predict_rgb(lr_img, hr_img)
+            sr, hr_cropped = _sr(pl_module).predict_rgb(lr_img, hr_img)
 
         # Resolve filenames from the underlying dataset for use as TB tags.
+        # Optional only because Lightning declares the loader lists for every
+        # stage; the hooks that call this one fire only while theirs is set.
+        assert source_dataloaders is not None, "no dataloaders for the running stage"
         dataset = source_dataloaders[dataloader_idx].dataset
         batch_size = lr_img.size(0)
         # Resolved once per batch, and only when something will actually be
@@ -381,7 +417,7 @@ class BenchmarkImageLogger(Callback):
             # was, calling torchmetrics with the default dim=None (whole-batch
             # pooling) and agreeing with validation_step only because this loop
             # slices one image at a time.
-            scores = pl_module.scorer.score(sr[i : i + 1], hr_cropped[i : i + 1])
+            scores = _sr(pl_module).scorer.score(sr[i : i + 1], hr_cropped[i : i + 1])
             psnr_dict = {key: value.item() for key, value in scores.psnr.items()}
             ssim_dict = {key: value.item() for key, value in scores.ssim.items()}
             perceptual_dict = {name: value.item() for name, value in scores.perceptual.items()}
@@ -425,7 +461,7 @@ class BenchmarkImageLogger(Callback):
             )
             self._tb_experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
-    def _flush_buffer(self, pl_module: lightning.LightningModule):
+    def _flush_buffer(self, pl_module: lightning.LightningModule) -> None:
         """Log per-set mean PSNR/SSIM/perceptual scores from the buffered samples.
 
         Shared between :meth:`on_validation_epoch_end` and
@@ -522,7 +558,9 @@ class GradNormLogger(Callback):
         super().__init__()
         self.every_n_batches = every_n_batches
 
-    def on_after_backward(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule):
+    def on_after_backward(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
         """Compute and log gradient norm if on the right step cadence.
 
         Per-parameter norms are stacked and reduced with a single
@@ -575,7 +613,7 @@ class WeightHistogramLogger(Callback):
         outputs: Any,
         batch: Any,
         batch_idx: int,
-    ):
+    ) -> None:
         """Log grouped weights as histograms if on the right step cadence.
 
         Args:
@@ -609,7 +647,18 @@ class WeightHistogramLogger(Callback):
                 experiment.add_histogram(tb_name, param, global_step=step)
 
 
-class _RollingSaveMixin:
+if TYPE_CHECKING:
+    # The mixin reads `monitor`, `dirpath`, `FILE_EXTENSION` and `_remove_checkpoint`
+    # off the ModelCheckpoint it is combined with, and chains `on_train_start` through
+    # it. Naming that base for the checker alone keeps the runtime MRO exactly as the
+    # docstring below describes -- a mixin over `object`, so `super()` still lands on
+    # ModelCheckpoint rather than ahead of it.
+    _RollingBase = ModelCheckpoint
+else:
+    _RollingBase = object
+
+
+class _RollingSaveMixin(_RollingBase):
     """Oldest-first deletion for the no-monitor (rolling) case.
 
     Lightning refuses ``ModelCheckpoint(monitor=None, save_top_k=N>1)``
@@ -874,7 +923,7 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
 
     def _describe(self, pl_module: lightning.LightningModule) -> dict[str, Any]:
         """Provenance for whatever this callback saves. Overridden per component."""
-        return build_metadata(pl_module)
+        return build_metadata(_sr(pl_module))
 
     def _validate_monitor(self, pl_module: lightning.LightningModule) -> None:
         """Raise if this callback's ``monitor``/``mode`` pair is unloggable or inverted.
@@ -899,7 +948,7 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         if self.monitor is None:
             return
 
-        eval_config = pl_module.eval_config
+        eval_config = _sr(pl_module).eval_config
         higher_better = {f"psnr/val/{key}" for key in eval_config.psnr_keys}
         higher_better |= {f"ssim/val/{key}" for key in eval_config.ssim_keys}
         higher_better |= {
@@ -1112,8 +1161,8 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
     def _describe(self, pl_module: lightning.LightningModule) -> dict[str, Any]:
         """Component-scoped when this callback saves anything but the generator."""
         if self.attribute == "model":
-            return build_metadata(pl_module)
-        return build_component_metadata(pl_module, self.attribute)
+            return build_metadata(_sr(pl_module))
+        return build_component_metadata(_sr(pl_module), self.attribute)
 
     @property
     def state_key(self) -> str:
@@ -1228,7 +1277,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
         monitor_value = float(self.current_score) if self.current_score is not None else None
         if self.attribute == "model":
             meta = build_metadata(
-                pl_module,
+                _sr(pl_module),
                 global_step=trainer.global_step,
                 batch_step=_logger_step(trainer),
                 epoch=trainer.current_epoch,
@@ -1237,7 +1286,7 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
             )
         else:
             meta = build_component_metadata(
-                pl_module,
+                _sr(pl_module),
                 self.attribute,
                 global_step=trainer.global_step,
                 batch_step=_logger_step(trainer),
@@ -1322,6 +1371,11 @@ class SRPredictionWriter(BasePredictionWriter):
         loader = trainer.predict_dataloaders
         if isinstance(loader, list | tuple):
             loader = loader[dataloader_idx]
+        # Both are set for the duration of a predict run and typed optional only
+        # because Lightning declares them for every stage; a hook firing without
+        # them would be a Lightning bug, and saying so beats a silent skip.
+        assert loader is not None, "predict hook fired with no predict dataloader"
+        assert batch_indices is not None, "predict hook fired with no batch indices"
         img_paths = loader.dataset.img_paths
 
         for i, sample_idx in enumerate(batch_indices):
