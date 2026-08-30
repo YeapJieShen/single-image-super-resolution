@@ -99,10 +99,16 @@ trainer:
       init_args:
         monitor_metric: psnr/val/RGB
         save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
     - class_path: sisr.training.SRCheckpoint
       init_args:
         monitor_metric: ssim/val/RGB
         save_top_k: 3
+        filename_prefix: sr-ssim
     # Distributable, optimizer-free weights alongside the resumable .ckpt files.
     - class_path: sisr.training.SRWeightsCheckpoint
       init_args:
@@ -112,6 +118,7 @@ trainer:
       init_args:
         monitor_metric: ssim/val/RGB
         save_top_k: 3
+        filename_prefix: sr-weights-ssim
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: step

@@ -770,6 +770,10 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         )
         self._keep_last = keep_last
         self._explicit_prefix = filename_prefix
+        # The *raw* dirpath, because setup() resolves self.dirpath against the
+        # trainer -- so when one callback probes another, one side may be resolved
+        # and the other not, and comparing those is comparing different things.
+        self._explicit_dirpath = None if dirpath is None else str(Path(dirpath).resolve())
         # A usable name before setup() can derive the real one -- direct
         # construction in a test never reaches setup.
         self._apply_naming(filename_prefix or self.DEFAULT_PREFIX)
@@ -790,6 +794,83 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         """
         self.filename = f"{prefix}_s{{step}}"
         self._init_rolling(self._keep_last, prefix)
+
+    def _resolved_prefix(self, pl_module: lightning.LightningModule) -> str:
+        """The identity this callback will write under, whether or not setup() has run.
+
+        Siblings are compared before Lightning has necessarily set them all up, so
+        this cannot be read off ``self.filename`` -- that still holds
+        ``DEFAULT_PREFIX`` on anything yet to reach setup.
+
+        Args:
+            pl_module: The model being trained; supplies the provenance a derived
+                prefix is a projection of.
+
+        Returns:
+            The explicit ``filename_prefix`` if one was given, else the stem derived
+            from what this callback saves.
+        """
+        if self._explicit_prefix is not None:
+            return self._explicit_prefix
+        return artifacts.stem(self._describe(pl_module))
+
+    def _reject_filename_collision(
+        self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
+    ) -> None:
+        """Raise if a sibling callback would write this callback's exact filename.
+
+        Distinct default prefixes keep the two *classes* apart, and their docstrings
+        say so -- but that reasoning never covered two instances of one class, which
+        is what both shipped templates configured: one on ``psnr/val/RGB`` and one on
+        ``ssim/val/RGB``, deriving the same model-provenance stem. Lightning does not
+        refuse it. It keeps one and appends ``-v1`` to the other, **assigned by save
+        order**, so which file wins the bare name is stable across neither runs nor
+        Lightning versions, and neither name says which metric it is best on.
+
+        The comparison is on the whole filename rather than the prefix: ``.ckpt``
+        beside ``.safetensors`` under one prefix is the intended, shipped pair.
+
+        Refusing is deliberately preferred to disambiguating automatically. Any
+        automatic rule has to decide which sibling keeps the bare name, and every
+        answer to that is either order-dependent -- the defect itself -- or silently
+        renames published artifacts when a monitor changes.
+
+        Args:
+            trainer: The active trainer, whose ``checkpoint_callbacks`` are the
+                siblings this could collide with.
+            pl_module: The model being trained.
+
+        Raises:
+            MisconfigurationException: If another :class:`_SRCheckpointBase` in the
+                callback list would write the same name into the same directory.
+        """
+        prefix = self._resolved_prefix(pl_module)
+        mine = (self._explicit_dirpath, prefix, self.FILE_EXTENSION)
+        for other in trainer.checkpoint_callbacks:
+            if other is self or not isinstance(other, _SRCheckpointBase):
+                continue
+            try:
+                theirs = (
+                    other._explicit_dirpath,
+                    other._resolved_prefix(pl_module),
+                    other.FILE_EXTENSION,
+                )
+            except Exception:
+                # A sibling whose own configuration is broken cannot be probed. Its
+                # setup() reports that precisely; masking it with a collision error
+                # raised from over here would be strictly worse than skipping it.
+                continue
+            if theirs != mine:
+                continue
+            raise MisconfigurationException(
+                f"`{type(self).__name__}(monitor_metric={self.monitor!r})` and "
+                f"`{type(other).__name__}(monitor_metric={other.monitor!r})` would both "
+                f"write `{prefix}_s{{step}}{self.FILE_EXTENSION}` into the same directory. "
+                "Lightning keeps one and suffixes the other `-v1`, assigned by save "
+                "order, so which artifact is which is neither stable across runs nor "
+                "readable from its name. HINT: give one of them a distinct "
+                "`filename_prefix`."
+            )
 
     def _describe(self, pl_module: lightning.LightningModule) -> dict[str, Any]:
         """Provenance for whatever this callback saves. Overridden per component."""
@@ -853,7 +934,7 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         pl_module: lightning.LightningModule,
         stage: str,
     ) -> None:
-        """Validate ``monitor`` against the metrics ``SRLightning`` will log.
+        """Validate ``monitor``, derive the filename, and refuse a colliding sibling.
 
         Lightning itself only raises ``MisconfigurationException`` for a
         missing monitor once the val loop has already run at least once
@@ -871,8 +952,9 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a metric
-                ``SRLightning`` will log during ``fit``, or if ``mode``
-                disagrees with that metric's direction.
+                ``SRLightning`` will log during ``fit``, if ``mode`` disagrees with
+                that metric's direction, or if a sibling callback would write this
+                callback's exact filename.
         """
         super().setup(trainer, pl_module, stage)
         if stage != "fit":
@@ -883,6 +965,7 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         # _validate, because it reads whatever that just checked.
         if self._explicit_prefix is None:
             self._apply_naming(artifacts.stem(self._describe(pl_module)))
+        self._reject_filename_collision(trainer, pl_module)
 
     def _validate(self, pl_module: lightning.LightningModule) -> None:
         """Everything that must hold before this callback can name or write anything."""
@@ -976,6 +1059,10 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
     (see :class:`_RollingSaveMixin`) — from ever touching :class:`SRCheckpoint`'s files
     when both share one ``dirpath``: each callback only ever names/deletes files matching
     its own ``filename``/``FILE_EXTENSION`` combination.
+
+    That keeps the two *classes* apart. It does not keep two instances of one class
+    apart — a pair differing only in ``monitor_metric`` derives one stem and collides,
+    which :meth:`_SRCheckpointBase._reject_filename_collision` now refuses at startup.
 
     Args:
         monitor_metric: The validation metric to monitor — same contract as
