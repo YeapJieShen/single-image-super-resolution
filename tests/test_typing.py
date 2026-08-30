@@ -16,7 +16,6 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 #: Narrowing this list is the point; widening it needs a reason in the diff.
 EXPECTED_IGNORED = {
     "sisr.training.callbacks",
-    "sisr.training.gan_module",
 }
 
 

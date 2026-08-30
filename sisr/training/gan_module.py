@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from lightning_utilities.core.rank_zero import rank_zero_info
 
@@ -103,6 +104,11 @@ class SRGANLightning(SRLightning):
         TypeError: Via :class:`SRLightning` if ``model`` / ``processor`` are
             not of the required base types.
     """
+
+    # Narrowed from SRLightning's SRTrainingConfig. __init__ already refuses anything
+    # else at construction, so this records a guarantee the class enforces rather than
+    # adding one -- and it is what lets the adversarial-only fields below be read.
+    training_config: SRGANTrainingConfig
 
     def __init__(
         self,
@@ -313,9 +319,48 @@ class SRGANLightning(SRLightning):
             schedulers.append(self.lr_scheduler(opt_g))
         if self.discriminator_lr_scheduler is not None:
             schedulers.append(self.discriminator_lr_scheduler(opt_d))
+        for scheduler in schedulers:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                raise ValueError(
+                    "ReduceLROnPlateau is not supported for adversarial training. "
+                    "Manual optimization means this module steps its own schedulers, "
+                    "in on_train_batch_end, with no metric to hand them -- "
+                    "scheduler.step() would raise mid-run. Lightning's `monitor` "
+                    "plumbing only applies to the automatic-optimization path this "
+                    "module opts out of. Use a schedule that steps on time "
+                    "(StepLR, MultiStepLR, CosineAnnealingLR), which is also what the "
+                    "paper's two-phase 1e-4 -> 1e-5 drop is."
+                )
         return [opt_g, opt_d], schedulers
 
-    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
+    def _paired_optimizers(self) -> tuple[LightningOptimizer, LightningOptimizer]:
+        """The generator and discriminator optimizers, in that order.
+
+        ``optimizers()`` spans the single-optimizer case in its return type, where
+        this module always configures exactly two. The check makes that invariant
+        enforced rather than merely intended, which matters for a subclass that
+        overrides :meth:`configure_optimizers`.
+
+        Returns:
+            ``(generator_optimizer, discriminator_optimizer)``.
+
+        Raises:
+            RuntimeError: If ``configure_optimizers`` did not produce exactly two.
+        """
+        optimizers = self.optimizers()
+        if not isinstance(optimizers, list) or len(optimizers) != 2:
+            raise RuntimeError(
+                f"SRGANLightning expects exactly two optimizers, generator then "
+                f"discriminator, but Lightning holds {optimizers!r}. A subclass "
+                f"overriding configure_optimizers has to keep that shape and order: "
+                f"training_step unpacks them positionally."
+            )
+        g, d = optimizers
+        return g, d
+
+    def training_step(  # type: ignore[override]  # manual optimization returns nothing
+        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
+    ) -> None:
         """One Goodfellow outer iteration: a discriminator step, plus every k-th a generator one.
 
         Order is discriminator-first (Algorithm 1), so the generator is updated
@@ -340,7 +385,7 @@ class SRGANLightning(SRLightning):
             returned loss.
         """
         lr_img, hr_img = batch
-        opt_g, opt_d = self.optimizers()
+        opt_g, opt_d = self._paired_optimizers()
 
         sr, _, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=False)
         hr_for_loss = self.processor.extract_target(hr_cropped)
@@ -381,6 +426,39 @@ class SRGANLightning(SRLightning):
         self.log("loss/train/adv", adversarial, on_step=True)
         self._log_loss_terms("train")
 
+    def _time_schedulers(self) -> list[torch.optim.lr_scheduler.LRScheduler]:
+        """Every configured scheduler, as a list, each one steppable with no argument.
+
+        ``lr_schedulers()`` returns the scheduler ITSELF when exactly one is
+        configured and a list only when there are several, so the shape has to be
+        normalised before iterating.
+
+        Returns:
+            The configured schedulers, empty when none are.
+
+        Raises:
+            RuntimeError: If a ``ReduceLROnPlateau`` reaches here. It cannot arrive
+                through :meth:`configure_optimizers`, which refuses it; a subclass
+                that builds its own has to refuse it too, because this module steps
+                schedulers by hand and has no metric to pass.
+        """
+        schedulers = self.lr_schedulers()
+        if schedulers is None:
+            return []
+        if not isinstance(schedulers, list):
+            schedulers = [schedulers]
+        stepped = []
+        for scheduler in schedulers:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                raise RuntimeError(
+                    f"{type(scheduler).__name__} needs a monitored metric, and manual "
+                    f"optimization steps schedulers here with none to give it. "
+                    f"configure_optimizers refuses it; a subclass overriding that has "
+                    f"to refuse it too."
+                )
+            stepped.append(scheduler)
+        return stepped
+
     def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int) -> None:
         """Step the LR schedulers by hand — manual optimization does not.
 
@@ -397,14 +475,7 @@ class SRGANLightning(SRLightning):
                 every batch steps the schedulers, including the ones that skip
                 the generator, since the discriminator stepped regardless.
         """
-        schedulers = self.lr_schedulers()
-        if schedulers is None:
-            return
-        # lr_schedulers() returns the scheduler ITSELF when exactly one is
-        # configured, and a list only when there are several.
-        if not isinstance(schedulers, list):
-            schedulers = [schedulers]
-        for scheduler in schedulers:
+        for scheduler in self._time_schedulers():
             scheduler.step()
 
     def on_fit_start(self) -> None:
