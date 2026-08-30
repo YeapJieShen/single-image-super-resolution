@@ -185,7 +185,7 @@ def test_build_metadata_is_weights_only_safe(tmp_path):
         monitor="ssim/val/RGB",
         monitor_value=0.87,
     )
-    path = tmp_path / "meta.pt"
+    path = tmp_path / "meta.ckpt"
     torch.save({"meta": meta}, path)
     loaded = torch.load(path, weights_only=True)
     assert loaded["meta"] == meta
@@ -245,7 +245,7 @@ def test_metadata_stays_weights_only_loadable_with_a_criterion_block(tmp_path):
         processor=RGBProcessor(),
         training_config=SRTrainingConfig(scale=3),
     )
-    path = tmp_path / "meta.pt"
+    path = tmp_path / "meta.ckpt"
     torch.save({"meta": build_metadata(module)}, path)
 
     loaded = torch.load(path, weights_only=True)
@@ -346,7 +346,7 @@ def test_component_metadata_training_fields_forwarded():
 def test_component_metadata_is_weights_only_safe(tmp_path):
     module = _make_srresnet_lit_with_component(_StubComponent(hr_input_size=96))
     meta = build_component_metadata(module, "discriminator", global_step=7, epoch=0)
-    path = tmp_path / "component_meta.pt"
+    path = tmp_path / "component_meta.ckpt"
     torch.save({"meta": meta}, path)
 
     loaded = torch.load(path, weights_only=True)
