@@ -14,7 +14,7 @@ class SRGANTrainingConfig(SRResNetTrainingConfig):
     """SRGAN training defaults. The generator is SRResNet, so ``scale=4`` is inherited.
 
     Args:
-        init_from: Path to a bare-weights ``.pt`` whose generator weights
+        init_from: Path to a bare-weights ``.safetensors`` whose generator weights
             initialise this run's generator. The paper scopes the MSE-init
             trick to "when training the actual GAN", so a paper-faithful SRGAN
             run starts from an MSE-trained SRResNet. Optional: unset trains

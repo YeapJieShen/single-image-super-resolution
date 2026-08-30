@@ -2,11 +2,12 @@
 
 One function, three sinks: :meth:`~sisr.training.lightning_module.SRLightning.on_save_checkpoint`
 (the full resumable ``.ckpt``), :class:`~sisr.training.callbacks.SRWeightsCheckpoint` (the bare
-distributable ``.pt``), and :func:`sisr.export.to_onnx` (the ``.onnx``'s ``metadata_props``) all
-call :func:`build_metadata` so the three payloads cannot drift apart — mirrors how
-``SREvalConfig.psnr_keys`` is the single derivation point for its three consumers.
+distributable ``.safetensors``), and :func:`sisr.export.to_onnx` (the ``.onnx``'s
+``metadata_props``) all call :func:`build_metadata` so the three payloads cannot drift
+apart — mirrors how ``SREvalConfig.psnr_keys`` is the single derivation point for its
+three consumers.
 
-:func:`build_component_metadata` is a second builder for a bare ``.pt`` that is **not** the SR
+:func:`build_component_metadata` is a second builder for a bare artifact that is **not** the SR
 model — e.g. a discriminator's weights. Both builders are built on one private :func:`_envelope`
 helper (``format``/``kind``/``created``/``versions``/``training``), so the two payload shapes
 cannot drift apart either. Each carries a ``kind`` field: ``"sr_model"`` for :func:`build_metadata`,

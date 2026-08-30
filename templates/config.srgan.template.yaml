@@ -58,7 +58,7 @@ model:
       training_config:
         class_path: sisr.models.srgan.SRGANTrainingConfig
         init_args:
-          # Bare weights (.pt), never the sibling .ckpt. Mismatches are refused.
+          # Bare weights (.safetensors), never the sibling .ckpt. Mismatches are refused.
           example_input_shape: [3, 24, 24]
           # NOTE: s999999, not s1000000, for a 1e6-step run. The step in an artifact
           # filename is the metric axis -- the index of the step just completed --

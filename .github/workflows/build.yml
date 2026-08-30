@@ -91,7 +91,13 @@ jobs:
   # Stable required-check context: matrix legs are not fixed contexts themselves.
   build:
     needs: [build-matrix, editable-install]
-    if: always()
+    # Not always(): that also fires when the RUN is cancelled, and a cancelled upstream is
+    # neither success nor skipped, so the gate published a red required check for a run
+    # nobody cares about. !cancelled() still runs on success, failure and skip -- the skip
+    # case is a doc-only PR, and is the whole reason this job cannot simply depend on
+    # success. An upstream cancelled while the run itself lives (fail-fast killing a
+    # sibling) still reports red, which is correct.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require all matrix legs to pass or be skipped (doc-only PR)
