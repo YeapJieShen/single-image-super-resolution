@@ -14,9 +14,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 #: Modules whose dynamism (Lightning's hook system, jsonargparse's subclass
 #: resolution) makes them fight a type checker rather than benefit from one.
 #: Narrowing this list is the point; widening it needs a reason in the diff.
-EXPECTED_IGNORED = {
-    "sisr.training.callbacks",
-}
+EXPECTED_IGNORED: set[str] = set()
 
 
 def _ignored_modules() -> set[str]:

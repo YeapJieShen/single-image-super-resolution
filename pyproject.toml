@@ -133,13 +133,6 @@ disallow_untyped_defs = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-# Lightning's hook system and jsonargparse's subclass resolution fight a checker.
-module = [
-    "sisr.training.callbacks",
-]
-ignore_errors = true
-
-[[tool.mypy.overrides]]
 # Neither ships inline types or a py.typed marker.
 module = ["torchvision.*", "tqdm.*"]
 ignore_missing_imports = true
