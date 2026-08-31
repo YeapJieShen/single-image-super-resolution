@@ -31,6 +31,7 @@ from sisr.training import (
     WeightHistogramLogger,
 )
 from sisr.training.callbacks import BenchmarkSample
+from sisr.training.metadata import build_metadata
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -587,6 +588,158 @@ def test_srcheckpoint_setup_error_lists_valid_metrics(tmp_path: Path):
     assert "psnr/val/RGB" in str(exc_info.value)
     assert "ssim/val/RGB" in str(exc_info.value)
     assert "ssim/val/Y" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Sibling checkpoint callbacks that would write the same filename
+# ---------------------------------------------------------------------------
+
+
+def _trainer_holding(*callbacks: lightning.Callback, root: Path) -> lightning.Trainer:
+    """Bare Trainer that actually *holds* the callbacks.
+
+    `_make_bare_trainer` passes none and disables checkpointing, so a callback
+    set up against it can never see a sibling — which is the whole subject here.
+    """
+    return lightning.Trainer(
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        default_root_dir=str(root),
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=list(callbacks),
+    )
+
+
+@_ignore_gpu_warning
+def test_two_checkpoints_with_different_monitors_are_refused_at_setup(tmp_path: Path):
+    """The shape both shipped templates configured: one class, one dirpath, two
+    monitors, no explicit prefix.
+
+    Each derives its name from the *model*'s provenance, which says nothing about
+    the selection criterion, so both land on the same stem and Lightning keeps one
+    and suffixes the other `-v1` — assigned by save order, so which file is the
+    PSNR-best is neither stable across runs nor recoverable from the name.
+    """
+    pl_module = _make_real_pl_module()
+    psnr = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    ssim = SRCheckpoint(monitor_metric="ssim/val/RGB", dirpath=str(tmp_path))
+
+    with pytest.raises(MisconfigurationException) as exc_info:
+        psnr.setup(_trainer_holding(psnr, ssim, root=tmp_path), pl_module, stage="fit")
+    message = str(exc_info.value)
+    assert "psnr/val/RGB" in message
+    assert "ssim/val/RGB" in message
+
+
+@_ignore_gpu_warning
+def test_the_refusal_does_not_depend_on_which_sibling_lightning_sets_up_first(tmp_path: Path):
+    """Setup order is Lightning's to choose, and `-v1`-by-save-order is the defect
+    being fixed — a check that only fires from one side would reintroduce it."""
+    pl_module = _make_real_pl_module()
+    psnr = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    ssim = SRCheckpoint(monitor_metric="ssim/val/RGB", dirpath=str(tmp_path))
+
+    with pytest.raises(MisconfigurationException):
+        ssim.setup(_trainer_holding(psnr, ssim, root=tmp_path), pl_module, stage="fit")
+
+
+@_ignore_gpu_warning
+def test_the_refusal_names_the_filename_the_pair_would_share(tmp_path: Path):
+    """Actionable without reading source: the message says what the collision *is*
+    and how to resolve it, not merely that one exists."""
+    pl_module = _make_real_pl_module()
+    shared = artifacts.stem(build_metadata(pl_module))
+    psnr = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    ssim = SRCheckpoint(monitor_metric="ssim/val/RGB", dirpath=str(tmp_path))
+
+    with pytest.raises(MisconfigurationException) as exc_info:
+        psnr.setup(_trainer_holding(psnr, ssim, root=tmp_path), pl_module, stage="fit")
+    message = str(exc_info.value)
+    assert shared in message
+    assert "filename_prefix" in message
+
+
+@_ignore_gpu_warning
+def test_a_distinct_prefix_on_one_of_the_pair_is_enough(tmp_path: Path):
+    """The refusal must not outlaw the configuration that resolves it — this is
+    what the shipped templates now do."""
+    pl_module = _make_real_pl_module()
+    psnr = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    ssim = SRCheckpoint(
+        monitor_metric="ssim/val/RGB", dirpath=str(tmp_path), filename_prefix="sr-ssim"
+    )
+    trainer = _trainer_holding(psnr, ssim, root=tmp_path)
+
+    psnr.setup(trainer, pl_module, stage="fit")  # must not raise
+    ssim.setup(trainer, pl_module, stage="fit")  # must not raise
+
+
+@_ignore_gpu_warning
+def test_the_two_classes_may_share_a_prefix_because_their_extensions_differ(tmp_path: Path):
+    """`.ckpt` beside `.safetensors` under one prefix is the documented design, and
+    the pair every template ships. Only the whole filename collides, so only the
+    whole filename may be checked — a prefix-only check would break the templates
+    it is meant to protect.
+    """
+    pl_module = _make_real_pl_module()
+    resumable = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    weights = SRWeightsCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path))
+    trainer = _trainer_holding(resumable, weights, root=tmp_path)
+
+    resumable.setup(trainer, pl_module, stage="fit")  # must not raise
+    weights.setup(trainer, pl_module, stage="fit")  # must not raise
+
+
+@_ignore_gpu_warning
+def test_weights_checkpoints_on_different_components_do_not_collide(tmp_path: Path):
+    """The SRGAN template's generator/discriminator pair: same class, same dirpath,
+    same (null) monitor — and legal, because their stems come from different
+    components. `attribute` exists precisely to make this configuration work."""
+    module = build_module_with_component()
+    generator = SRWeightsCheckpoint(monitor_metric=None, attribute="model", dirpath=str(tmp_path))
+    discriminator = SRWeightsCheckpoint(
+        monitor_metric=None, attribute="discriminator", dirpath=str(tmp_path)
+    )
+    trainer = _trainer_holding(generator, discriminator, root=tmp_path)
+
+    generator.setup(trainer, module, stage="fit")  # must not raise
+    discriminator.setup(trainer, module, stage="fit")  # must not raise
+
+
+@_ignore_gpu_warning
+def test_a_sibling_that_cannot_be_named_is_skipped_not_reported(tmp_path: Path):
+    """Probing a sibling means deriving its name, which a misconfigured sibling
+    cannot do.
+
+    Whichever callback Lightning sets up first would then raise from inside the
+    collision check, replacing the sibling's own precise complaint -- here, an
+    `attribute` the module does not have -- with a confusing one from somewhere
+    else. The broken sibling's own setup() still reports it.
+    """
+    module = build_module_with_component()
+    good = SRWeightsCheckpoint(monitor_metric=None, attribute="model", dirpath=str(tmp_path))
+    broken = SRWeightsCheckpoint(monitor_metric=None, attribute="nope", dirpath=str(tmp_path))
+    trainer = _trainer_holding(good, broken, root=tmp_path)
+
+    good.setup(trainer, module, stage="fit")  # must not raise
+
+    with pytest.raises(MisconfigurationException, match=r"nope"):
+        broken.setup(trainer, module, stage="fit")
+
+
+@_ignore_gpu_warning
+def test_separate_dirpaths_are_not_a_collision(tmp_path: Path):
+    """Same class, same monitorless config, different directories — nothing is
+    ambiguous, so nothing may be refused."""
+    pl_module = _make_real_pl_module()
+    first = SRCheckpoint(monitor_metric="psnr/val/RGB", dirpath=str(tmp_path / "a"))
+    second = SRCheckpoint(monitor_metric="ssim/val/RGB", dirpath=str(tmp_path / "b"))
+    trainer = _trainer_holding(first, second, root=tmp_path)
+
+    first.setup(trainer, pl_module, stage="fit")  # must not raise
+    second.setup(trainer, pl_module, stage="fit")  # must not raise
 
 
 # ---------------------------------------------------------------------------
