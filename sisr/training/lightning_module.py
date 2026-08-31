@@ -116,7 +116,11 @@ class SRLightning(lightning.LightningModule):
             )
 
         backend = self.training_config.compile_backend
-        compiled = torch.compile(self.model, backend=backend) if backend is not None else None
+        compiled = (
+            torch.compile(self.model, backend=backend, mode=self.training_config.compile_mode)
+            if backend is not None
+            else None
+        )
         # torch.compile() returns an OptimizedModule, itself an nn.Module — a
         # plain `self._compiled = compiled` would register it as a submodule
         # (nn.Module.__setattr__ registers any nn.Module value regardless of

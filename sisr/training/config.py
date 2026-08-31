@@ -121,12 +121,31 @@ class SRTrainingConfig:
             ``SRLightning.on_fit_start`` turns into an immediate failure via
             a warm-up forward instead of an arbitrary mid-run crash.
             Measured on one RTX 5060 Laptop (SRResNet, batch 16, 24x24 LR):
-            ``'cudagraphs'`` gave +4% steps/s over eager — it only captures
-            the model forward, so backward and the optimizer step stay
-            eager and most kernel launches in a training step are never
-            captured. ``'inductor'`` fails outright there (no upstream
-            Windows Triton wheel). Defaults to ``None`` so this mostly-
-            unproven-on-this-project path never ships on by default.
+            ``'inductor'`` is the only backend that pays, and by a mid-teens
+            percent rather than the multiples a microbenchmark suggests;
+            ``'cudagraphs'`` is within noise of eager — it captures the model
+            forward only, so backward and the optimizer step stay eager and
+            most kernel launches in a training step are never captured — and
+            ``'aot_eager'`` is slower. On SRCNN eager wins every comparison.
+            No backend is bit-identical to eager on SRResNet, so a compiled
+            run does not reproduce an eager one exactly. Defaults to ``None``,
+            and staying there is the standing recommendation.
+
+        compile_mode: ``torch.compile``'s ``mode`` — ``'reduce-overhead'``,
+            ``'max-autotune'``, ... — applied alongside ``compile_backend``.
+            ``None`` (default) leaves inductor on its own default mode, which
+            is what every configured run got before this field existed: the
+            call site passed ``backend`` and nothing else, so a published
+            ``reduce-overhead`` or ``max-autotune`` figure described something
+            no YAML could select. Requires ``compile_backend='inductor'``,
+            because ``mode`` is an inductor setting and torch forwards it to
+            any other backend as a keyword its compiler function does not
+            accept — a failure on the first compiled call, which this refuses
+            at construction instead. An unrecognized mode also raises there,
+            from torch. Which mode wins does not hold across precisions on
+            this hardware: ``'max-autotune'`` beat ``'reduce-overhead'`` under
+            bf16 and lost to it under fp32, so treat a mode as measured per
+            configuration, never as a default.
     """
 
     layer_lrs: list[float] | None = None
@@ -136,6 +155,23 @@ class SRTrainingConfig:
     init_std: float = 0.01
     scale: int | None = None
     compile_backend: str | None = None
+    compile_mode: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject a compile mode that nothing will apply.
+
+        Raises:
+            ValueError: If ``compile_mode`` is set without
+                ``compile_backend='inductor'``.
+        """
+        if self.compile_mode is not None and self.compile_backend != "inductor":
+            raise ValueError(
+                f"compile_mode={self.compile_mode!r} needs compile_backend='inductor'; got "
+                f"compile_backend={self.compile_backend!r}. `mode` is an inductor setting: "
+                "with no backend nothing is compiled and the mode is dead config, and with "
+                "another backend torch passes `mode` to a compiler function that does not "
+                "take it, which fails on the first compiled call rather than at startup."
+            )
 
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Validate this config against the model/processor it will pair with.
