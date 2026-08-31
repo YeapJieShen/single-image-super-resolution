@@ -304,6 +304,25 @@ MATLAB-`imresize` switch, all three metric-convention fixes, and a correction to
 weight-init standard deviation. Those numbers are not comparable to anything, including to
 each other, so none are published. A comparable SRCNN row needs a fresh run.
 
+### Where the papers stop specifying
+
+A claim that these numbers can be independently verified is only honest if the places the
+source papers **stop specifying** are stated as plainly as the places they do. Each of the
+following is a choice this implementation had to make and **cannot be scored as correct**,
+because there is nothing to be faithful to. None is a bug, and none should be "fixed" by
+picking a value and asserting it in code — that would dress a guess as a checked fact.
+
+| choice | what ships | what it rests on |
+|---|---|---|
+| SRCNN batch size | `64` | **Nothing.** Not in the paper, not on the authors' project page, re-verified twice. The authors' released Caffe solver prototxt would settle it and **has not been inspected**; a community reimplementation is not a substitute. |
+| SRCNN training budget | `max_steps: 10000000`, ≈0.8× the paper's figure | The paper gives *"the same number of backpropagations (i.e. 8×10⁸)"*. Read here as **per-sample** updates, because the mini-batch reading implies an implausible iterations-per-second rate on 2014 hardware. That is an inference. An earlier reading of ours recorded *"up to 8×10⁸"* — a ceiling rather than a target — and the two readings are **unreconciled**. |
+| SRCNN evaluation border | `crop_border: 3`, on top of the 6 px per side that `padding: valid` already trims | The paper states no test-time boundary convention. Neither value is correct or incorrect, only stated. |
+| SRResNet PReLU parameterisation | `torch.nn.PReLU()` — one shared slope | The paper specifies neither shared nor per-channel, and no official reference implementation exists to check against. |
+
+The practical consequence: a reproduction that differs from this project on any of these
+rows is not necessarily wrong, and neither is this one. Compare the rows before comparing
+the numbers.
+
 ### What these were computed against
 
 - **Weights**: the reference SRResNet run at step 1,000,000 (converged; plateau from ~500k)
