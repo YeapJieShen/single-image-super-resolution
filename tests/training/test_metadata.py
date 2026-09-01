@@ -424,3 +424,29 @@ def test_resolved_scale_is_public_api():
     unchangeable."""
     assert hasattr(SRLightning, "resolved_scale")
     assert not hasattr(SRLightning, "_resolved_scale")
+
+
+def test_class_path_is_public_api():
+    """`gan_module` imported it across a module boundary while its name said
+    "free to change". That combination is the problem: the underscore says one
+    thing and the second caller says another, and nothing reconciles them --
+    which is how a helper quietly becomes unchangeable.
+
+    Promoted rather than removed, matching the identical call one module over
+    for the scale resolver. Two private helpers in one stack going opposite ways
+    would be the worse outcome."""
+    import sisr.training.metadata as metadata
+
+    assert hasattr(metadata, "class_path")
+    assert not hasattr(metadata, "_class_path")
+
+
+def test_gan_module_imports_no_private_symbol_from_metadata():
+    """The structural half: a re-introduced private import fails here."""
+    import inspect
+
+    import sisr.training.gan_module as gan_module
+
+    src = inspect.getsource(gan_module)
+    assert "from .metadata import _class_path" not in src
+    assert "import _" not in src.split("class ")[0], "no private cross-module import"

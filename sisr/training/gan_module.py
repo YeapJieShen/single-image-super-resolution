@@ -29,7 +29,7 @@ from ..models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from ..processors import SRProcessor
 from .config import SREvalConfig
 from .lightning_module import SRLightning
-from .metadata import _class_path, build_metadata
+from .metadata import build_metadata, class_path
 
 #: ``(section, key)`` of every ``build_metadata`` field ``init_from`` validates —
 #: the properties that decide whether one run's generator weights mean anything in
@@ -532,11 +532,11 @@ class SRGANLightning(SRLightning):
         """
         super().on_save_checkpoint(checkpoint)
         checkpoint["sisr_meta"]["discriminator"] = {
-            "class_path": _class_path(self.discriminator),
+            "class_path": class_path(self.discriminator),
             "init_args": dict(self.discriminator.hparams),
         }
         checkpoint["sisr_meta"]["adversarial"] = {
-            "loss": _class_path(self.adversarial_loss),
+            "loss": class_path(self.adversarial_loss),
             "weight": self.training_config.adversarial_weight,
             "d_steps_per_g_step": self.training_config.d_steps_per_g_step,
         }
