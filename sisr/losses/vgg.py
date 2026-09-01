@@ -171,8 +171,15 @@ class _VGGFeatureLoss(SRLoss):
         self.distance = distance
         self.grayscale_to_rgb = grayscale_to_rgb
         self.allow_non_rgb = allow_non_rgb
-        # Identity until bind(); a [0, 1] processor needs no mapping anyway.
-        self._gain, self._offset = 1.0, 0.0
+        # Sentinel, NOT the identity. An identity default would make "never
+        # bound" and "bound to a [0, 1] processor" indistinguishable at
+        # runtime, and the wrong one of those trains on features that mean
+        # something other than the recipe says. SRProcessor.output_range --
+        # the value bind() reads -- is abstract rather than defaulted for
+        # exactly this reason, and its consumer must not undo that by handing
+        # itself a fallback.
+        self._gain: float | None = None
+        self._offset: float | None = None
         # persistent=False: constants, and a distributable checkpoint should not
         # carry them.
         self.register_buffer(
@@ -188,7 +195,15 @@ class _VGGFeatureLoss(SRLoss):
         return applied
 
     def bind(self, processor: SRProcessor) -> None:
-        """Derive the affine map from the model's output range into ``[0, 1]``."""
+        """Derive the affine map from the model's output range into ``[0, 1]``.
+
+        Until this runs the loss refuses to compute -- see :meth:`_features`.
+
+        Raises:
+            ValueError: If the processor emits a channel count or colorspace
+                this loss has no published recipe for, or a non-increasing
+                ``output_range``.
+        """
         channels = processor.model_channels
         if channels != 3 and not self.grayscale_to_rgb:
             raise ValueError(
@@ -215,7 +230,25 @@ class _VGGFeatureLoss(SRLoss):
         self._offset = -low / (high - low)
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
-        """Map into ``[0, 1]``, normalise, and take the truncated VGG's output."""
+        """Map into ``[0, 1]``, normalise, and take the truncated VGG's output.
+
+        Raises:
+            RuntimeError: If :meth:`bind` has not run, so the model's output
+                range is unknown. Both shipped paths bind, so this is reachable
+                only through a container that is not itself an
+                :class:`~sisr.losses.base.SRLoss`.
+        """
+        if self._gain is None or self._offset is None:
+            raise RuntimeError(
+                f"{type(self).__name__} was never bound to a processor, so it does not know "
+                "what range the model emits. Reconstructing [-1, 1] output with [0, 1] logic "
+                "feeds ImageNet normalisation data it was not designed for: training proceeds, "
+                "the number looks plausible, and the features mean something other than the "
+                "recipe says. Either put this term inside a WeightedSumLoss (which forwards "
+                "bind() to its SRLoss terms) or hand it to SRLightning as the criterion "
+                "(which binds it directly). A plain nn.ModuleList or a custom composite does "
+                "neither -- call bind(processor) yourself if you need one."
+            )
         x = x * self._gain + self._offset
         if x.shape[1] == 1:
             x = x.expand(-1, 3, -1, -1)
