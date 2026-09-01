@@ -2053,3 +2053,29 @@ def test_explicit_crop_border_still_wins_over_the_scale_default():
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
     assert lit.eval_config.crop_border == 8
+
+
+def test_derived_crop_border_refuses_when_no_scale_exists_to_derive_from():
+    """The sentinel needs a scale. With none available, say so rather than guess.
+
+    SRCNN declares no ``scale`` hparam of its own, so a bare
+    ``SRTrainingConfig()`` leaves nothing to derive from. Silently falling back
+    to 0 would score the full image while the config asked for the field
+    convention -- a different measurement with nothing to indicate it.
+    """
+    model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(ValueError, match="no scale is available"):
+        SRLightning(
+            model=model,
+            processor=YChannelProcessor(),
+            training_config=SRTrainingConfig(),
+            eval_config=SREvalConfig(crop_border=None),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_scorer_refuses_an_unresolved_crop_border_sentinel():
+    """A scorer built outside SRLightning must not silently treat None as 0."""
+    scorer = SRScorer(SREvalConfig(crop_border=None))
+    with pytest.raises(ValueError, match="still None at scoring time"):
+        scorer.crop(torch.rand(1, 3, 16, 16))
