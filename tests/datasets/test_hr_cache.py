@@ -257,3 +257,34 @@ def test_existing_cache_reopens_without_rebuild_via_either_architecture(
     mock_srresnet.assert_not_called()
     mock_srcnn.assert_not_called()
     assert built._cache.path == reopened_srresnet._cache.path == reopened_srcnn._cache.path
+
+
+def test_checksum_keys_on_name_and_size_only(tmp_path):
+    """Pins the accepted property: two different images of the same name and
+    byte length hash identically. Here so nobody adds mtime without reading the
+    docstring's reason first."""
+    import numpy as np
+    from PIL import Image
+
+    from sisr.datasets.hr_cache import compute_checksum
+
+    path = tmp_path / "img.png"
+    rng = np.random.default_rng(0)
+
+    # Two different images; PNG is lossless, so equal byte length is not
+    # guaranteed -- search until two differ in content but not in size.
+    first = None
+    for _ in range(200):
+        arr = rng.integers(0, 256, (16, 16, 3), dtype=np.uint8)
+        Image.fromarray(arr).save(path)
+        size, digest = path.stat().st_size, compute_checksum([path])
+        if first is None:
+            first = (size, digest, arr)
+            continue
+        if size == first[0] and not np.array_equal(arr, first[2]):
+            assert digest == first[1], (
+                "a different image of the same name and byte size must hash "
+                "identically -- this property is accepted, see the docstring"
+            )
+            return
+    pytest.skip("no same-size pair found in 200 tries; the property is unchanged")
