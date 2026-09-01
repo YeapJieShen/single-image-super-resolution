@@ -409,3 +409,69 @@ def test_validation_untouched_when_already_divisible(tiny_rgb_image_dir: Path):
         lr, hr = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=scale)[0]
         assert hr.shape[-2:] == (36, 36)
         assert lr.shape == hr.shape
+
+
+def test_train_lr_is_sliced_from_the_whole_image_degradation_not_degraded_per_patch(
+    shared_srcnn_train_ds: TrainDataset,
+):
+    """The authors' ``demo_SR.m`` degrades the image and *then* extracts.
+
+    Ships its own mutation: the patch-wise order is computed here too, and the
+    test fails if the dataset returns that instead. Without it the assertion
+    would pass on either implementation wherever the two happen to agree.
+    """
+    from sisr.datasets.derived_cache import derive
+    from sisr.datasets.srcnn import _degrade
+
+    ds = shared_srcnn_train_ds
+    # An interior patch: at the image corner the out-of-patch taps and the
+    # out-of-image taps coincide, so the two orders agree there.
+    n_cols = ds._img_n_cols[0]
+    idx = n_cols + 1
+    row, col = divmod(idx - ds._img_offsets[0], n_cols)
+    top, left = row * ds.stride, col * ds.stride
+    assert top > 0 and left > 0
+
+    lr, hr = ds[idx]
+    got = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+
+    whole = np.array(Image.open(ds.img_paths[0]).convert("RGB"))
+    plane = derive(whole, "bicubic", ds.scale)
+    expected = plane[top : top + ds.sub_img_size, left : left + ds.sub_img_size]
+    assert np.array_equal(got, expected)
+
+    hr_arr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+    patchwise = _degrade(hr_arr, ds.scale)
+    assert not np.array_equal(got, patchwise), (
+        "dataset still degrades the extracted patch — the bicubic kernel's edge "
+        "taps resolve against the patch border instead of the real neighbours"
+    )
+
+
+def test_subimg_size_and_scale_are_no_longer_coupled(tmp_path: Path):
+    """``33 % scale`` mattered only because ``_degrade`` ran per patch, giving each
+    patch its own LR sampling grid. Degrading the whole image first removes the
+    per-patch grid, so a size indivisible by scale is no longer a special case."""
+    from sisr.datasets.derived_cache import derive
+
+    rng = np.random.default_rng(seed=21)
+    arr = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
+    for scale in (2, 3, 4):
+        # One directory per scale: the raw-HR cache hashes the manifest only, so
+        # all three would share a database and LMDB refuses a second handle.
+        img_dir = tmp_path / f"x{scale}"
+        img_dir.mkdir()
+        Image.fromarray(arr).save(img_dir / "a.png")
+        ds = TrainDataset(
+            img_dir=img_dir, subimg_size=33, stride=11, scale=scale, build_num_workers=1
+        )
+        n_cols = ds._img_n_cols[0]
+        idx = n_cols + 1
+        row, col = divmod(idx, n_cols)
+        top, left = row * ds.stride, col * ds.stride
+        lr, _ = ds[idx]
+        got = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+        plane = derive(arr, "bicubic", scale)
+        assert np.array_equal(got, plane[top : top + 33, left : left + 33]), (
+            f"scale {scale}: 33 % {scale} == {33 % scale} must not change anything"
+        )
