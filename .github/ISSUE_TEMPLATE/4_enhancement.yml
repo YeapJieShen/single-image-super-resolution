@@ -1,0 +1,45 @@
+name: Enhancement
+description: Something this should do that it does not.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The problem, not a proposed API. What is awkward today is the part worth knowing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this
+      description: >
+        A new architecture is a subclass plus its config dataclasses and a YAML, and needs no new
+        Lightning module. A new *training paradigm* — adversarial, distillation, multi-stage — is
+        the case that may justify one.
+      options:
+        - A new architecture
+        - A new training paradigm
+        - A new loss or metric
+        - Data loading or caching
+        - Config, CLI, or export surface
+        - Documentation
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you considered instead
+      description: >
+        Optional, but the most useful field on this form. A rejected alternative is the part that
+        does not survive in a diff.

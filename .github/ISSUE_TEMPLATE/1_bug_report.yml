@@ -1,0 +1,79 @@
+name: Bug report
+description: Something behaves differently from what it documents.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A fix here ships the test that catches it, proven **RED before and GREEN after** — a test
+        that passes both ways documents nothing. You do not have to write that test, but the more
+        precisely you can say what "wrong" looks like, the sooner one exists.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: The behaviour, not the diagnosis.
+      placeholder: Resuming with --ckpt_path into a run directory that has not saved yet raises FileNotFoundError before the first step.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >
+        The command and the config. Trim the config to the keys that matter if it is long, but
+        say which template it started from — a default that was overridden is often the answer.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or wrong output
+      description: Paste it whole. A trimmed traceback usually loses the frame that matters.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: A release, or the commit SHA if you are on a branch.
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: >
+        OS, Python, torch, and whether you are on CUDA, CPU, or MPS. Under WSL, say so — the
+        multiprocessing start method differs from Windows and it changes worker behaviour.
+      value: |
+        - OS:
+        - Python:
+        - torch:
+        - Accelerator:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: touches
+    attributes:
+      label: Does this involve any of these?
+      description: Each has its own trap, and saying so early saves a round trip.
+      options:
+        - label: A metric number (PSNR, SSIM, LPIPS, DISTS)
+        - label: Colorspace conversion, or Y-channel output
+        - label: The LMDB cache, or dataset building
+        - label: Checkpoints, resuming, or the exported artifact
+        - label: torch.compile

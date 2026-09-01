@@ -1,0 +1,66 @@
+name: Performance
+description: Something is slower than it should be, or a speed-up is worth making.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **A throughput number without its conditions is a lead, not a result.** Two mistakes have
+        cost real time on this project and both are invisible in the number itself:
+
+        - **A mean over a short run hides one-time cost** — worker spawn, cache warm, autotune —
+          and can invert the conclusion. Report **medians with warm-up excluded**, and say how
+          many iterations you discarded.
+        - **A rate read by polling a metrics file is quantised by the logging cadence**, and the
+          quantisation forges precision: repeated windows agree to five significant figures while
+          resolving almost nothing. If you polled, divide the step delta by `log_every_n_steps`
+          and say how many logging intervals your window actually spanned.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is slow
+      description: Which operation, and where you measured it — a step, a validation cycle, cache build, export.
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The measurement
+      description: >
+        Medians, warm-up excluded. If you are proposing a change rather than reporting a
+        regression, "after" can be an estimate — say so.
+      value: |
+        |            | before | after |
+        | ---------- | ------ | ----- |
+        | ms/op or ops/s |    |       |
+
+        - Iterations discarded as warm-up:
+        - Iterations measured:
+        - Polled from a metrics file? If yes, logging intervals spanned:
+    validations:
+      required: true
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Where it was measured
+      description: >
+        Which dataset (a synthetic or absent one makes the number synthetic), which accelerator,
+        and the host's power state — on a laptop off mains the same run has measured roughly half
+        its plugged-in rate, which is more than enough to invent or hide an effect.
+      value: |
+        - Dataset:
+        - Accelerator:
+        - Power state (mains / battery, and any performance mode):
+        - Precision (fp32 / bf16 / amp):
+        - Commit or version:
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you think would help
+      description: Optional. A profile or a flame graph is worth more than a guess, if you have one.

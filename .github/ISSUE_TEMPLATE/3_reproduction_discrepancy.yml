@@ -1,0 +1,70 @@
+name: Reproduction discrepancy
+description: A metric does not match the published number it should.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Two numbers here are comparable only if they were produced the same way.** Most reports
+        of a mismatch turn out to be a convention difference rather than a defect, and the fields
+        below are the ones that decide which. Please fill them even if they seem pedantic —
+        without them the report cannot be acted on.
+
+  - type: input
+    id: paper
+    attributes:
+      label: Which paper, table and row
+      placeholder: Ledig et al. 2017, Table 2, SRGAN-VGG54
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Their number and yours
+      value: |
+        | dataset | published | measured here | delta |
+        | ------- | --------- | ------------- | ----- |
+        |         |           |               |       |
+    validations:
+      required: true
+
+  - type: textarea
+    id: convention
+    attributes:
+      label: How the metric was computed
+      description: >
+        These four decide comparability more often than the model does. **SSIM has two live
+        conventions in this repo** and they do not agree: the SRResNet line defaults to `daala`,
+        which is what Ledig et al. used, and everything else to `wang`, which is what most of the
+        SR literature reports. PSNR-Y likewise differs by a constant offset between the
+        studio-range and full-range definitions.
+      value: |
+        - Metric and channel (e.g. PSNR-Y, SSIM-Y, LPIPS):
+        - SSIM convention, if applicable (wang / daala):
+        - Border cropped before scoring, in pixels:
+        - Scale factor:
+    validations:
+      required: true
+
+  - type: textarea
+    id: how
+    attributes:
+      label: What produced your number
+      description: >
+        The config, the checkpoint or weights, and the step it came from. If it was read off a
+        training curve rather than a scored evaluation pass, say so — the two are not the same
+        measurement, and a checkpoint's filename does not always name the step a curve uses.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Already ruled out
+      description: Tick what you have checked. Nothing here is required; it just saves a round trip.
+      options:
+        - label: The LR images were produced by this repo's degradation, not another resize
+        - label: The comparison uses the same crop border on both sides
+        - label: The model reached the step the published result was trained to
