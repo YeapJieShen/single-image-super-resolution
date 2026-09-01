@@ -401,37 +401,80 @@ class BenchmarkImageLogger(Callback):
                 continue
 
             if self.log_per_image_metrics:
-                for key, psnr_val in psnr_dict.items():
-                    tag = f"per_image/{dataset_name}/psnr/{key}/{filename}"
-                    self._tb_experiment.add_scalar(tag, psnr_val, global_step=step)
-                for key, ssim_val in ssim_dict.items():
-                    tag = f"per_image/{dataset_name}/ssim/{key}/{filename}"
-                    self._tb_experiment.add_scalar(tag, ssim_val, global_step=step)
+                self._emit_per_image_scalars(dataset_name, filename, psnr_dict, ssim_dict, step)
 
             if not should_log_images:
                 continue
 
             # One host transfer per image, only on cycles that log strips.
-            lr_cpu = lr_img[i].cpu()
-            sr_cpu = sr[i].cpu()
-            hr_cpu = hr_img[i].cpu()
-
-            # Triptych: bicubic | SR | HR, all at HR size.
-            # The bicubic panel is the LR upsampled to HR via bicubic
-            # interpolation — the standard SR baseline.  For SRCNN the
-            # LR is already at HR size (pre-upsampled in the dataset),
-            # so this resamples at 1:1 and is near-identity.  For
-            # SRResNet (LR < HR) it upscales to HR for direct visual
-            # comparison against SR.  SR is center-padded only when
-            # smaller than HR (SRCNN with padding='valid') to preserve
-            # full HR context on the right.
-            target_hw = hr_cpu.shape[-2:]
-            bicubic = self._bicubic_to(lr_cpu, target_hw)
-            sr_padded = self._pad_to_match(sr_cpu, target_hw)
-            strip = torchvision.utils.make_grid(
-                [bicubic, sr_padded, hr_cpu], nrow=3, padding=2, pad_value=0.5
+            self._emit_triptych(
+                dataset_name, filename, lr_img[i].cpu(), sr[i].cpu(), hr_img[i].cpu(), step
             )
-            self._tb_experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
+
+    def _emit_per_image_scalars(
+        self,
+        dataset_name: str,
+        filename: str,
+        psnr: dict[str, float],
+        ssim: dict[str, float],
+        step: int,
+    ) -> None:
+        """Write one image's PSNR/SSIM scalars under the ``per_image/`` hierarchy.
+
+        A deeper hierarchy than the aggregate tags on purpose: these are one
+        series per image per key, and mixing them into ``psnr/{set}/{key}``
+        would bury the per-set means they are meant to explain.
+
+        Args:
+            dataset_name: Benchmark set the image belongs to.
+            filename: Source image stem, the tag's leaf.
+            psnr: ``key -> value`` for this one image.
+            ssim: ``key -> value`` for this one image.
+            step: Logger step to stamp, from ``_logger_step``.
+        """
+        assert self._tb_experiment is not None
+        for key, value in psnr.items():
+            tag = f"per_image/{dataset_name}/psnr/{key}/{filename}"
+            self._tb_experiment.add_scalar(tag, value, global_step=step)
+        for key, value in ssim.items():
+            tag = f"per_image/{dataset_name}/ssim/{key}/{filename}"
+            self._tb_experiment.add_scalar(tag, value, global_step=step)
+
+    def _emit_triptych(
+        self,
+        dataset_name: str,
+        filename: str,
+        lr_cpu: torch.Tensor,
+        sr_cpu: torch.Tensor,
+        hr_cpu: torch.Tensor,
+        step: int,
+    ) -> None:
+        """Compose and emit one ``bicubic | SR | HR`` strip, all panels at HR size.
+
+        The bicubic panel is the LR upsampled to HR by bicubic interpolation --
+        the standard SR baseline. For SRCNN the LR is already at HR size
+        (pre-upsampled in the dataset), so this resamples at 1:1 and is
+        near-identity; for SRResNet (LR < HR) it upscales for direct visual
+        comparison against SR. SR is centre-padded **only when smaller than
+        HR** (SRCNN with ``padding='valid'``), which preserves full HR context
+        on the right rather than cropping the reference to match.
+
+        Args:
+            dataset_name: Benchmark set, the tag's first segment.
+            filename: Source image stem, the tag's leaf.
+            lr_cpu: This image's LR, already on the host.
+            sr_cpu: This image's reconstruction, already on the host.
+            hr_cpu: This image's reference, already on the host.
+            step: Logger step to stamp, from ``_logger_step``.
+        """
+        assert self._tb_experiment is not None
+        target_hw = hr_cpu.shape[-2:]
+        bicubic = self._bicubic_to(lr_cpu, target_hw)
+        sr_padded = self._pad_to_match(sr_cpu, target_hw)
+        strip = torchvision.utils.make_grid(
+            [bicubic, sr_padded, hr_cpu], nrow=3, padding=2, pad_value=0.5
+        )
+        self._tb_experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
 
     def _flush_buffer(self, pl_module: lightning.LightningModule) -> None:
         """Log per-set mean PSNR/SSIM/perceptual scores from the buffered samples.
