@@ -908,6 +908,51 @@ class SRLightning(lightning.LightningModule):
             )
         return int(scale)
 
+    @staticmethod
+    def _param_groups_from_layer_lrs(
+        conv_layers: list[torch.nn.Conv2d], lrs: list[float | list[float]]
+    ) -> list[dict[str, Any]]:
+        """Turn one ``layer_lrs`` entry per ``Conv2d`` into optimizer param groups.
+
+        A scalar entry gives the layer's weight and bias one shared LR; a
+        ``[weight_lr, bias_lr]`` pair splits them, which is what a Caffe
+        prototxt's two per-layer ``param`` blocks express.
+
+        Args:
+            conv_layers: The model's ``Conv2d`` modules, in traversal order.
+            lrs: One entry per layer, already length-checked by the caller.
+
+        Returns:
+            Param groups in layer order, a pair entry contributing two.
+
+        Raises:
+            ValueError: If a pair entry is not exactly two values, or aims a
+                bias LR at a layer built with ``bias=False`` -- silently
+                dropping it would leave the config claiming a rate nothing
+                applies.
+        """
+        groups: list[dict[str, Any]] = []
+        for i, (layer, lr) in enumerate(zip(conv_layers, lrs, strict=True)):
+            if isinstance(lr, int | float):
+                groups.append({"params": list(layer.parameters()), "lr": float(lr)})
+                continue
+            if len(lr) != 2:
+                raise ValueError(
+                    f"training_config.layer_lrs[{i}] has {len(lr)} values; a non-scalar "
+                    f"entry must be exactly 2 -- [weight_lr, bias_lr]. Use a bare float "
+                    f"to give weight and bias one shared LR."
+                )
+            weight_lr, bias_lr = lr
+            groups.append({"params": [layer.weight], "lr": float(weight_lr)})
+            if layer.bias is None:
+                raise ValueError(
+                    f"training_config.layer_lrs[{i}] sets bias_lr={bias_lr}, but that "
+                    f"Conv2d has no bias (built with bias=False). Use a bare float for "
+                    f"bias-free layers."
+                )
+            groups.append({"params": [layer.bias], "lr": float(bias_lr)})
+        return groups
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build optimizer (and optional scheduler) from top-level YAML.
 
@@ -952,10 +997,7 @@ class SRLightning(lightning.LightningModule):
                     f"a Conv2d; these do not: {other}. Set layer_lrs=None for models with "
                     f"non-Conv layers (BatchNorm, PReLU, etc.)."
                 )
-            param_groups = [
-                {"params": list(layer.parameters()), "lr": lr}
-                for layer, lr in zip(conv_layers, lrs, strict=False)
-            ]
+            param_groups = self._param_groups_from_layer_lrs(conv_layers, lrs)
             optimizer = self.optimizer(param_groups)
 
         if self.lr_scheduler is None:

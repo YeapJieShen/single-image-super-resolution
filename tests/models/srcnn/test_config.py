@@ -9,7 +9,7 @@ def test_srcnn_training_config_paper_defaults():
     cfg = SRCNNTrainingConfig()
     # model_colorspace was removed in the SR base-classes refactor;
     # colorspace intent is now expressed by pairing with sisr.processors.YChannelProcessor.
-    assert cfg.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
+    assert cfg.layer_lrs == [[1.0e-4, 1.0e-5], [1.0e-4, 1.0e-5], [1.0e-5, 1.0e-5]]
     # Unlike SRResNet, not paper-fixed to one scale — SRCNN's own model
     # carries no 'scale' hparam at all, and the paper reports x2/x3/x4.
     assert cfg.scale is None
@@ -43,7 +43,7 @@ def test_srcnn_training_config_layer_lrs_independent_per_instance():
     a = SRCNNTrainingConfig()
     b = SRCNNTrainingConfig()
     a.layer_lrs.append(1.0)
-    assert b.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
+    assert b.layer_lrs == [[1.0e-4, 1.0e-5], [1.0e-4, 1.0e-5], [1.0e-5, 1.0e-5]]
 
 
 def test_srcnn_eval_config_psnr_channels_independent_per_instance():
