@@ -1340,6 +1340,28 @@ def test_rolling_window_is_not_seeded_on_a_fresh_run(tmp_path: Path):
     assert cb._rolling == []
 
 
+def test_rolling_seed_survives_a_dirpath_that_does_not_exist_yet(tmp_path: Path):
+    """Resuming into a *fresh* run directory must reach training, not crash.
+
+    Lightning creates the checkpoint directory lazily, inside its IO plugin, at
+    the first save — so on a resume into a run directory that has not saved yet
+    there is no directory to list. The guard checked only that ``dirpath`` was
+    set, so ``iterdir()`` raised ``FileNotFoundError`` at ``on_train_start``:
+    after model construction, dataloader setup and the sanity pass, which on an
+    adversarial config is tens of minutes thrown away.
+    """
+    dirpath = tmp_path / "version_1" / "checkpoints"
+    assert not dirpath.exists()
+    cb = SRWeightsCheckpoint(
+        monitor_metric=None, keep_last=2, dirpath=str(dirpath), filename_prefix="sr-weights"
+    )
+
+    cb.on_train_start(MagicMock(ckpt_path=str(tmp_path / "resumed-from.ckpt")), MagicMock())
+
+    assert cb._rolling == []
+    assert not dirpath.exists(), "seeding must not create the directory Lightning owns"
+
+
 def test_rolling_seed_is_noop_when_monitor_is_set(tmp_path: Path):
     """With a monitor, Lightning's top-k owns retention — seeding would evict
     files top-k still wants, exactly as ``_enforce_rolling_window`` must not."""
