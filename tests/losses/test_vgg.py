@@ -196,6 +196,10 @@ def test_feature_scale_squares_into_an_mse_and_is_linear_in_an_l1():
                 layer="vgg22", feature_scale=0.5, distance=distance, weights=None
             )
         scaled._vgg.load_state_dict(unscaled._vgg.state_dict())
+        # An unbound loss now refuses to compute; both sides get the same
+        # binding so the ratio still isolates feature_scale.
+        unscaled.bind(RGBProcessor())
+        scaled.bind(RGBProcessor())
 
         ratio = scaled(x, target).item() / unscaled(x, target).item()
 
@@ -208,6 +212,9 @@ def test_before_activation_changes_the_features(vgg22):
         pre = VGG19FeatureLoss(layer="vgg22", before_activation=True, weights=None)
     pre._vgg.load_state_dict(vgg22._vgg.state_dict(), strict=True)
     x, target = torch.rand(1, 3, 32, 32), torch.rand(1, 3, 32, 32)
+    # Same binding on both, so the difference isolates before_activation.
+    pre.bind(RGBProcessor())
+    vgg22.bind(RGBProcessor())
 
     assert pre(x, target).item() != pytest.approx(vgg22(x, target).item())
 
@@ -329,3 +336,62 @@ def test_to_empty_with_recurse_false_leaves_the_vgg_weights_untouched(vgg22):
     assert len(after) == len(before)
     for b, a in zip(before, after, strict=True):
         assert torch.equal(b, a)
+
+
+# ---------------------------------------------------------------------------
+# "never bound" must be loud, not silently [0, 1]
+# ---------------------------------------------------------------------------
+
+
+def test_unbound_vgg_loss_refuses_to_compute(vgg22: VGG19FeatureLoss):
+    """__init__ set _gain=1.0, _offset=0.0 -- the identity -- so an unbound loss
+    silently behaved as though the model emits [0, 1], and "never bound" was
+    indistinguishable at runtime from "bound to a [0, 1] processor".
+
+    The identical question is already answered the other way one seam over:
+    SRProcessor.output_range is abstract rather than defaulted, and says why --
+    "a wrong inherited default is the failure this exists to prevent". The
+    consumer of that carefully-abstract value must not hand itself a default."""
+    with pytest.raises(RuntimeError, match="bind"):
+        vgg22(torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+
+
+def test_unbound_error_names_both_live_paths(vgg22: VGG19FeatureLoss):
+    """Whoever hits this has written a custom composite and needs to know the
+    contract exists, so the message has to say what to do about it."""
+    with pytest.raises(RuntimeError) as excinfo:
+        vgg22(torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    message = str(excinfo.value)
+    assert "WeightedSumLoss" in message
+    assert "bind" in message
+
+
+def test_bound_directly_is_unaffected(vgg22: VGG19FeatureLoss):
+    """Shipped path 1: an SRLoss handed to SRLightning as the criterion."""
+    vgg22.bind(RGBProcessor())
+    assert torch.isfinite(vgg22(torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16)))
+
+
+def test_bound_through_weighted_sum_is_unaffected(vgg22: VGG19FeatureLoss):
+    """Shipped path 2: nested in WeightedSumLoss, which forwards bind() to its
+    SRLoss terms. This is how the flagship reproduction's content loss is wired."""
+    from sisr.losses import WeightedSumLoss
+
+    composite = WeightedSumLoss(terms={"vgg": vgg22}, weights={"vgg": 1.0})
+    composite.bind(RGBSignedOutputProcessor())
+    assert torch.isfinite(composite(torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16)))
+
+
+def test_signed_range_processor_actually_changes_the_mapping(vgg22: VGG19FeatureLoss):
+    """The bug's consequence, pinned: [-1, 1] and [0, 1] must not agree. If they
+    did, the silent default would have been harmless and this is all theatre."""
+    x = torch.rand(1, 3, 16, 16) * 2 - 1
+    y = torch.rand(1, 3, 16, 16) * 2 - 1
+    vgg22.bind(RGBProcessor())
+    as_unit = vgg22(x, y)
+    vgg22.bind(RGBSignedOutputProcessor())
+    as_signed = vgg22(x, y)
+    assert not torch.isclose(as_unit, as_signed), (
+        "a [-1, 1] model scored through [0, 1] logic must differ -- otherwise "
+        "the silently-wrong default cost nothing"
+    )
