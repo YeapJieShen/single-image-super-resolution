@@ -92,12 +92,13 @@ class SRCNNEvalConfig(SREvalConfig):
     outer ``scale=3`` pixels per the standard SR-evaluation convention.
 
     Args:
-        crop_border: Overrides the base default to ``3`` (outer pixels
-            excluded before PSNR / SSIM at the standard ``x3`` scale).
+        crop_border: ``None`` -- derive the field convention's ``scale``
+            pixels from the model, rather than pin a constant that is
+            only right at one scale. Resolved by ``SRLightning``.
         psnr_channels: Overrides the base default to ``['RGB', 'Y']`` —
             ``'Y'`` is the paper's own metric; ``'RGB'`` is a supplementary
             aggregate.
     """
 
-    crop_border: int = 3
+    crop_border: int | None = None
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])

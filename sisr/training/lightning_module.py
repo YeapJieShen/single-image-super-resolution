@@ -96,6 +96,13 @@ class SRLightning(lightning.LightningModule):
         self.processor = processor
         self.training_config = training_config or SRTrainingConfig()
         self.eval_config = eval_config or SREvalConfig()
+        # crop_border=None means "the field convention: the model's scale".
+        # Resolved here, once, BEFORE the scorer is built -- the scorer and
+        # every artifact's sisr_meta must record the number actually used.
+        if self.eval_config.crop_border is None:
+            self.eval_config.crop_border = self._resolved_scale(
+                "eval_config.crop_border is None (derive the border from the scale)"
+            )
         # The scoring path's one owner: crop, colorspace split, both
         # reductions and the tag grammar. BenchmarkImageLogger uses this
         # same object, so the two paths cannot disagree.
@@ -880,6 +887,26 @@ class SRLightning(lightning.LightningModule):
         """
         _, sr_rgb = self._forward_lr(batch)
         return sr_rgb
+
+    def _resolved_scale(self, why: str) -> int:
+        """The run's upscaling factor, from the training config or the model.
+
+        Args:
+            why: What needed the scale, for the error message.
+
+        Raises:
+            ValueError: If neither ``training_config.scale`` nor the model's own
+                ``scale`` hparam is set, so there is nothing to derive from.
+        """
+        scale = self.training_config.scale
+        if scale is None:
+            scale = self.model.hparams.get("scale")
+        if scale is None:
+            raise ValueError(
+                f"{why}, but no scale is available: set training_config.scale, or use a "
+                f"model that declares a 'scale' hparam, or set the value explicitly."
+            )
+        return int(scale)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build optimizer (and optional scheduler) from top-level YAML.

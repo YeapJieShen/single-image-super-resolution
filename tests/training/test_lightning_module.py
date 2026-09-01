@@ -2016,3 +2016,40 @@ def test_an_explicit_example_input_shape_is_still_checked_not_overwritten(
 
     with pytest.raises(ValueError, match="example_input_shape"):
         lit.setup(stage="fit")
+
+
+def test_subclass_crop_border_follows_the_models_scale_not_a_constant():
+    """A paper-default eval config crops `scale` pixels at ANY scale, not a fixed 3 or 4.
+
+    The SR field's convention -- and the SRCNN authors' own demo code -- crop the
+    outer ``scale`` pixels before scoring. `SRResNetEvalConfig` shipped a hardcoded
+    ``4`` and `SRCNNEvalConfig` a hardcoded ``3``, which are correct only because
+    those templates happen to ship x4 and x3. At any other scale the constant is
+    silently the wrong border, and a border changes the reported PSNR/SSIM without
+    changing the model.
+    """
+    model = SRResNet(scale=2, num_residual_blocks=1, hidden_channel=4)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SRResNetEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.eval_config.crop_border == 2, (
+        "a scale-2 run must crop 2 border pixels, not the shipped constant"
+    )
+    assert lit.scorer.eval_config.crop_border == 2, "the scorer must see the resolved border"
+
+
+def test_explicit_crop_border_still_wins_over_the_scale_default():
+    """An explicit value is an intent, and is never overwritten by the derivation."""
+    model = SRResNet(scale=2, num_residual_blocks=1, hidden_channel=4)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SRResNetEvalConfig(crop_border=8),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.eval_config.crop_border == 8

@@ -20,7 +20,9 @@ def test_srcnn_eval_config_paper_defaults():
     metric, not the YCbCr 3-channel aggregate (which reads optimistically
     high since chroma planes are far smoother than luma)."""
     cfg = SRCNNEvalConfig()
-    assert cfg.crop_border == 3
+    # None = derive the field convention's `scale` pixels; SRLightning resolves it.
+    # Previously a hardcoded 3, right only because this template ships x3.
+    assert cfg.crop_border is None
     assert cfg.psnr_channels == ["RGB", "Y"]
     assert cfg.separate_psnr is False
     # Not overridden — inherits the base SREvalConfig default.

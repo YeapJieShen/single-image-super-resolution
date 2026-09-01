@@ -187,9 +187,14 @@ class SREvalConfig:
     """How to compute validation/test metrics — affects scoring only, not training.
 
     Args:
-        crop_border: Number of border pixels to exclude on each edge before
-            computing PSNR / SSIM.  Standard SR-evaluation convention is to
-            crop the outer ``scale`` pixels (e.g. ``crop_border=3`` for x3).
+        crop_border: Border pixels excluded on each edge before PSNR / SSIM.
+            **``None`` means the SR field's convention: the model's own
+            ``scale``**, resolved once by ``SRLightning`` at construction — the
+            SRCNN authors' released demo code shaves exactly ``scale`` per side.
+            An explicit int is an intent and always wins, ``0`` included. The
+            base default stays ``0``; the per-architecture subclasses use
+            ``None``, so their border can no longer be right at one scale and
+            silently wrong at another.
 
         psnr_channels: Colorspaces or bare single channels PSNR is reported
             for.  Supported values are ``'RGB'``, ``'YCbCr'``, and any
@@ -245,7 +250,7 @@ class SREvalConfig:
             ``sisr_meta``, so any number can be traced back. Ignored by DISTS.
     """
 
-    crop_border: int = 0
+    crop_border: int | None = 0
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB"])
     separate_psnr: bool = False
     ssim_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])

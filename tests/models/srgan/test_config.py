@@ -25,7 +25,7 @@ def test_eval_config_turns_perceptual_metrics_on():
     cfg = SRGANEvalConfig()
     assert cfg.perceptual_keys == ["lpips", "dists"]
     assert cfg.ssim_impl == "daala"  # inherited
-    assert cfg.crop_border == 4  # inherited
+    assert cfg.crop_border is None  # inherited: derived from scale at construction
 
 
 def test_training_config_subclass():
