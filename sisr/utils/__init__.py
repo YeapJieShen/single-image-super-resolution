@@ -1,4 +1,4 @@
-"""Torch-free support code: the LMDB cache and the vendored MATLAB resize.
+"""Torch-free support code: the LMDB cache, the vendored MATLAB resize, power state.
 
 **Nothing is re-exported here, deliberately.** Both submodules are torch-free,
 and :mod:`~sisr.utils.cache` must stay that way: ``parallel_build`` fans out

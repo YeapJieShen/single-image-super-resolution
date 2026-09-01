@@ -48,6 +48,7 @@ def test_build_metadata_top_level_shape():
         "io",
         "eval_config",
         "training",
+        "power",
     }
     assert meta["format"] == "sisr-meta-v2"
 
@@ -372,3 +373,16 @@ def test_build_metadata_refuses_an_artifact_that_cannot_state_its_scale():
 
     with pytest.raises(ValueError, match="without a scale"):
         build_metadata(module)
+
+
+def test_build_metadata_records_the_hosts_power_state():
+    """Provenance a rate can be checked against: off mains costs roughly half.
+
+    The value is whatever this host reports — asserting the *shape* is the
+    point, since a run on battery must produce a record that says so rather
+    than one that is merely silent.
+    """
+    meta = build_metadata(_make_srcnn_lit())
+    assert set(meta["power"]) == {"on_mains", "overlay", "note"}
+    assert isinstance(meta["power"]["note"], str) and meta["power"]["note"]
+    assert isinstance(meta["power"]["on_mains"], bool | type(None))

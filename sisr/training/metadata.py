@@ -13,7 +13,8 @@ helper (``format``/``kind``/``created``/``versions``/``training``), so the two p
 cannot drift apart either. Each carries a ``kind`` field: ``"sr_model"`` for :func:`build_metadata`,
 ``"component"`` for :func:`build_component_metadata`. This is an additive field, not a format
 change — ``FORMAT_VERSION`` is unchanged, and its absence on a file written before ``kind``
-existed means ``"sr_model"``, the only kind that existed then.
+existed means ``"sr_model"``, the only kind that existed then. ``power`` is additive on the
+same terms -- absent on a file written before it existed, which means unrecorded, not mains.
 
 The first describes the *generator*, the second one other named component; each
 function's ``Returns`` lists its own fields. **Attaching the generator's shape to a
@@ -36,6 +37,7 @@ import lightning
 import torch
 
 import sisr
+from sisr.utils.power import read_power_state
 
 if TYPE_CHECKING:
     from .lightning_module import SRLightning
@@ -101,6 +103,11 @@ def _envelope(
             "monitor": monitor,
             "monitor_value": monitor_value,
         },
+        # Read once per process, so this is the state near the START of the run,
+        # not at this save. A rate quoted from an artifact whose provenance says
+        # BATTERY is then self-refuting rather than merely plausible -- which is
+        # the whole point, since off mains costs roughly half.
+        "power": read_power_state().as_dict(),
     }
 
 

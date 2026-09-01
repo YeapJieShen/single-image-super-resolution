@@ -751,6 +751,39 @@ def test_before_instantiate_classes_calls_torch_setter(monkeypatch):
     assert calls == ["medium"]
 
 
+def test_fit_warns_when_the_host_is_not_on_reference_power(monkeypatch):
+    """A long run announces contaminated timing conditions before it starts.
+
+    Advisory only: the run proceeds. The 87 minutes a flat battery cost once
+    were the loud half of that incident; the rate that went into the notes as
+    sound was the half worth catching.
+    """
+    from sisr.utils.power import PowerState
+
+    monkeypatch.setattr(
+        "sisr.utils.power.read_power_state",
+        lambda: PowerState(False, None, "BATTERY, overlay Better battery"),
+    )
+    cli = _make_cli_stub(subcommand="fit", matmul_precision=None)
+
+    with pytest.warns(UserWarning, match="not the reference condition"):
+        cli.before_instantiate_classes()
+
+
+def test_non_fit_subcommands_do_not_check_power(monkeypatch, recwarn):
+    """`validate`/`test`/`export` are short; the check is about long-run timing."""
+    from sisr.utils.power import PowerState
+
+    monkeypatch.setattr(
+        "sisr.utils.power.read_power_state",
+        lambda: PowerState(False, None, "BATTERY, overlay Better battery"),
+    )
+
+    _make_cli_stub(subcommand="validate", matmul_precision=None).before_instantiate_classes()
+
+    assert not [w for w in recwarn if "reference condition" in str(w.message)]
+
+
 def test_before_instantiate_classes_skips_when_unset(monkeypatch):
     """When matmul_precision is None, torch.set_float32_matmul_precision is NOT called."""
     import torch

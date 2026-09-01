@@ -41,6 +41,7 @@ from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCL
 
 from .export import to_onnx
 from .training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
+from .utils.power import warn_unless_reference_power
 
 # Checkpoints saved before SRLightning.__init__ stopped flattening self.hparams for
 # TensorBoard display (see its docstring) stored ONLY these two dataclasses' fields —
@@ -260,12 +261,20 @@ class SRLightningCLI(LightningCLI):
         )
 
     def before_instantiate_classes(self) -> None:
-        """Apply process-global flags (``matmul_precision``) before class instantiation."""
+        """Apply process-global flags, and check the host's power before a long run.
+
+        The power check is ``fit``-only and advisory: it never refuses, because a
+        correctness-only run on a laptop is legitimate. What is not legitimate is
+        not knowing afterwards which conditions a timing came from, so the state
+        is also recorded in every artifact the run writes.
+        """
         if self.subcommand is None:
             return
         precision = self.config[self.subcommand].matmul_precision
         if precision is not None:
             torch.set_float32_matmul_precision(precision)
+        if self.subcommand == "fit":
+            warn_unless_reference_power()
 
     def _parse_ckpt_path(self) -> None:
         """Reload ``--ckpt_path`` hyperparameters via ``_reconstruct_ckpt_hparams`` first.
