@@ -340,3 +340,72 @@ def test_srcnn_validation_skips_non_image_files(tiny_rgb_image_dir: Path):
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert len(ds) == 3  # only the 3 PNGs
     assert all(p.suffix == ".png" for p in ds.img_paths)
+
+
+# ---------------------------------------------------------------------------
+# modcrop: the authors' degradation order
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def non_divisible_image_dir(tmp_path: Path) -> Path:
+    """One 481x321 image -- BSD100's exact size, where 481 % 3 == 1.
+
+    The shared fixture is 36x36, divisible by 2/3/4, so it cannot see this
+    defect at all. At x3 most standard benchmark images are NOT divisible,
+    so the affected case is the common one rather than the corner.
+    """
+    rng = np.random.default_rng(seed=7)
+    arr = rng.integers(0, 256, size=(321, 481, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(tmp_path / "bsd_like.png")
+    return tmp_path
+
+
+def test_validation_hr_is_cropped_to_a_multiple_of_scale(non_divisible_image_dir: Path):
+    """The released demo_SR.m applies `modcrop` to the ground truth BEFORE the
+    bicubic round trip:
+
+        im_gnd = modcrop(im, up_scale);
+        im_l   = imresize(im_gnd, 1/up_scale, 'bicubic');
+        im_b   = imresize(im_l,   up_scale,   'bicubic');
+
+    Without it a 481-wide image is downsampled to 160 columns and stretched
+    back over 481, so the LR grid does not align with the HR one."""
+    ds = ValidationDataset(img_dir=non_divisible_image_dir, scale=3)
+    lr, hr = ds[0]
+    assert hr.shape[-2:] == (321, 480), "HR must be modcropped to a multiple of scale"
+    assert lr.shape == hr.shape, "SRCNN is pre-upsampled: LR and HR share a size"
+
+
+def test_validation_lr_matches_the_authors_degradation_order(non_divisible_image_dir: Path):
+    """Byte-exact against modcrop-then-degrade, computed independently here."""
+    from sisr.datasets.srcnn import _degrade
+
+    arr = np.array(Image.open(next(non_divisible_image_dir.iterdir())).convert("RGB"))
+    h, w = arr.shape[:2]
+    expected_hr = arr[: h - h % 3, : w - w % 3]
+    expected_lr = _degrade(expected_hr, 3)
+
+    lr, hr = ValidationDataset(img_dir=non_divisible_image_dir, scale=3)[0]
+    got_hr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+    got_lr = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+    assert np.array_equal(got_hr, expected_hr)
+    assert np.array_equal(got_lr, expected_lr)
+
+
+def test_train_and_validation_share_one_modcrop_implementation():
+    """The convention had three sites and two answers. It must now have one
+    owner that the training grid and the validation loader both call."""
+    from sisr.datasets.srcnn import _modcrop, _modcrop_extent
+
+    assert _modcrop_extent(481, 3) == 480
+    assert _modcrop_extent(321, 3) == 321  # already a multiple -- unchanged
+    assert _modcrop(np.zeros((321, 481, 3), np.uint8), 3).shape == (321, 480, 3)
+
+
+def test_validation_untouched_when_already_divisible(tiny_rgb_image_dir: Path):
+    """36x36 divides by 2, 3 and 4, so no shipped-size behaviour changes."""
+    for scale in (2, 3, 4):
+        lr, hr = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=scale)[0]
+        assert hr.shape[-2:] == (36, 36)
+        assert lr.shape == hr.shape
