@@ -681,6 +681,11 @@ class _RollingSaveMixin(_RollingBase):
         assigned until the checkpoint connector restores state, which is after
         every ``setup`` hook.
 
+        A ``dirpath`` that does not exist yet is a no-op, not an error: resuming
+        into a **fresh** run directory (branching a run, or restarting a crashed
+        one so the old directory survives as evidence) reaches this hook before
+        Lightning has created it.
+
         Args:
             trainer: The active trainer — supplies ``ckpt_path``.
             pl_module: Unused; part of the hook signature.
@@ -688,9 +693,15 @@ class _RollingSaveMixin(_RollingBase):
         super().on_train_start(trainer, pl_module)
         if self.monitor is not None or not trainer.ckpt_path or not self.dirpath:
             return
+        # Lightning creates dirpath lazily, in its IO plugin, at the first save --
+        # so resuming into a run directory that has not saved yet finds nothing to
+        # list. Missing and empty mean the same thing here: no window to adopt.
+        directory = Path(self.dirpath)
+        if not directory.is_dir():
+            return
         found = sorted(
             (int(match.group(1)), str(path))
-            for path in Path(self.dirpath).iterdir()
+            for path in directory.iterdir()
             if (match := self._rolling_pattern.fullmatch(path.name))
         )
         self._rolling = [path for _, path in found]
