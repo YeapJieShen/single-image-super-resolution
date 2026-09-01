@@ -64,7 +64,8 @@ data:
         img_dir: data/BSD100_HR
         scale: *scale
   train_dataloader_kwargs:
-    batch_size: 64             # not specified by the paper; this project's choice
+    # The authors' released Caffe train prototxt: hdf5_data_param.batch_size 128.
+    batch_size: 128
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.
     num_workers: 16
     pin_memory: true
@@ -76,9 +77,11 @@ data:
 
 trainer:
   max_epochs: -1
-  # ~0.8x the paper's 8e8 backprops, read as per-sample updates. An approximation.
-  max_steps: 10000000
-  val_check_interval: 500000   # 20 validation cycles over the run
+  # The paper's 8e8 backpropagations exactly, at batch 128. "Backpropagations" is
+  # per-sample: the authors' solver caps at max_iter 15000000 ITERATIONS, so the
+  # mini-batch reading (8e8 iterations) is impossible against their own file.
+  max_steps: 6250000
+  val_check_interval: 312500   # 20 validation cycles over the run
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
