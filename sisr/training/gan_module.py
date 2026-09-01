@@ -180,16 +180,12 @@ class SRGANLightning(SRLightning):
         pretrained weights and silently restart it, while the discriminator and
         the optimizer state carried on from where they were.
 
-        On a ``fit --ckpt_path`` resume, this runs (``Trainer._run`` calls the
-        setup hook at line 1039) *before* the resume restores the module's own
-        state (line 1046), so the resumed generator wins and the final model
-        state is correct either way. The costs are one wasted weights read and
-        a hard dependency on ``init_from``'s artifact existing on the resuming
-        box, even though its result is about to be discarded. The upside: the
-        five metadata refusals below still run on every resume, so a config
-        that has drifted from the run being resumed (a changed architecture,
-        processor, or scale) is still caught rather than only checked on a
-        fresh ``fit``.
+        On a ``fit --ckpt_path`` resume this runs *before* the resume restores
+        the module's state, so the resumed generator wins and the final state is
+        correct either way. It costs one wasted read and a hard dependency on
+        ``init_from``'s artifact existing on the resuming box. The upside is that
+        the metadata refusals below run on **every** resume, so a config that has
+        drifted from the run being resumed is still caught.
 
         Args:
             stage: Lightning trainer stage — ``'fit'``, ``'validate'``,
@@ -561,16 +557,14 @@ class SRGANLightning(SRLightning):
         which would both fail this check for no reason and pay a
         full-resolution generator forward on CPU at setup.
 
-        The probe forward puts the **whole module** in ``eval`` mode under
+        The probe forward puts the **whole module** in ``eval`` under
         ``no_grad``, not just ``self.model``: the forward selector reads
-        ``self.training`` (the LightningModule's flag), so ``self.model.eval()``
-        alone would still route a compiled run through ``self._compiled`` and
-        trigger a dynamo compile here — before, and at a different shape from,
-        the deliberate :meth:`on_fit_start` warm-up. ``self.eval()`` recurses
-        into ``self.model``, so the reason the eval-mode forward existed in the
-        first place still holds: a train-mode forward would fold this sample
-        into the generator's BatchNorm running statistics before training has
-        taken a single step.
+        ``self.training``, so ``self.model.eval()`` alone would still route a
+        compiled run through ``self._compiled`` and trigger a dynamo compile
+        here, at a different shape from the deliberate :meth:`on_fit_start`
+        warm-up. ``self.eval()`` recurses, so the original reason still holds
+        too — a train-mode forward would fold this sample into the generator's
+        BatchNorm statistics before training has taken a step.
 
         Args:
             lr: LR sample, ``(C, H, W)``.

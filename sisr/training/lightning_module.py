@@ -312,12 +312,11 @@ class SRLightning(lightning.LightningModule):
     def _extra_probe(self, lr: torch.Tensor, hr: torch.Tensor, source: str) -> None:
         """Subclass hook: additional checks against a real ``(lr, hr)`` sample.
 
-        No-op by default. Called from inside
+        No-op by default. Called inside
         :func:`~sisr.training.probe.probe_pair`'s guarded block, so a subclass
-        gets RNG transparency and pickle-clone sampling without asking for them
-        — and cannot opt out of them either. A subclass that needs its *own*
-        sample should use ``probe_pair`` directly rather than reading a dataset,
-        for the reasons that module documents.
+        gets RNG transparency and pickle-clone sampling — and cannot opt out.
+        A subclass needing its *own* sample must use ``probe_pair`` directly
+        rather than read a dataset; see that module.
 
         Args:
             lr: LR sample, ``(C, H, W)``.
@@ -328,12 +327,10 @@ class SRLightning(lightning.LightningModule):
     def _adopt_example_input_shape(self, lr: torch.Tensor) -> None:
         """Take the shape from the real train sample when the config states none.
 
-        The value was previously written out by hand and then checked against this
-        exact tensor — two different rules to compute (crop size over scale for a
-        native-LR dataset, sub-image size for a pre-upsampled one), both derivable
-        from data the probe already holds. A value the code can check is a value
-        the code can supply. An explicit setting still wins, and is still checked,
-        so a config can state an intent and have it verified.
+        Derived from the probe's own sample rather than hand-written, since the
+        two rules (crop size over scale for native-LR, sub-image size for
+        pre-upsampled) are both computable from data it already holds. An
+        explicit setting still wins, and is still checked.
 
         Args:
             lr: Real LR sample from the train dataset, shape ``(C, H, W)``.
@@ -350,9 +347,8 @@ class SRLightning(lightning.LightningModule):
         """Raise if ``example_input_shape``'s H/W disagrees with the real train LR patch.
 
         Args:
-            expected: The configured ``example_input_shape``. Passed in by the
-                caller that already branched on it being set, rather than re-read
-                here, so it is a shape and not a maybe-shape.
+            expected: The configured ``example_input_shape``, passed in by the
+                caller that already branched on it, so it is not a maybe-shape.
             lr: Real LR sample from the train dataset, shape ``(C, H, W)``.
             train_dataset: The train dataset instance, for its class name in
                 the error.
@@ -451,37 +447,29 @@ class SRLightning(lightning.LightningModule):
     def _forward_lr(
         self, lr_img: torch.Tensor, need_sr_rgb: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """LR-only core of the forward pipeline: extract → model → (reconstruct).
+        """LR-only core of the forward pipeline: extract -> model -> (reconstruct).
 
-        Factored out of :meth:`_forward_sr` so :meth:`predict_step` can share
-        the exact colorspace pipeline instead of forking it — HR is only ever
-        needed for the center-crop :meth:`_forward_sr` adds on top, which has
-        no meaning without an HR reference at inference time.
+        Shared with :meth:`predict_step` rather than forked, so the colorspace
+        pipeline cannot diverge; HR is only needed for the center-crop
+        :meth:`_forward_sr` adds, which is meaningless at inference time.
 
         Dispatches to the ``torch.compile``d model iff ``self.training`` and
-        ``training_config.compile_backend`` is set; ``self.training`` is
-        exactly right here since Lightning maintains it and training uses
-        fixed patch shapes while validation/predict see widely varying
-        image sizes (see ``training_config.compile_backend``'s docstring).
+        ``training_config.compile_backend`` is set. ``self.training`` is the
+        right gate: training uses fixed patch shapes while validation/predict
+        see widely varying image sizes.
 
         Args:
-            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
-                ``(B, 3, H, W)``.
-            need_sr_rgb: Whether to run ``processor.reconstruct`` at all.
-                ``training_step`` (via :meth:`_step`) is the only caller that
-                passes ``False``: it discards ``sr_rgb`` entirely
-                (``loss, *_ = self._step(...)``), yet reconstruct still costs
-                real per-step time (measured: ~11.5% of a data-free SRCNN
-                step for ``YChannelProcessor``'s bicubic Cb/Cr interpolate;
-                ~0 for SRResNet's identity/elementwise processors). Every
-                other caller — validation, test, predict, and direct calls
-                like these from tests — keeps the default ``True`` and gets
-                exactly the reconstruction this project has always produced.
+            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, ``(B, 3, H, W)``.
+            need_sr_rgb: Whether to run ``processor.reconstruct``.
+                ``training_step`` (via :meth:`_step`) is the only caller
+                passing ``False`` — it discards ``sr_rgb``, and reconstruct
+                costs real time (~11.5% of a data-free SRCNN step for
+                ``YChannelProcessor``; ~0 for SRResNet's elementwise ones).
 
         Returns:
-            ``(sr_model_out, sr_rgb)`` — the raw model output in the model IO
-            colorspace, and the reconstructed SR RGB clamped to ``[0, 1]``;
-            ``sr_rgb`` is ``None`` iff ``need_sr_rgb`` is ``False``.
+            ``(sr_model_out, sr_rgb)`` — raw model output in the model IO
+            colorspace, and the SR RGB clamped to ``[0, 1]``; ``sr_rgb`` is
+            ``None`` iff ``need_sr_rgb`` is ``False``.
         """
         model_input = self.processor.extract(lr_img)
         model_fn = self._compiled if self.training and self._compiled is not None else self.model
@@ -489,14 +477,12 @@ class SRLightning(lightning.LightningModule):
         if not need_sr_rgb:
             return sr_model_out, None
         sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
-        # Clamp display-space output only, here, once — every reconstruct()
-        # consumer (_forward_sr's callers, predict_step) reads through this
-        # one line, so PSNR/SSIM never diverge from what an 8-bit image would
-        # score. sr_model_out (the loss target) is untouched: clamping
+        # Clamp display space once, here: every reconstruct() consumer reads
+        # through this line, so PSNR/SSIM never diverge from what an 8-bit image
+        # would score. sr_model_out (the loss target) stays unclamped -- clamping
         # it would kill gradients on saturated pixels. Idempotent where
-        # reconstruct() already clamps (YCbCrProcessor/YChannelProcessor's
-        # ycbcr_to_rgb) — don't move this into forward() or a processor, or
-        # the bound would depend on training colorspace again.
+        # reconstruct() already clamps. Moving this into forward() or a processor
+        # would make the bound depend on training colorspace again.
         sr_rgb = sr_rgb.clamp(0.0, 1.0)
         return sr_model_out, sr_rgb
 
@@ -518,39 +504,33 @@ class SRLightning(lightning.LightningModule):
     def _forward_sr(
         self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """Canonical SR forward: extract → model → (reconstruct) → crop HR.
+        """Canonical SR forward: extract -> model -> (reconstruct) -> crop HR.
 
-        The single source of truth for the forward pipeline. Shared by
-        :meth:`_step` (which also needs the model-space output for the loss),
-        :meth:`predict_rgb` (the public scoring seam), and — via
-        :meth:`_forward_lr` — :meth:`predict_step` (the HR-free inference
-        seam), so the training, benchmark-logging, and prediction paths
-        cannot silently diverge.
+        The single source of truth for the forward pipeline, shared by
+        :meth:`_step`, :meth:`predict_rgb` and — via :meth:`_forward_lr` —
+        :meth:`predict_step`, so the training, benchmark-logging and
+        prediction paths cannot silently diverge. Do not re-implement it.
 
         Args:
-            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
-                ``(B, 3, H, W)``.
+            lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
-            need_sr_rgb: Forwarded to :meth:`_forward_lr` — see there. The
-                HR crop uses ``sr_model_out.shape[-2:]`` regardless, since
-                every shipped ``SRProcessor.reconstruct`` preserves H/W, so
-                it always agrees with what ``sr_rgb.shape[-2:]`` would be.
+            need_sr_rgb: Forwarded to :meth:`_forward_lr`. The HR crop uses
+                ``sr_model_out.shape[-2:]`` regardless, since every shipped
+                ``SRProcessor.reconstruct`` preserves H/W.
 
         Returns:
-            ``(sr_model_out, sr_rgb, hr_cropped)`` — the raw (unclamped)
-            model output in the model IO colorspace, the reconstructed SR RGB
-            clamped to ``[0, 1]`` (``None`` iff ``need_sr_rgb`` is ``False``),
-            and HR center-cropped to the SR spatial size.
+            ``(sr_model_out, sr_rgb, hr_cropped)`` — raw (unclamped) model
+            output in the model IO colorspace, SR RGB clamped to ``[0, 1]``
+            (``None`` iff ``need_sr_rgb`` is ``False``), and HR center-cropped
+            to the SR spatial size.
 
         Raises:
             ValueError: If ``hr_img`` is spatially smaller than the model
-                output in either dimension — ``center_crop`` would zero-pad
-                instead of cropping, silently corrupting the loss/metrics
-                that follow. :meth:`setup` catches the common cause (a
-                model/dataset ``input_contract`` mismatch) earlier and
-                louder; this is the last-resort guard for callers that
-                bypass it (e.g. direct ``_forward_sr``/``_step`` calls in
-                tests, or a datamodule with no ``trainer`` attached).
+                output — ``center_crop`` would zero-pad instead of crop,
+                silently corrupting the loss and metrics that follow.
+                :meth:`setup` catches the common cause (an ``input_contract``
+                mismatch) earlier and louder; this guards callers that bypass
+                it, such as direct ``_forward_sr``/``_step`` calls in tests.
         """
         sr_model_out, sr_rgb = self._forward_lr(lr_img, need_sr_rgb=need_sr_rgb)
         hr_hw, sr_hw = hr_img.shape[-2:], sr_model_out.shape[-2:]
@@ -606,14 +586,13 @@ class SRLightning(lightning.LightningModule):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Shared forward + loss for training and validation steps.
 
-        The processor handles all colorspace conversion; loss is computed in
-        the model's *output* space (against HR mapped into it via
-        ``processor.extract_target``, which defaults to ``processor.extract``
-        and differs only where a model's input and output ranges differ).
-        Metrics downstream consume ``sr_rgb`` / ``hr_cropped`` (both full
-        RGB, spatially aligned) — unavailable (``None``) when the caller
-        passed ``need_sr_rgb=False``, which is only correct for callers (like
-        ``training_step``) that never look at ``sr_rgb``.
+        The processor does all colorspace conversion; loss is computed in the
+        model's *output* space, against HR mapped into it by
+        ``processor.extract_target`` (defaults to ``extract``, differing only
+        where a model's input and output ranges differ). Downstream metrics
+        consume ``sr_rgb`` / ``hr_cropped``, both RGB and spatially aligned —
+        ``None`` when ``need_sr_rgb=False``, which is only correct for callers
+        that never look at ``sr_rgb``.
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple from a loader. Both RGB,
@@ -763,13 +742,12 @@ class SRLightning(lightning.LightningModule):
     def _check_sampler_ownership(self) -> None:
         """Refuse a distributed run that would let Lightning split the eval loaders.
 
-        :meth:`~sisr.training.datamodule.SRDataModule.train_dataloader` shards the
-        training set itself, precisely so the validation and benchmark loaders are
-        left whole. Lightning's injection is one trainer-wide switch, so leaving it
-        on both double-shards training and splits the benchmark sets --
-        ``DistributedSampler`` pads by repeating samples, so a five-image set across
-        four processes reports a figure that is not that set's score. Silent, and on
-        the metric path, so it is refused rather than warned about.
+        ``SRDataModule.train_dataloader`` shards the training set itself, so the
+        eval loaders stay whole. Lightning's injection is one trainer-wide
+        switch: leaving it on both double-shards training and splits the
+        benchmark sets, and ``DistributedSampler`` pads by *repeating* samples,
+        so a five-image set across four processes reports a figure that is not
+        that set's score. Silent, and on the metric path — refused, not warned.
 
         Raises:
             RuntimeError: If running distributed with Lightning's sampler

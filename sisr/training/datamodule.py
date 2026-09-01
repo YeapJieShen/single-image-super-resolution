@@ -23,15 +23,13 @@ def _validate_spec(field_name: str, spec: dict[str, Any]) -> None:
     """Raise if ``spec`` isn't a well-formed ``{class_path, init_args}`` mapping.
 
     Every dataset field on this module is typed ``dict[str, Any]`` (not the
-    real dataset class) so :meth:`SRDataModule.setup` can instantiate it
-    lazily, only for the stages that need it (see the module docstring). That
-    laziness has a cost: jsonargparse treats the field as an opaque dict, so a
-    dotted CLI override like ``--data.train_dataset.init_args.crops_per_image=8``
-    cannot reach the nested ``init_args`` key — it lands as a stray sibling
-    key next to ``class_path``/``init_args`` instead, invisible to
-    :func:`~lightning.pytorch.cli.instantiate_class`, which silently keeps
-    building the dataset with its old, unoverridden value. This check turns
-    that silent no-op into an immediate, actionable error.
+    real dataset class) so :meth:`SRDataModule.setup` can instantiate it lazily.
+    The cost: jsonargparse treats the field as an opaque dict, so a dotted CLI
+    override like ``--data.train_dataset.init_args.crops_per_image=8`` **cannot
+    reach the nested key** — it lands as a stray sibling next to
+    ``class_path``/``init_args``, invisible to ``instantiate_class``, which goes
+    on building the dataset with the old value. This turns that silent no-op
+    into an immediate error.
 
     Args:
         field_name: Dotted config path for the error message, e.g.
@@ -289,14 +287,13 @@ class SRDataModule(lightning.LightningDataModule):
         kwarg) and the YAML schema does not expose ``shuffle``.
 
         **Training is the only loader this module shards, and it shards it here
-        rather than letting Lightning do it.** Lightning's injection is a single
-        trainer-wide switch, and it would also split the validation and benchmark
-        loaders — which must not be split. ``DistributedSampler`` pads a set to a
-        multiple of the world size by *repeating* samples, so a five-image
-        benchmark across four processes becomes eight, three of them counted
-        twice, and the reported figure is no longer that set's score. Every
-        process therefore evaluates every benchmark image, and the reduction
-        across them is a no-op that also catches divergence.
+        rather than letting Lightning do it.** Lightning's injection is one
+        trainer-wide switch that would also split the eval loaders, and
+        ``DistributedSampler`` pads by *repeating* samples — a five-image
+        benchmark across four processes becomes eight, three counted twice, and
+        the figure is no longer that set's score. Every process therefore scores
+        every benchmark image, and the reduction is a no-op that catches
+        divergence.
 
         Returns:
             DataLoader over the train spec: shuffled, and split per process when

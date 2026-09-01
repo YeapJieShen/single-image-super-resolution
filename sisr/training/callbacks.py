@@ -42,15 +42,9 @@ def _sr(pl_module: lightning.LightningModule) -> "SRLightning":
     with a narrower parameter type is unsound and rejected, so the narrowing
     happens at the boundary instead, once, with a name.
 
-    A cast rather than an ``isinstance`` check on purpose: a module without those
-    attributes already fails at exactly the same call today, and turning that into
-    a different failure is a behaviour change this seam has no business making.
-
-    Args:
-        pl_module: The module Lightning handed the hook.
-
-    Returns:
-        The same object, typed as what it has to be.
+    A cast, not an ``isinstance`` check: a module without those attributes
+    already fails at the same call today, and turning that into a different
+    failure is a behaviour change this seam has no business making.
     """
     return cast("SRLightning", pl_module)
 
@@ -85,14 +79,8 @@ def _logger_step(trainer: lightning.Trainer) -> int:
     ``_batches_that_stepped`` for precisely this reason — "increased once per
     batch disregarding multiple optimizers on purpose for loggers" — and reads
     it back in ``logger_connector``; its own ``LearningRateMonitor`` and
-    ``DeviceStatsMonitor`` reach for the same private attribute, which is what
-    makes matching them here the correct call rather than a shortcut.
-
-    Args:
-        trainer: The active trainer.
-
-    Returns:
-        The batch-counted step shared by every ``self.log`` metric.
+    ``DeviceStatsMonitor`` reach for the same private attribute, which makes
+    matching them here correct rather than a shortcut.
     """
     return trainer.fit_loop.epoch_loop._batches_that_stepped
 
@@ -100,57 +88,44 @@ def _logger_step(trainer: lightning.Trainer) -> int:
 class BenchmarkImageLogger(Callback):
     """Logs bicubic|SR|HR image composites and PSNR/SSIM to TensorBoard for held-out sets.
 
-    Covers one or more held-out test/benchmark dataloaders (Set5, Set14, …).
-    Fires during *both* validation and test stages:
+    Fires during *both* validation and test, and the dataloader indexing
+    differs between them:
 
-    * **During `cli fit` / `cli validate`** — `SRDataModule.val_dataloader()`
-      returns ``[primary_val] + [test_loaders...]``; this callback ignores
-      ``dataloader_idx == 0`` (handled by `SRLightning.validation_step`) and
-      processes indices ``1..N`` against ``dataset_names``.  Images are
-      logged every *n*-th val run (controlled by ``every_n_val_runs``)
-      so TensorBoard storage stays bounded over long training schedules.
-    * **During `cli test`** — `SRDataModule.test_dataloader()` returns the
-      test loaders only (no primary), so indices ``0..N-1`` map straight to
-      ``dataset_names``.  Images are logged every test run (no throttle —
-      ``cli test`` is typically a one-shot final-eval invocation).
+    * **`cli fit` / `cli validate`** — ``val_dataloader()`` returns
+      ``[primary_val] + test_loaders``, so this ignores ``dataloader_idx == 0``
+      (owned by ``SRLightning.validation_step``) and maps ``1..N`` onto
+      ``dataset_names``. Image strips are throttled by ``every_n_val_runs``.
+    * **`cli test`** — ``test_dataloader()`` returns the test loaders only, so
+      ``0..N-1`` map straight across. No throttle; test is one-shot.
 
-    Each image lands as a horizontal **bicubic | SR | HR** strip at HR scale:
-    the LR is bicubic-upsampled to HR size (the standard SR baseline), and the
-    SR output is center-padded when smaller than HR (``padding='valid'``) so
-    all three panels share the same spatial size.
+    Each image is a horizontal **bicubic | SR | HR** strip at HR scale: LR is
+    bicubic-upsampled (the standard SR baseline) and SR is center-padded when
+    ``padding='valid'`` made it smaller, so all three panels align.
 
-    Per-set means go under ``"psnr/{name}/{key}"``, ``"ssim/{name}/{key}"`` and,
-    for each metric in ``eval_config.perceptual_keys``, ``"{metric}/{name}"``
-    (e.g. ``"lpips/Set5"``) every cycle. Per-image scalars under
-    ``"per_image/{name}/psnr/{key}/{filename}"`` and
-    ``"per_image/{name}/ssim/{key}/{filename}"`` are gated by
-    ``log_per_image_metrics`` (default off — see that arg).
+    Tags: per-set means under ``psnr/{name}/{key}``, ``ssim/{name}/{key}`` and
+    ``{metric}/{name}`` for each of ``eval_config.perceptual_keys``, every
+    cycle. Per-image scalars under ``per_image/{name}/{psnr,ssim}/{key}/
+    {filename}``, gated by ``log_per_image_metrics``.
 
-    Border cropping is sourced from ``pl_module.eval_config.crop_border`` at
-    the use site; this avoids dual-knob configuration drift.
+    **Border cropping comes from ``pl_module.eval_config.crop_border`` at the
+    use site**, never a second knob here, so the two cannot drift.
 
-    Metrics are computed directly on the on-device SR/HR slices (mirroring
-    the primary-val-loader path in ``SRLightning.validation_step``) and both
-    the per-image scalars and the image strip are emitted immediately, per
-    image, from :meth:`_collect_batch` — nothing image-shaped is buffered.
-    Buffering full-resolution LR/SR/HR CPU tensors for every image across
-    every test set until epoch end cost ~0.5 GB per validation cycle purely
-    to defer ``add_image``; only a :class:`BenchmarkSample` (filename +
-    PSNR/SSIM/perceptual dicts) is buffered now, for the per-set mean computed in
-    :meth:`_flush_buffer`. The TensorBoard experiment is resolved once, in
-    :meth:`setup`, rather than re-searched on every batch/epoch-end.
+    Metrics are computed on the on-device SR/HR slices, mirroring
+    ``validation_step``, and both the scalars and the strip are emitted per
+    image from :meth:`_collect_batch` — **nothing image-shaped is buffered**.
+    Buffering full-resolution CPU tensors until epoch end cost ~0.5 GB per
+    validation cycle purely to defer ``add_image``; only a
+    :class:`BenchmarkSample` is held now, for the mean in :meth:`_flush_buffer`.
+    The TensorBoard experiment is resolved once in :meth:`setup`.
 
     Args:
-        dataset_names: Ordered list of test set names (e.g.
-            ``["Set5", "Set14"]``) matching the order of
+        dataset_names: Ordered test set names, matching
             ``SRDataModule.test_dataloader()`` / the trailing entries of
-            ``val_dataloader()``.  When ``None`` the callback auto-discovers
-            from ``trainer.datamodule.test_names``.
-        every_n_val_runs: Image-strip throttle for the val stage.  With
-            step-based training (e.g. ``val_check_interval=1000``,
-            ``max_steps=100_000``) val fires ~100 times, so logging every 5
-            runs gives ~20 image snapshots — enough to track visual
-            progress without flooding TensorBoard storage.  Default ``5``.
+            ``val_dataloader()``. ``None`` auto-discovers from
+            ``trainer.datamodule.test_names``.
+        every_n_val_runs: Image-strip throttle for the val stage. Default
+            ``5`` — with ~100 val runs that is ~20 snapshots, enough to track
+            visual progress without flooding storage.
         log_per_image_metrics: Emit the ``per_image/...`` PSNR/SSIM scalars
             (one series per image per key). Default ``False``: with N test
             images and both PSNR/SSIM keyed by colorspace, this is
@@ -365,28 +340,21 @@ class BenchmarkImageLogger(Callback):
     ) -> None:
         """Forward one batch, compute per-image metrics on-device, and stream image strips.
 
-        Shared between :meth:`on_validation_batch_end` and
-        :meth:`on_test_batch_end`. Border cropping is sourced from
-        ``pl_module.eval_config.crop_border`` at the use site.
-        *source_dataloaders* recovers the underlying dataset for filename
-        resolution.
+        Shared by :meth:`on_validation_batch_end` and
+        :meth:`on_test_batch_end`. ``crop_border`` comes from
+        ``pl_module.eval_config`` at the use site; *source_dataloaders*
+        recovers the dataset for filename resolution.
 
-        PSNR/SSIM/perceptual are computed from the on-device ``sr``/``hr_cropped``
-        slices — mirroring the primary-val-loader path in
-        ``SRLightning.validation_step`` — so only the scalar ``.item()``
-        results ever leave the GPU. SSIM and perceptual scores go through
-        ``pl_module.scorer`` — the same object ``validation_step`` uses — rather
-        than calling ``torchmetrics``/``perceptual_score`` here directly, so
-        this callback cannot silently diverge from ``validation_step`` on the
-        crop, the reductions, or which SSIM/perceptual backbone a given
-        ``eval_config`` means. When
-        *should_log_images* (or
-        ``self.log_per_image_metrics``), exactly one host transfer per image
-        (``lr_img[i]``/``sr[i]``/``hr_img[i]`` each ``.cpu()`` at most once)
-        composes the bicubic|SR|HR strip and/or the per-image scalars, and
-        both are emitted to TensorBoard immediately — nothing image-shaped is
-        buffered. Only ``BenchmarkSample(filename, psnr_dict, ssim_dict,
-        perceptual_dict)`` is appended to ``self._buffer``, for
+        Metrics are computed from the on-device ``sr``/``hr_cropped`` slices, so
+        only scalar ``.item()`` results leave the GPU, and **they go through
+        ``pl_module.scorer``** — the object ``validation_step`` uses — rather
+        than calling ``torchmetrics``/``perceptual_score`` directly, so this
+        callback cannot diverge from ``validation_step`` on the crop, the
+        reductions, or which backbone an ``eval_config`` means.
+
+        When images or per-image scalars are wanted, exactly one host transfer
+        per image composes them and both are emitted immediately — **nothing
+        image-shaped is buffered**; only a ``BenchmarkSample`` is kept, for
         :meth:`_flush_buffer`'s per-set mean.
         """
         lr_img, hr_img = batch
@@ -667,18 +635,13 @@ class _RollingSaveMixin(_RollingBase):
     ``monitor=None, save_top_k=-1`` (keep everything) with the window
     enforced here. Verified on Lightning 2.6.5.
 
-    Shared by :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint` —
-    siblings under :class:`~lightning.pytorch.callbacks.ModelCheckpoint`, not
-    parent/child, so this logic can't be reused via one ``super()`` chain
-    across both. The window bookkeeping itself lives in
-    :meth:`_enforce_rolling_window`, a seam distinct from ``_save_checkpoint``:
-    :class:`SRWeightsCheckpoint` already overrides ``_save_checkpoint`` to
-    write a bare ``.safetensors`` payload instead of Lightning's full checkpoint, and
-    that override does not call ``super()._save_checkpoint()`` — so a version
-    of this mixin that put the bookkeeping inside its own ``_save_checkpoint``
-    would be shadowed by that override and silently never run. Each
-    subclass's ``_save_checkpoint`` calls :meth:`_enforce_rolling_window`
-    explicitly instead.
+    Shared by :class:`SRCheckpoint` and :class:`SRWeightsCheckpoint`, which are
+    siblings rather than parent/child, so one ``super()`` chain cannot serve
+    both. **The bookkeeping lives in :meth:`_enforce_rolling_window`, not in a
+    ``_save_checkpoint`` of this mixin**: ``SRWeightsCheckpoint`` overrides
+    ``_save_checkpoint`` without calling ``super()``, so a mixin version would
+    be shadowed and silently never run. Each subclass calls
+    :meth:`_enforce_rolling_window` explicitly.
 
     The window itself is never persisted in ``state_dict`` — it is rebuilt from
     the files already on disk when a run resumes (:meth:`on_train_start`), which
@@ -849,15 +812,9 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
 
         Siblings are compared before Lightning has necessarily set them all up, so
         this cannot be read off ``self.filename`` -- that still holds
-        ``DEFAULT_PREFIX`` on anything yet to reach setup.
-
-        Args:
-            pl_module: The model being trained; supplies the provenance a derived
-                prefix is a projection of.
-
-        Returns:
-            The explicit ``filename_prefix`` if one was given, else the stem derived
-            from what this callback saves.
+        ``DEFAULT_PREFIX`` on anything yet to reach setup. Returns the explicit
+        ``filename_prefix`` if given, else the stem derived from what this
+        callback saves.
         """
         if self._explicit_prefix is not None:
             return self._explicit_prefix
@@ -935,9 +892,6 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         lower-is-better comes from ``PERCEPTUAL_METRICS`` rather than being
         restated here, so a future higher-is-better perceptual metric would still
         be checked in the right direction.
-
-        Args:
-            pl_module: The model being trained; must expose ``eval_config``.
 
         Raises:
             MisconfigurationException: If ``monitor`` does not name a metric
@@ -1024,21 +978,16 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
 class SRCheckpoint(_SRCheckpointBase):
     """Model checkpoint that monitors a super-resolution quality metric.
 
-    A thin convenience wrapper around
-    :class:`~lightning.pytorch.callbacks.ModelCheckpoint` that
-    automatically sets ``mode='max'`` (both PSNR and SSIM are
-    higher-is-better) and builds a descriptive filename pattern.
+    Wraps :class:`~lightning.pytorch.callbacks.ModelCheckpoint` with
+    ``mode='max'`` (PSNR and SSIM are both higher-is-better) and a descriptive
+    filename pattern.
 
-    The filename's metric *label* is sanitised (``/`` -> ``_``) and
-    ``auto_insert_metric_name`` is disabled, so a ``/``-bearing
-    ``monitor_metric`` (e.g. the default ``psnr/val/RGB`` TensorBoard-hierarchy
-    tag) cannot leak a raw ``/`` into the filename template. Lightning's
-    ``_format_checkpoint_name`` does no sanitisation itself, and with
-    ``auto_insert_metric_name=True`` (the default) a raw ``/`` there causes
-    ``TorchCheckpointIO`` to silently create a nested directory tree per
-    save instead of a flat file. The ``metrics`` dict lookup that supplies
-    the interpolated *value* is unaffected — it is a plain dict key and
-    handles ``/`` fine.
+    **The metric label is sanitised (``/`` -> ``_``) and
+    ``auto_insert_metric_name`` is disabled**, so a ``/``-bearing
+    ``monitor_metric`` cannot leak into the filename template. Lightning does
+    no sanitisation itself, and a raw ``/`` there makes ``TorchCheckpointIO``
+    silently create a nested directory tree per save instead of a flat file.
+    The ``metrics`` dict lookup supplying the *value* is unaffected.
 
     Args:
         monitor_metric: The validation metric to monitor. Any ``psnr/val/{key}``
@@ -1079,39 +1028,33 @@ class SRCheckpoint(_SRCheckpointBase):
 class SRWeightsCheckpoint(_SRCheckpointBase):
     """Model checkpoint that saves bare, optimizer-free weights as ``.safetensors``.
 
-    A distributable sibling to :class:`SRCheckpoint`: that class produces resumable
-    ``.ckpt`` files (full training state — optimizer moments, LR scheduler, callback
-    state); this one produces ``.safetensors`` files containing only
-    ``getattr(pl_module, attribute).state_dict()`` plus a matching provenance dict.
-    By default ``attribute='model'`` — the bare :class:`~sisr.models.base.SRModel` (so
-    keys carry no ``model.`` wrapper prefix), described by
-    :func:`~sisr.training.metadata.build_metadata`. Any other ``attribute`` (e.g.
-    ``'discriminator'``) saves that component instead, described by
-    :func:`~sisr.training.metadata.build_component_metadata` — ``build_metadata``'s
-    generator-scoped fields (``io.scale``, ``criterion``, ``eval_config``) would
-    describe something a non-generator file does not contain. Both run side by side
-    off the same validation metrics — top-k selection, monitor validation (inherited
-    from ``SRCheckpoint``'s ``setup``), and filename formatting are inherited from
-    :class:`~lightning.pytorch.callbacks.ModelCheckpoint` unchanged; only
-    :meth:`_save_checkpoint` — the single method that actually writes bytes to disk —
-    is overridden to swap the payload.
+    The distributable sibling to :class:`SRCheckpoint`: that writes resumable
+    ``.ckpt`` files (optimizer moments, scheduler, callback state); this writes
+    only ``getattr(pl_module, attribute).state_dict()`` plus provenance.
+    ``attribute='model'`` (default) saves the bare ``SRModel`` — so keys carry
+    no ``model.`` prefix — described by
+    :func:`~sisr.training.metadata.build_metadata`. Any other attribute uses
+    :func:`~sisr.training.metadata.build_component_metadata` instead, because
+    ``build_metadata``'s generator-scoped fields (``io.scale``, ``criterion``,
+    ``eval_config``) would describe something the file does not contain.
 
-    ``_save_checkpoint`` is a private Lightning method, unlike the rest of this class's
-    public-API surface. ``tests/training/test_callbacks.py``'s
-    ``test_sr_weights_checkpoint_writes_bare_payload_via_real_fit`` guards against a
-    future Lightning release routing saves through a different method: that test fails
-    loudly rather than silently letting saves fall back to full, optimizer-bearing
+    Everything else — top-k selection, monitor validation, filename formatting
+    — is inherited unchanged; **only :meth:`_save_checkpoint` is overridden**,
+    to swap the payload.
+
+    That method is private Lightning API, unlike the rest of this class's
+    surface. ``test_sr_weights_checkpoint_writes_bare_payload_via_real_fit``
+    guards it: if a future Lightning routes saves elsewhere, that test fails
+    loudly rather than letting saves fall back to full, optimizer-bearing
     checkpoints under a misleadingly bare ``.safetensors`` extension.
 
-    ``FILE_EXTENSION`` (public) and a distinct default ``filename_prefix`` keep this
-    callback's top-k deletion pass — and, in rolling mode, its own oldest-first deletion
-    (see :class:`_RollingSaveMixin`) — from ever touching :class:`SRCheckpoint`'s files
-    when both share one ``dirpath``: each callback only ever names/deletes files matching
-    its own ``filename``/``FILE_EXTENSION`` combination.
-
-    That keeps the two *classes* apart. It does not keep two instances of one class
-    apart — a pair differing only in ``monitor_metric`` derives one stem and collides,
-    which :meth:`_SRCheckpointBase._reject_filename_collision` now refuses at startup.
+    ``FILE_EXTENSION`` plus a distinct default ``filename_prefix`` keep this
+    callback's deletion passes off :class:`SRCheckpoint`'s files when both
+    share a ``dirpath`` — each only names and deletes files matching its own
+    ``filename``/``FILE_EXTENSION`` pair. That separates the two *classes*, not
+    two instances of one: a pair differing only in ``monitor_metric`` derives
+    the same stem and collides, which
+    :meth:`_SRCheckpointBase._reject_filename_collision` refuses at startup.
 
     Args:
         monitor_metric: The validation metric to monitor — same contract as
@@ -1176,17 +1119,14 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
         configuration ``attribute`` exists for, and the one the SRGAN template
         ships — cannot be constructed at all.
 
-        Appended to ``super()``'s key rather than rebuilding it, so a Lightning
-        release that adds or renames a key field is carried through here
-        unchanged instead of silently dropping it.
+        Appended to ``super()``'s key rather than rebuilt, so a Lightning
+        release that adds or renames a key field carries through unchanged.
 
-        Resuming a ``.ckpt`` written before this key gained its ``attribute``
-        suffix finds no state under the new key, so this callback's monitored
-        bookkeeping (``best_model_score``/``best_k_models``, i.e. what a
-        ``save_top_k`` run has already kept) restarts from empty for the rest of
-        that run. Rolling mode loses nothing — its window was never persisted
-        under any key, and :meth:`_RollingSaveMixin.on_train_start` rebuilds it
-        from this callback's own files on disk before the first save.
+        **Resuming a ``.ckpt`` written before this key gained its ``attribute``
+        suffix finds no state under the new key**, so monitored bookkeeping
+        (``best_model_score``/``best_k_models``) restarts empty for the rest of
+        that run. Rolling mode loses nothing: its window was never persisted,
+        and :meth:`_RollingSaveMixin.on_train_start` rebuilds it from disk.
 
         Returns:
             A key unique per ``(monitor, mode, cadence, attribute)``.
@@ -1250,27 +1190,18 @@ class SRWeightsCheckpoint(_SRCheckpointBase):
         public save path (``_save_topk_checkpoint``, ``_save_none_monitor_checkpoint``,
         ``_save_last_checkpoint``) funnels through — so ``save_top_k``/filename/removal
         bookkeeping all keep working unmodified; only the on-disk payload changes.
-        Mirrors the base implementation's post-save bookkeeping (``_last_global_step_saved``,
-        ``_last_checkpoint_saved``, logger notification) so this callback stays a drop-in
-        peer of :class:`SRCheckpoint` from the trainer's point of view.
+        Mirrors the base's post-save bookkeeping (``_last_global_step_saved``,
+        ``_last_checkpoint_saved``, logger notification) so this stays a drop-in
+        peer of :class:`SRCheckpoint` to the trainer.
 
-        ``self.attribute`` selects both the saved component and its metadata builder:
-        ``'model'`` (the default) uses :func:`~sisr.training.metadata.build_metadata`,
-        which describes the generator; anything else uses
-        :func:`~sisr.training.metadata.build_component_metadata`, so a discriminator's
-        artifact never carries metadata describing a network it does not contain.
+        ``self.attribute`` selects the saved component *and* its metadata
+        builder: ``'model'`` uses ``build_metadata`` (generator-scoped),
+        anything else ``build_component_metadata`` — so a discriminator's
+        artifact never carries metadata for a network it does not contain.
 
-        Rolling-mode deletion (:meth:`_RollingSaveMixin._enforce_rolling_window`) runs
-        last, after this method's own writes — it does not go through ``super()``
-        the way :class:`SRCheckpoint`'s does, since this override never calls
-        ``ModelCheckpoint._save_checkpoint`` at all (that would write the full,
-        optimizer-bearing payload this class exists to avoid).
-
-        Args:
-            trainer: The active trainer — supplies ``lightning_module`` (for the
-                component's ``state_dict()`` and metadata) and ``global_step``/``current_epoch``.
-            filepath: Destination path, already formatted by ``ModelCheckpoint``
-                (``.safetensors`` via ``FILE_EXTENSION``).
+        **Rolling deletion runs last and is called explicitly**, because this
+        override never calls ``ModelCheckpoint._save_checkpoint`` (that would
+        write the optimizer-bearing payload this class exists to avoid).
         """
         pl_module = trainer.lightning_module
         component = getattr(pl_module, self.attribute)
