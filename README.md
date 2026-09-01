@@ -307,21 +307,22 @@ each other, so none are published. A comparable SRCNN row needs a fresh run.
 ### Where the papers stop specifying
 
 A claim that these numbers can be independently verified is only honest if the places the
-source papers **stop specifying** are stated as plainly as the places they do. Each of the
-following is a choice this implementation had to make and **cannot be scored as correct**,
-because there is nothing to be faithful to. None is a bug, and none should be "fixed" by
-picking a value and asserting it in code — that would dress a guess as a checked fact.
+source papers **stop specifying** are stated as plainly as the places they do. Such a choice
+**cannot be scored as correct**, because there is nothing to be faithful to. It is not a bug,
+and it should not be "fixed" by picking a value and asserting it in code — that would dress a
+guess as a checked fact.
+
+**This table held four rows until 2026-09-01. One remains.** What happened to the other three
+is recorded below, because a search that closed a row is worth as much as the row was.
 
 | choice | what ships | what it rests on |
 |---|---|---|
-| SRCNN evaluation border | `crop_border: 3`, on top of the 6 px per side that `padding: valid` already trims | The paper states no test-time boundary convention. Neither value is correct or incorrect, only stated. |
-| SRResNet PReLU parameterisation | `torch.nn.PReLU()` — one shared slope | The paper specifies neither shared nor per-channel, and no official reference implementation exists to check against. |
+| SRResNet PReLU parameterisation | `torch.nn.PReLU()` — one shared slope | The paper specifies neither shared nor per-channel, and no official reference implementation exists. **Narrowed, not settled** — see below. |
 
-The practical consequence: a reproduction that differs from this project on any of these
-rows is not necessarily wrong, and neither is this one. Compare the rows before comparing
-the numbers.
+The practical consequence: a reproduction that differs from this project on this row is not
+necessarily wrong, and neither is this one. Compare the row before comparing the numbers.
 
-#### Two rows left this table on 2026-09-01
+#### Three rows left this table on 2026-09-01
 
 SRCNN's **batch size** and **training budget** were listed here as resting on nothing
 checkable. They are now specified by a primary source, so they no longer belong in a list of
@@ -361,6 +362,37 @@ Practically this is a long run; stop at a checkpoint rather than lower the confi
 unsourced number.
 
 No published number changes: SRCNN has no publishable row.
+
+**The evaluation border also left**, for the opposite reason: it turned out to be specified
+after all, and we differ from it. The authors' demo package (`SRCNN_v1.zip`, retrieved
+2026-09-01, SHA-256 `bfa68ca613c1326a59e0c34353205a254ab2b67e34df7f04e28eef567980af30`)
+shaves **`scale` pixels per side** before computing PSNR — not a constant — and runs the
+network with **`same` padding and replicated borders** at test time, though it trains with
+`pad: 0`. This project uses `padding: valid` at inference and then `crop_border: 3`, so at ×3
+we score a region strictly *inside* theirs, and our constant agrees with `scale` only at ×3.
+The two differences are entangled — changing the border alone moves us further away, not
+closer — so the choice between reproducing their measurement and keeping a path that never
+scores invented border pixels is tracked as its own decision, not settled here (#207).
+
+#### What did *not* settle: SRResNet's PReLU
+
+The parameter count was the only route that could have settled this from the paper alone, and
+it is now closed with a measurement rather than an assumption. This project's SRResNet has
+**19 PReLU sites, all at 64 channels**:
+
+| | PReLU params | model total |
+|---|---:|---:|
+| one shared slope (ships) | 19 | 1,549,462 |
+| per-channel | 1,216 | 1,550,659 |
+
+The two differ by **1,197 parameters, 0.0773% of the model** — invisible at any precision a
+paper reports a parameter count to. No count Ledig et al. could have published would
+distinguish them.
+
+The weaker route also fails to decide it: the PReLU paper itself presents channel-wise and
+channel-shared as both viable and reports them performing comparably, so "what the authors of
+PReLU would have assumed" has no single answer either. The row stays labelled, and the search
+is recorded so nobody repeats it.
 
 ### What these were computed against
 
