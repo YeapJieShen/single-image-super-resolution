@@ -62,6 +62,12 @@ def compute_checksum(img_paths: Sequence[Path]) -> str:
     parameter enters this hash — the cache stores whole raw images, unaffected
     by anything derived from them at read time.
 
+    **It keys on name and size only**, so replacing an image with a different
+    one of the same byte length under the same name does not invalidate the
+    cache. That is accepted, not an oversight: keying on ``st_mtime_ns`` too
+    would make every ``git checkout`` or ``rsync`` re-decode the whole dataset.
+    If you have edited an image in place, delete the cache directory.
+
     Returns:
         A hex-encoded SHA-256 digest string.
     """
