@@ -128,3 +128,89 @@ def test_process_derived_image_round_trips_through_its_header(image_paths):
     plane = np.frombuffer(value, np.uint8, offset=dc.HEADER.size).reshape(h, w, 3)
     expected = dc.derive(np.array(Image.open(image_paths[1]).convert("RGB")), "lr", 3)
     assert np.array_equal(plane, expected)
+
+
+# ---------------------------------------------------------------------------
+# Byte-equality against externally generated reference data
+#
+# `derive` is now the single owner of the degradation the *training* path
+# applies, so the convention it implements is checkable against data this
+# project did not produce. Both checks skip cleanly when their data is absent —
+# **a skip means the leg was not exercised, never that it passed.**
+# ---------------------------------------------------------------------------
+
+REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference"
+DIV2K_HR_DIR = Path(__file__).resolve().parents[2] / "data" / "DIV2K_train_HR"
+DIV2K_LR_DIR = Path(__file__).resolve().parents[2] / "data" / "DIV2K_train_LR_bicubic" / "X4"
+
+
+def test_derive_matches_real_matlab_reference_lr_byte_for_byte():
+    """The training path's degradation, against MATLAB-generated benchmark LR.
+
+    ``tests/utils/test_imresize.py`` already pins the *kernel* against this
+    data. This pins the **order** — modcrop the whole image, then downsample it
+    — which is the axis the kernel test cannot see, because it was written when
+    the training path degraded an extracted patch instead.
+    """
+    if not REFERENCE_DIR.is_dir():
+        pytest.skip(
+            f"{REFERENCE_DIR} not present -- see tests/utils/test_imresize.py's module "
+            "docstring for how to fetch it."
+        )
+    cases = []
+    for dataset in ("Set5", "Set14", "B100"):
+        hr_dir = REFERENCE_DIR / dataset / "HR"
+        if not hr_dir.is_dir():
+            continue
+        for scale in (2, 3, 4):
+            for hr_path in sorted(hr_dir.glob("*.png")):
+                lr_path = (
+                    REFERENCE_DIR
+                    / dataset
+                    / "LR_bicubic"
+                    / f"X{scale}"
+                    / (f"{hr_path.stem}x{scale}.png")
+                )
+                if lr_path.exists():
+                    cases.append((hr_path, lr_path, scale))
+    assert cases, f"{REFERENCE_DIR} exists but holds no HR/LR_bicubic pairs"
+
+    mismatches = []
+    for hr_path, lr_path, scale in cases:
+        hr = np.array(Image.open(hr_path).convert("RGB"))
+        real = np.array(Image.open(lr_path).convert("RGB"))
+        got = dc.derive(hr, "lr", scale)
+        if got.shape != real.shape or not np.array_equal(got, real):
+            mismatches.append((hr_path.name, scale))
+    assert not mismatches, f"{len(mismatches)}/{len(cases)} differ: {mismatches[:5]}"
+
+
+def test_derive_matches_div2ks_own_distributed_lr_byte_for_byte():
+    """The same check on the actual training set, at the actual training scale.
+
+    DIV2K distributes its bicubic LR as full images; every reference pipeline
+    surveyed trains from those. If ours is byte-identical to them, then the
+    order this project adopted is not merely *like* the field's — it reproduces
+    the field's own artifact exactly.
+    """
+    if not DIV2K_LR_DIR.is_dir():
+        pytest.skip(
+            f"{DIV2K_LR_DIR} not present -- fetch DIV2K_train_LR_bicubic_X4.zip from the "
+            "DIV2K dataset page and unzip it under data/ to enable this check."
+        )
+    hr_paths = sorted(DIV2K_HR_DIR.glob("*.png"))
+    assert hr_paths, f"{DIV2K_HR_DIR} holds no images"
+
+    mismatches, checked = [], 0
+    for hr_path in hr_paths:
+        lr_path = DIV2K_LR_DIR / f"{hr_path.stem}x4.png"
+        if not lr_path.exists():
+            continue
+        hr = np.array(Image.open(hr_path).convert("RGB"))
+        real = np.array(Image.open(lr_path).convert("RGB"))
+        got = dc.derive(hr, "lr", 4)
+        checked += 1
+        if got.shape != real.shape or not np.array_equal(got, real):
+            mismatches.append(hr_path.name)
+    assert checked, "no HR/LR filename pairs matched -- check the x4 naming convention"
+    assert not mismatches, f"{len(mismatches)}/{checked} differ: {mismatches[:5]}"
