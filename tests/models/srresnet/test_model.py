@@ -154,3 +154,82 @@ def test_variant_tag_is_blocks_and_width():
     """The two knobs that move capacity, and the two a reader wants off `ls`."""
     assert SRResNet(scale=4).variant_tag == "16B64F"
     assert SRResNet(scale=4, num_residual_blocks=8, hidden_channel=32).variant_tag == "8B32F"
+
+
+# ---------------------------------------------------------------------------
+# padding is honoured everywhere, or rejected -- never recorded and ignored
+# ---------------------------------------------------------------------------
+
+
+def test_every_conv_agrees_with_the_recorded_padding_hparam():
+    """`padding` threaded into head, residual blocks and tail; SRUpsampleBlock
+    hardcoded 'same'. _hparams goes verbatim into checkpoint and ONNX
+    provenance as model.init_args, so a file claimed padding: 1 while one of
+    its convolutions was built 'same'. This project treats artifact metadata as
+    what a downstream consumer trusts to know what a file means."""
+    model = SRResNet(
+        scale=2, hidden_channel=8, num_residual_blocks=1, kernel_sizes=(3, 3, 3), padding=1
+    )
+    recorded = model.hparams["padding"]
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            assert module.padding == (recorded, recorded), (
+                f"{name} was built with padding={module.padding}, but the model records "
+                f"padding={recorded!r}"
+            )
+
+
+def test_same_padding_reaches_the_upsample_conv_too():
+    """The 'same' case must keep working -- it is what every shipped config uses."""
+    model = SRResNet(scale=2, hidden_channel=8, num_residual_blocks=1)
+    assert model.hparams["padding"] == "same"
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            assert module.padding == "same", f"{name} did not receive 'same'"
+
+
+def test_padding_that_would_break_the_scale_factor_is_rejected():
+    """padding=1 with the paper's 9-3-9 kernels RUNS and silently returns
+    30x30 from a 24x24 input at scale 2 -- the head and tail each shrink by 6,
+    so the model is no longer xscale. Nothing raised and nothing warned."""
+    with pytest.raises(ValueError, match="padding"):
+        SRResNet(
+            scale=2, hidden_channel=8, num_residual_blocks=1, kernel_sizes=(9, 3, 9), padding=1
+        )
+
+
+def test_padding_that_breaks_the_residual_skip_is_rejected():
+    """padding=0 made the residual block's output smaller than its input, so
+    `x + block(x)` failed on shape -- a raw RuntimeError from inside forward,
+    several frames from the config that caused it."""
+    with pytest.raises(ValueError, match="padding"):
+        SRResNet(scale=2, hidden_channel=8, num_residual_blocks=1, padding=0)
+
+
+def test_shape_preserving_int_padding_is_accepted_and_scales_correctly():
+    """The rule is shape-preservation, not the literal string 'same': p ==
+    (k-1)//2 preserves the map for an odd kernel, so padding=1 with all-3
+    kernels is legitimate and must still upscale by exactly `scale`."""
+    model = SRResNet(
+        scale=2, hidden_channel=8, num_residual_blocks=1, kernel_sizes=(3, 3, 3), padding=1
+    )
+    out = model(torch.zeros(1, 3, 24, 24))
+    assert out.shape == (1, 3, 48, 48)
+
+
+def test_padding_that_is_neither_same_nor_an_int_is_rejected():
+    """'valid' is the other string torch accepts, and it is not shape-preserving
+    for any kernel above 1. bool is excluded separately: isinstance(True, int)
+    is True, and `padding: true` is not a pixel count."""
+    for bad in ("valid", 1.5, True, None):
+        with pytest.raises(ValueError, match="padding"):
+            SRResNet(scale=2, hidden_channel=8, num_residual_blocks=1, padding=bad)
+
+
+def test_even_kernel_cannot_be_shape_preserving_with_int_padding():
+    """An even kernel has no p making the conv shape-preserving, so no int
+    padding can be accepted for one -- (k-1)//2 would silently lose a pixel."""
+    with pytest.raises(ValueError, match="padding"):
+        SRResNet(
+            scale=2, hidden_channel=8, num_residual_blocks=1, kernel_sizes=(4, 4, 4), padding=1
+        )

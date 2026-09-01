@@ -50,21 +50,42 @@ class SRResidualBlock(torch.nn.Module):
         return identity + x
 
 
+#: Kernel size of the sub-pixel upsample convolution. Fixed by the architecture
+#: rather than exposed, but named so the padding check can see it.
+_UPSAMPLE_KERNEL = 3
+
+
 class SRUpsampleBlock(torch.nn.Module):
     """Sub-pixel convolution upsampling block: conv -> PixelShuffle -> PReLU.
+
+    The conv must be **shape-preserving**: ``PixelShuffle`` turns
+    ``(C*scale**2, H, W)`` into ``(C, H*scale, W*scale)``, so any spatial size
+    the conv loses is multiplied by ``scale`` in the output. It does not have to
+    be the literal string ``'same'`` -- ``p == (kernel_size - 1) // 2`` is the
+    same map for an odd kernel -- and :class:`SRResNet` enforces exactly that
+    before constructing one. This used to hardcode ``'same'`` and ignore the
+    ``padding`` its parent recorded.
 
     Args:
         channels: Input channel count.
         scale: Upscaling factor. Defaults to ``2``.
         kernel_size: Kernel size for the conv layer. Defaults to ``3``.
+        padding: Padding for the conv layer. Must be shape-preserving.
+            Defaults to ``'same'``.
     """
 
-    def __init__(self, channels: int, scale: int = 2, kernel_size: int = 3):
+    def __init__(
+        self,
+        channels: int,
+        scale: int = 2,
+        kernel_size: int = 3,
+        padding: str | int = "same",
+    ):
         super().__init__()
 
         self.upsample = torch.nn.Sequential(
             torch.nn.Conv2d(
-                channels, channels * (scale**2), kernel_size=kernel_size, padding="same"
+                channels, channels * (scale**2), kernel_size=kernel_size, padding=padding
             ),
             torch.nn.PixelShuffle(scale),
             torch.nn.PReLU(),
@@ -94,7 +115,10 @@ class SRResNet(SRModel):
         hidden_channel: Feature channel count used in the residual/upsample blocks.
         kernel_sizes: Kernel sizes for the head, residual, and tail conv layers.
         num_residual_blocks: Number of residual blocks in the network.
-        padding: Padding for the conv layers. Defaults to ``'same'``.
+        padding: Padding for the conv layers, applied to **every** convolution
+            including the upsample block's. Must be shape-preserving --
+            ``'same'``, or ``(k - 1) // 2`` for every kernel this model builds
+            (see :meth:`_check_padding`). Defaults to ``'same'``.
     """
 
     #: Consumes true low-resolution input and upsamples internally (sub-pixel conv).
@@ -113,6 +137,7 @@ class SRResNet(SRModel):
 
         self._check_scale(scale)
         self._check_architecture(kernel_sizes, num_residual_blocks)
+        self._check_padding(padding, kernel_sizes)
 
         self._hparams = {
             "scale": scale,
@@ -148,7 +173,12 @@ class SRResNet(SRModel):
 
         self.upsample = torch.nn.Sequential(
             *[
-                SRUpsampleBlock(channels=hidden_channel, scale=2)
+                SRUpsampleBlock(
+                    channels=hidden_channel,
+                    scale=2,
+                    kernel_size=_UPSAMPLE_KERNEL,
+                    padding=padding,
+                )
                 for _ in range(int(math.log2(scale)))
             ]
         )
@@ -156,6 +186,51 @@ class SRResNet(SRModel):
         self.tail = torch.nn.Conv2d(
             hidden_channel, in_out_channels, kernel_size=kernel_sizes[2], padding=padding
         )
+
+    @staticmethod
+    def _check_padding(padding: str | int, kernel_sizes: tuple[int, ...]) -> None:
+        """Rejects a padding that would not preserve each conv's spatial size.
+
+        Every convolution here must be shape-preserving, for two independent
+        reasons: the residual blocks add ``x`` to their own output, and
+        ``PixelShuffle`` multiplies any size the upsample conv loses by
+        ``scale``. Anything else either fails inside ``forward`` with a raw
+        shape error or -- worse -- succeeds and returns a map that is no longer
+        ``scale`` times the input.
+
+        Measured on the paper's kernels before this check existed:
+        ``padding=0`` raised from the residual skip, and ``padding=1`` silently
+        turned a 24x24 input into 30x30 at ``scale=2``.
+
+        The rule is shape-preservation, not the literal string ``'same'``, so
+        ``padding=1`` with all-3 kernels stays legal.
+
+        Args:
+            padding: The requested padding.
+            kernel_sizes: ``(head, residual, tail)`` kernels.
+
+        Raises:
+            ValueError: If *padding* is not ``'same'`` and is not
+                ``(k - 1) // 2`` for every kernel the model builds, including
+                the upsample block's.
+        """
+        if padding == "same":
+            return
+        if not isinstance(padding, int) or isinstance(padding, bool):
+            raise ValueError(
+                f"padding must be 'same' or an int; got {padding!r} ({type(padding).__name__})."
+            )
+        for kernel in (*kernel_sizes, _UPSAMPLE_KERNEL):
+            if kernel % 2 == 0 or padding != (kernel - 1) // 2:
+                raise ValueError(
+                    f"padding={padding} is not shape-preserving for a kernel of size "
+                    f"{kernel} (this model builds kernels {(*kernel_sizes, _UPSAMPLE_KERNEL)}, "
+                    f"the last being the upsample block's). Every convolution here must "
+                    f"preserve its spatial size: the residual blocks add x to their own "
+                    f"output, and PixelShuffle multiplies whatever the upsample conv loses "
+                    f"by scale. Use 'same', or {(kernel - 1) // 2} if every kernel is "
+                    f"{kernel}."
+                )
 
     def _check_scale(self, scale: int) -> None:
         """Validates that scale is a positive power of 2."""
