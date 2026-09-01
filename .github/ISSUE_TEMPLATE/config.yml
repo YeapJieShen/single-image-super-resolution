@@ -1,0 +1,14 @@
+# Blank issues stay on: a maintainer filing a one-line note should not have to
+# fight a form. The forms exist to catch what an outside report usually omits.
+blank_issues_enabled: true
+# Discussions is not enabled on this repo, so nothing here points at it.
+contact_links:
+  - name: How do I configure this?
+    url: https://github.com/YeapJieShen/single-image-super-resolution/blob/main/docs/configuration.md
+    about: Every config key, what it does, and which are load-bearing.
+  - name: Does it reproduce the paper?
+    url: https://github.com/YeapJieShen/single-image-super-resolution/blob/main/docs/reproduction.md
+    about: The measured tables, and exactly where this departs from what the papers specify.
+  - name: How to contribute
+    url: https://github.com/YeapJieShen/single-image-super-resolution/blob/main/CONTRIBUTING.md
+    about: Branch naming, the four CI checks, and the evidence a change has to carry.
