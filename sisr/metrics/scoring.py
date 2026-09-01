@@ -134,6 +134,13 @@ class SRScorer:
                 config never passed through ``SRLightning``, which resolves the
                 derive-from-scale sentinel; scoring against an unresolved border
                 would silently pick a different region than the run intends.
+                Also if it is negative -- reachable only past
+                ``SREvalConfig.__post_init__``, via the sentinel resolution's
+                direct assignment -- or if twice the border would consume an
+                image's shorter axis. The oversized case cannot be caught at
+                config time because no image is in scope there, so it is caught
+                here, where the tensor is, and names both the border and the
+                size rather than surfacing as a torch shape error.
         """
         n = self.eval_config.crop_border
         if n is None:
@@ -142,8 +149,24 @@ class SRScorer:
                 "meaning 'crop the model's scale', resolved by SRLightning at construction "
                 "-- build the scorer from a module's eval_config, or set an explicit int."
             )
-        if n <= 0:
+        if n < 0:
+            raise ValueError(
+                f"eval_config.crop_border is {n} at scoring time. SREvalConfig rejects a "
+                "negative border at construction, but SRLightning ASSIGNS this field when it "
+                "resolves the derive-from-scale sentinel, which bypasses that check -- so a "
+                "non-positive `scale` lands here. Scoring would silently return the FULL "
+                "image, because 'no crop' and 'a negative crop' are the same branch."
+            )
+        if n == 0:
             return tensors
+        for t in tensors:
+            h, w = t.shape[-2:]
+            if 2 * n >= min(h, w):
+                raise ValueError(
+                    f"eval_config.crop_border={n} removes {2 * n} px from each axis of a "
+                    f"{h}x{w} image, leaving nothing to score. Lower crop_border, or drop "
+                    "the images smaller than it from the evaluation set."
+                )
         return tuple(t[..., n:-n, n:-n] for t in tensors)
 
     def metric_tensors(

@@ -35,9 +35,31 @@ class SRGANTrainingConfig(SRResNetTrainingConfig):
     d_steps_per_g_step: int = 1
 
     def __post_init__(self) -> None:
-        """Reject settings this training mode cannot honour."""
+        """Reject settings this training mode cannot honour.
+
+        ``super()`` first: this override previously replaced its parent's
+        checks outright, which left the base class's ``compile_mode`` /
+        ``compile_backend`` guard dead for **every** SRGAN config -- the
+        longest-running configuration here, and so the most expensive place to
+        lose a startup check.
+
+        Raises:
+            ValueError: If ``d_steps_per_g_step`` is below 1, if
+                ``adversarial_weight`` is negative, or for anything the
+                inherited validation rejects.
+        """
+        super().__post_init__()
         if self.d_steps_per_g_step < 1:
             raise ValueError(f"d_steps_per_g_step must be >= 1; got {self.d_steps_per_g_step}.")
+        if self.adversarial_weight < 0:
+            raise ValueError(
+                f"adversarial_weight must be >= 0; got {self.adversarial_weight}. "
+                "The generator minimises `content + adversarial_weight * adversarial`, so a "
+                "negative weight inverts the adversarial term and trains the generator to "
+                "look MORE fake to the discriminator. Zero is legitimate -- it is the "
+                "content-only ablation. Fix "
+                "model.training_config.init_args.adversarial_weight in your YAML."
+            )
 
 
 @dataclass

@@ -124,12 +124,70 @@ class SRTrainingConfig:
     compile_mode: str | None = None
 
     def __post_init__(self) -> None:
-        """Reject a compile mode that nothing will apply.
+        """Reject a compile mode that nothing will apply, and values that mean nothing.
+
+        Every check here names the YAML key to fix, matching
+        :class:`SREvalConfig`'s style. They exist because each of these fields
+        reached something that accepted it silently: a negative ``scale``
+        resolves ``eval_config.crop_border`` to a negative border and scores
+        uncropped, a negative ``layer_lrs`` entry trains that layer in the
+        wrong direction, and ``init_strategy`` dispatches on ``== "paper"``, so
+        any other spelling means "default" with nothing saying so.
+
+        ``init_mean`` is deliberately unconstrained -- a negative mean is a
+        legitimate gaussian.
 
         Raises:
             ValueError: If ``compile_mode`` is set without
-                ``compile_backend='inductor'``.
+                ``compile_backend='inductor'``; if ``scale`` is set and is not
+                a positive int; if any ``layer_lrs`` entry (or either half of
+                a ``[weight_lr, bias_lr]`` pair) is not positive; if
+                ``init_std`` is not positive; or if ``init_strategy`` is
+                neither ``'default'`` nor ``'paper'``.
         """
+        if self.scale is not None and self.scale < 1:
+            raise ValueError(
+                f"training_config.scale must be a positive int; got {self.scale}. "
+                "It is not only provenance: for an architecture that declares no `scale` "
+                "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
+                "nothing else checks it, and eval_config.crop_border derives from it, so a "
+                "non-positive scale becomes a non-positive border and the metric is computed "
+                "on the uncropped image. Fix model.training_config.init_args.scale in your YAML."
+            )
+
+        if self.layer_lrs is not None:
+            for i, lr in enumerate(self.layer_lrs):
+                pair = [lr] if isinstance(lr, int | float) else list(lr)
+                if any(v <= 0 for v in pair):
+                    raise ValueError(
+                        f"training_config.layer_lrs[{i}]={lr!r} must be positive "
+                        "(every entry, and both halves of a [weight_lr, bias_lr] pair). "
+                        "These are absolute learning rates handed straight to the optimizer: "
+                        "a negative one ascends the loss for that layer and a zero freezes it "
+                        "silently. Only the list's LENGTH is checked when the optimizer is "
+                        "built. Fix model.training_config.init_args.layer_lrs in your YAML."
+                    )
+
+        if self.init_std <= 0:
+            raise ValueError(
+                f"training_config.init_std must be positive; got {self.init_std}. "
+                "It reaches torch.nn.init.normal_ as the gaussian's standard deviation. "
+                "(init_mean is unconstrained -- a negative mean is legitimate.) "
+                "Fix model.training_config.init_args.init_std in your YAML."
+            )
+
+        if self.init_strategy not in ("default", "paper"):
+            raise ValueError(
+                f"training_config.init_strategy must be 'default' or 'paper'; got "
+                f"{self.init_strategy!r}. The dispatch tests `== 'paper'`, so any other "
+                "spelling -- 'Paper' included -- silently selects PyTorch's default init "
+                "while the config reads as though the paper's runs. This is a "
+                "paper-reproduction framework, so that difference is the whole point of the "
+                "field. The Literal annotation is enforced by jsonargparse at the CLI and by "
+                "nothing in Python, so a directly-constructed config had no guard at all. "
+                "Fix model.training_config.init_args.init_strategy in your YAML."
+            )
+
         if self.compile_mode is not None and self.compile_backend != "inductor":
             raise ValueError(
                 f"compile_mode={self.compile_mode!r} needs compile_backend='inductor'; got "
@@ -267,17 +325,30 @@ class SREvalConfig:
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
 
-        Covers ``psnr_channels``, ``ssim_channels``, ``ssim_impl``,
-        ``perceptual_metrics`` and ``lpips_net``.
+        Covers ``crop_border``, ``psnr_channels``, ``ssim_channels``,
+        ``ssim_impl``, ``perceptual_metrics`` and ``lpips_net``.
 
         Raises:
-            ValueError: If any entry of either channel field is not a
+            ValueError: If ``crop_border`` is negative (``None`` and ``0`` are
+                both legitimate, and mean different things); if any entry of
+                either channel field is not a
                 supported colorspace or single-channel name (see
                 ``_CHANNEL_SUBNAMES``), if ``ssim_impl`` is not ``'wang'`` or
                 ``'daala'``, if any entry of ``perceptual_metrics`` is not a
                 supported metric (see ``PERCEPTUAL_METRICS``), or if
                 ``lpips_net`` is not ``'alex'``, ``'vgg'`` or ``'squeeze'``.
         """
+        if self.crop_border is not None and self.crop_border < 0:
+            raise ValueError(
+                f"SREvalConfig.crop_border must be None or >= 0; got {self.crop_border}. "
+                "`None` is the sentinel meaning 'derive the border from the model's scale', "
+                "so a negative value is exactly what someone reaches for to mean 'auto' -- "
+                "and it does not mean that: the slice guard treats anything <= 0 as 'no "
+                "crop', so a negative border silently scores the FULL image and produces a "
+                "number comparable to no published result. Fix "
+                "model.eval_config.init_args.crop_border in your YAML."
+            )
+
         valid = tuple(_CHANNEL_SUBNAMES)
         for field_name in ("psnr_channels", "ssim_channels"):
             invalid = [c for c in getattr(self, field_name) if c not in valid]

@@ -157,3 +157,43 @@ def test_the_two_ssim_conventions_genuinely_differ():
     wang, daala = score("wang"), score("daala")
     for tag in (t for t in wang if t.startswith("ssim/")):
         assert wang[tag] != pytest.approx(daala[tag], rel=1e-6), tag
+
+
+# --- crop_border: the two failures that reach a number, not an exception ---
+
+
+def test_crop_rejects_a_negative_border_forced_past_config_validation():
+    """SRLightning ASSIGNS eval_config.crop_border after construction, which
+    bypasses __post_init__ entirely -- so config validation alone cannot be the
+    only guard. A negative border makes the slice guard `n <= 0` return the
+    tensors uncropped: a number that looks valid and is comparable to nothing."""
+    from sisr.metrics.scoring import SRScorer
+    from sisr.training import SREvalConfig
+
+    cfg = SREvalConfig(crop_border=0)
+    cfg.crop_border = -4  # what _resolved_scale would have written for scale=-4
+    scorer = SRScorer(cfg)
+    with pytest.raises(ValueError, match="crop_border"):
+        scorer.crop(torch.zeros(1, 3, 32, 32))
+
+
+def test_crop_rejects_a_border_that_would_consume_the_whole_image():
+    """Oversized borders currently surface as a bare torch RuntimeError several
+    frames down, naming no config key. Every sibling field gets an actionable
+    message; this one should too, and it names the image size because that is
+    the half of the problem the config cannot know."""
+    from sisr.metrics.scoring import SRScorer
+    from sisr.training import SREvalConfig
+
+    scorer = SRScorer(SREvalConfig(crop_border=99))
+    with pytest.raises(ValueError, match=r"crop_border"):
+        scorer.crop(torch.zeros(1, 3, 8, 8))
+
+
+def test_crop_accepts_a_border_that_leaves_at_least_one_pixel():
+    """The boundary stays usable: 3 px off each side of an 8x8 leaves 2x2."""
+    from sisr.metrics.scoring import SRScorer
+    from sisr.training import SREvalConfig
+
+    (out,) = SRScorer(SREvalConfig(crop_border=3)).crop(torch.zeros(1, 3, 8, 8))
+    assert out.shape == (1, 3, 2, 2)
