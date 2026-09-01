@@ -1313,3 +1313,57 @@ def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
     # annotation coerces it — more evidence the value came through the config
     # machinery rather than being read off the checkpoint dict directly.
     assert cli.model.training_config.example_input_shape == (3, 32, 32)
+
+
+def test_cli_supplies_the_project_progress_bar_by_default():
+    """The callback is useless unwired: Lightning installs its own bar unless
+    something replaces it, so the truncated run name would survive in every
+    existing config."""
+    from sisr.cli import SRLightningCLI
+    from sisr.training.callbacks import SRProgressBar
+
+    out = SRLightningCLI._with_default_progress_bar(None, [])
+    assert [type(cb) for cb in out] == [SRProgressBar]
+
+
+def test_cli_progress_bar_default_yields_to_a_configured_one():
+    """It must NOT be supplied unconditionally. Trainer raises for two progress
+    bars, and LightningCLI._instantiate_trainer merges trainer_defaults by
+    APPENDING -- so wiring it that way would turn any config naming its own
+    progress bar into a hard startup failure rather than an override."""
+    from lightning.pytorch.callbacks import TQDMProgressBar
+
+    from sisr.cli import SRLightningCLI
+    from sisr.training.callbacks import SRProgressBar
+
+    mine = TQDMProgressBar()
+    # declared in the config's trainer.callbacks
+    assert SRLightningCLI._with_default_progress_bar([mine], []) == []
+    # or assembled by Lightning separately
+    assert SRLightningCLI._with_default_progress_bar(None, [mine]) == [mine]
+    # a project bar the user configured explicitly also counts
+    theirs = SRProgressBar(metrics=["psnr"])
+    assert SRLightningCLI._with_default_progress_bar([theirs], []) == []
+
+
+def test_cli_progress_bar_default_keeps_other_callbacks():
+    """Only the progress bar is defaulted; nothing else is touched."""
+    from lightning.pytorch.callbacks import LearningRateMonitor
+
+    from sisr.cli import SRLightningCLI
+    from sisr.training.callbacks import SRProgressBar
+
+    lr = LearningRateMonitor()
+    out = SRLightningCLI._with_default_progress_bar(None, [lr])
+    assert out[0] is lr
+    assert isinstance(out[1], SRProgressBar)
+
+
+def test_cli_progress_bar_default_respects_enable_progress_bar_false():
+    """Trainer refuses a progress-bar callback outright when the bar is
+    disabled, so a default injected regardless breaks every run that turns it
+    off. Caught by the existing suite, not by this test -- which is why the
+    test exists now."""
+    from sisr.cli import SRLightningCLI
+
+    assert SRLightningCLI._with_default_progress_bar(None, [], enable_progress_bar=False) == []
