@@ -55,8 +55,24 @@ def _to_plain(obj: Any) -> Any:
     return obj
 
 
-def _class_path(obj: Any) -> str:
-    """Dotted ``module.ClassName`` path for an instance's class — the YAML's own shape."""
+def class_path(obj: Any) -> str:
+    """Dotted ``module.ClassName`` path for an instance's class — the YAML's own shape.
+
+    Public because a second module needs it: ``gan_module`` describes the
+    discriminator and the adversarial loss the same way ``build_metadata``
+    describes the generator, and provenance readers must see one spelling of a
+    class path across every component of a run. It was underscored with an
+    outside caller, which is how a helper quietly becomes unchangeable -- the
+    underscore says "free to change" and the second caller says otherwise.
+
+    Args:
+        obj: Any instance. Its **class** is described, not the instance.
+
+    Returns:
+        ``"package.module.ClassName"`` -- the same shape a config's
+        ``class_path`` key takes, so a recorded value can be pasted straight
+        back into YAML.
+    """
     cls = type(obj)
     return f"{cls.__module__}.{cls.__qualname__}"
 
@@ -154,15 +170,15 @@ def build_metadata(
 
     meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value, batch_step)
     meta["model"] = {
-        "class_path": _class_path(model),
+        "class_path": class_path(model),
         "init_args": _to_plain(model.hparams),
         "variant": model.variant_tag,
     }
     meta["processor"] = {
-        "class_path": _class_path(processor),
+        "class_path": class_path(processor),
     }
     meta["criterion"] = {
-        "class_path": _class_path(module.criterion),
+        "class_path": class_path(module.criterion),
         "description": module.criterion_description,
     }
     meta["io"] = {
@@ -216,7 +232,7 @@ def build_component_metadata(
     meta = _envelope("component", global_step, epoch, monitor, monitor_value, batch_step)
     meta["component"] = {
         "name": attribute,
-        "class_path": _class_path(component),
+        "class_path": class_path(component),
         "init_args": _to_plain(getattr(component, "hparams", {})),
         # Duck-typed: a co-trained component need not be an SRModel, and one
         # without a tag simply contributes nothing to the filename.
