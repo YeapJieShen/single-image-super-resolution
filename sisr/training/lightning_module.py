@@ -100,7 +100,7 @@ class SRLightning(lightning.LightningModule):
         # Resolved here, once, BEFORE the scorer is built -- the scorer and
         # every artifact's sisr_meta must record the number actually used.
         if self.eval_config.crop_border is None:
-            self.eval_config.crop_border = self._resolved_scale(
+            self.eval_config.crop_border = self.resolved_scale(
                 "eval_config.crop_border is None (derive the border from the scale)"
             )
         # The scoring path's one owner: crop, colorspace split, both
@@ -887,11 +887,27 @@ class SRLightning(lightning.LightningModule):
         _, sr_rgb = self._forward_lr(batch)
         return sr_rgb
 
-    def _resolved_scale(self, why: str) -> int:
+    def resolved_scale(self, why: str) -> int:
         """The run's upscaling factor, from the training config or the model.
+
+        The single implementation of the three-step resolution --
+        ``training_config.scale``, else the model's ``scale`` hparam, else
+        raise. :func:`~sisr.training.metadata.build_metadata` carried its own
+        copy and the two had already diverged: this one coerces to ``int``, that
+        one did not, so one config could write a ``str`` into artifact
+        provenance and an ``int`` into the evaluation crop border.
+
+        Public rather than underscored precisely because it has a second module
+        as a caller. A private helper with an outside caller is how a helper
+        quietly becomes unchangeable: the underscore says "free to change" and
+        the second caller says otherwise.
 
         Args:
             why: What needed the scale, for the error message.
+
+        Returns:
+            The factor, always an ``int`` -- a model hparam is free-form and is
+            not otherwise type-checked.
 
         Raises:
             ValueError: If neither ``training_config.scale`` nor the model's own

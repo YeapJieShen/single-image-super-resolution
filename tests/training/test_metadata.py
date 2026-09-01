@@ -374,3 +374,53 @@ def test_build_metadata_refuses_an_artifact_that_cannot_state_its_scale():
 
     with pytest.raises(ValueError, match="without a scale"):
         build_metadata(module)
+
+
+# ---------------------------------------------------------------------------
+# One scale resolution, one type
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_scale_is_an_int_whatever_the_hparam_holds():
+    """`_resolved_scale` coerced with int(); build_metadata's copy did not. The
+    same fact, recorded two ways from one run: a str in artifact provenance and
+    an int in the evaluation crop border.
+
+    Artifact provenance is what a downstream consumer reads to know what the
+    file means -- for a pre-upsampled architecture the scale is what they must
+    resize the input by -- so a type that varies with how the config was
+    written is not a good property for it to have."""
+    model = SRResNet(scale=2, hidden_channel=8, num_residual_blocks=1)
+    model.hparams["scale"] = "2"  # the route config validation cannot reach
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRTrainingConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    meta = build_metadata(lit)
+    assert meta["io"]["scale"] == 2
+    assert isinstance(meta["io"]["scale"], int), (
+        f"artifact provenance recorded {meta['io']['scale']!r}, a "
+        f"{type(meta['io']['scale']).__name__}"
+    )
+
+
+def test_both_scale_paths_are_the_same_function():
+    """Two implementations of one three-step resolution is how they came to
+    disagree on type in the first place. `metadata` must not carry a copy."""
+    import inspect
+
+    import sisr.training.metadata as metadata
+
+    src = inspect.getsource(metadata.build_metadata)
+    assert "resolved_scale" in src, "build_metadata must call the shared resolver"
+    assert 'hparams.get("scale")' not in src, "build_metadata still re-derives the scale"
+
+
+def test_resolved_scale_is_public_api():
+    """It gains a second module as a caller, so the underscore has to go --
+    a private helper with an outside caller is how a helper quietly becomes
+    unchangeable."""
+    assert hasattr(SRLightning, "resolved_scale")
+    assert not hasattr(SRLightning, "_resolved_scale")

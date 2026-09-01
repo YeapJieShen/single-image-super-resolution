@@ -370,3 +370,13 @@ def test_training_config_rejects_unknown_init_strategy():
         SRTrainingConfig(init_strategy="Paper")
     with pytest.raises(ValueError, match="init_strategy"):
         SRTrainingConfig(init_strategy="xavier")
+
+
+def test_training_config_rejects_a_non_integer_scale_with_an_actionable_message():
+    """A str scale hit `self.scale < 1` and raised a bare TypeError naming no
+    config key -- the exact unhelpful failure this validation exists to remove.
+    bool is excluded on purpose: `isinstance(True, int)` is True, and
+    `scale: true` in YAML is not an upscaling factor."""
+    for bad in ("4", 4.0, True, [4]):
+        with pytest.raises(ValueError, match="scale"):
+            SRTrainingConfig(scale=bad)

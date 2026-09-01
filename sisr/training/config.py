@@ -145,9 +145,12 @@ class SRTrainingConfig:
                 ``init_std`` is not positive; or if ``init_strategy`` is
                 neither ``'default'`` nor ``'paper'``.
         """
-        if self.scale is not None and self.scale < 1:
+        if self.scale is not None and (
+            not isinstance(self.scale, int) or isinstance(self.scale, bool) or self.scale < 1
+        ):
             raise ValueError(
-                f"training_config.scale must be a positive int; got {self.scale}. "
+                f"training_config.scale must be a positive int; got {self.scale!r} "
+                f"({type(self.scale).__name__}). "
                 "It is not only provenance: for an architecture that declares no `scale` "
                 "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
                 "nothing else checks it, and eval_config.crop_border derives from it, so a "
