@@ -67,6 +67,12 @@ data:
     batch_size: 64             # not specified by the paper; this project's choice
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.
     num_workers: 16
+    # Page-locked host buffers, worth ~9% of real-run throughput on this box
+    # (46.88 -> 42.71 ms/step, eager fp32). This was once required OFF, because
+    # graph capture could be invalidated mid-flight by the pin thread's
+    # cudaHostAlloc; that path no longer exists, so neither does the constraint.
+    # Bit-identical either way -- pinning changes how host memory reaches the
+    # device, not what reaches it.
     pin_memory: true
     persistent_workers: true
   val_dataloader_kwargs:
