@@ -18,7 +18,7 @@ from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..losses import SRLoss
-from ..metrics.scoring import SRScorer, metric_tag
+from ..metrics.scoring import SRScorer, expected_tags, metric_tag
 from ..models.base import SRModel
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
@@ -792,11 +792,10 @@ class SRLightning(lightning.LightningModule):
         ]
         if not tb_loggers:
             return
-        metrics = {
-            **{f"psnr/val/{k}": 0.0 for k in self.eval_config.psnr_keys},
-            **{f"ssim/val/{k}": 0.0 for k in self.eval_config.ssim_keys},
-            **{f"{name}/val": 0.0 for name in self.eval_config.perceptual_keys},
-        }
+        # The tag set comes from the grammar's owner, not from f-strings here:
+        # these columns are only populated if they match the scalars
+        # validation_step actually logs, and it logs Scores.tagged("val").
+        metrics = dict.fromkeys(expected_tags(self.eval_config, "val"), 0.0)
         for tb in tb_loggers:
             tb.log_hyperparams(self._tb_hparams, metrics)
 

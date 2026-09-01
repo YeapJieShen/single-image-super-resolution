@@ -2649,3 +2649,96 @@ def test_an_explicit_prefix_still_wins_over_the_derived_identity(tmp_path: Path)
 
     names = sorted(p.name for p in tmp_path.glob(f"*{SRWeightsCheckpoint.FILE_EXTENSION}"))
     assert names and all(n.startswith("myrun_s") for n in names), names
+
+
+# ---------------------------------------------------------------------------
+# The metric-tag grammar has one owner
+# ---------------------------------------------------------------------------
+
+
+def _grammar_eval_config():
+    from sisr.training import SREvalConfig
+
+    return SREvalConfig(psnr_channels=["RGB", "Y"], ssim_channels=["RGB", "Y"])
+
+
+def _scores_for(cfg):
+    import torch
+
+    from sisr.metrics.scoring import Scores
+
+    return Scores(
+        psnr={k: torch.tensor(0.0) for k in cfg.psnr_keys},
+        ssim={k: torch.tensor(0.0) for k in cfg.ssim_keys},
+        perceptual={k: torch.tensor(0.0) for k in cfg.perceptual_keys},
+    )
+
+
+def test_expected_tags_agrees_with_what_scores_emit():
+    """`expected_tags` answers "which tags will exist?" without values;
+    `Scores.tagged` answers it with them. Two derivations of one grammar is the
+    drift `metric_tag`'s docstring says routing through it prevents."""
+    from sisr.metrics.scoring import expected_tags
+
+    cfg = _grammar_eval_config()
+    cfg_p = _grammar_eval_config()
+    cfg_p.perceptual_metrics = ["lpips", "dists"]
+    for c in (cfg, cfg_p):
+        for scope in ("val", "Set5"):
+            assert set(expected_tags(c, scope)) == set(_scores_for(c).tagged(scope))
+
+
+def test_monitor_validator_follows_the_grammar_when_it_moves(monkeypatch):
+    """`_validate_monitor` exists to refuse a monitor naming a metric nothing
+    will log -- the failure it prevents is a run that silently keeps its WORST
+    checkpoint. It answered "which tags will exist?" by re-deriving the grammar
+    in raw f-strings instead of asking the function that owns it.
+
+    Move the grammar in its one documented owner. The emitter follows it; the
+    validator must too, or it rejects a monitor the run really does emit."""
+    from types import SimpleNamespace
+
+    import sisr.metrics.scoring as scoring
+    from sisr.training.callbacks import SRCheckpoint
+
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+
+    cfg = _grammar_eval_config()
+    emitted = set(_scores_for(cfg).tagged("val"))
+    assert "psnr.val.Y" in emitted, "the moved grammar must actually be in effect"
+
+    module = SimpleNamespace(eval_config=cfg)
+    for tag in sorted(emitted):
+        ckpt = SRCheckpoint(monitor_metric=tag, mode="max", dirpath="/tmp/x")
+        ckpt._validate_monitor(module)  # must not raise: the run WILL log this tag
+
+
+def test_benchmark_means_are_tagged_by_the_grammar_owner(monkeypatch):
+    """`_flush_buffer` hand-rolled `psnr/{set}/{key}` with raw f-strings, which
+    is exactly what `Scores.tagged(dataset_name)` already returns -- the
+    perceptual family's different shape included. Move the grammar and the
+    benchmark hierarchy must move with the validation one."""
+    import sisr.metrics.scoring as scoring
+
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+    logged: dict[str, float] = {}
+
+    from types import SimpleNamespace
+
+    from sisr.training.callbacks import BenchmarkImageLogger, BenchmarkSample
+
+    cfg = _grammar_eval_config()
+    module = SimpleNamespace(eval_config=cfg, log=lambda t, v, **kw: logged.__setitem__(t, v))
+    cb = BenchmarkImageLogger.__new__(BenchmarkImageLogger)
+    cb._buffer = {
+        "Set5": [
+            BenchmarkSample(
+                filename="a",
+                psnr={k: 1.0 for k in cfg.psnr_keys},
+                ssim={k: 1.0 for k in cfg.ssim_keys},
+                perceptual={},
+            )
+        ]
+    }
+    cb._flush_buffer(module)
+    assert "psnr.Set5.Y" in logged, f"benchmark tags did not follow the grammar: {sorted(logged)}"

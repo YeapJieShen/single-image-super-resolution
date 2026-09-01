@@ -63,6 +63,64 @@ def metric_tag(family: str, scope: str, key: str) -> str:
     return f"{family}/{scope}/{key}"
 
 
+#: A metric value as it travels to ``pl_module.log``. The validation path
+#: produces 0-dim tensors straight from the metric functions; the benchmark
+#: path means its per-image buffer first and so produces plain floats. Both are
+#: legal ``log`` arguments, and ``Scores`` is only a carrier -- it never does
+#: arithmetic on them -- so it accepts either rather than forcing one side to
+#: convert for the type checker's benefit.
+ScoreValue = torch.Tensor | float
+
+
+def perceptual_tag(name: str, scope: str) -> str:
+    """Build a perceptual metric's tag: ``{name}/{scope}``.
+
+    The second rule of the grammar, and deliberately a different shape:
+    LPIPS/DISTS carry no colorspace key, so they get their own family root
+    rather than a key slot under the PSNR/SSIM scheme. That shape is already
+    published, so it is preserved here rather than normalised -- which is
+    exactly why it needs an owner too. A caller re-deriving "the tag grammar"
+    from :func:`metric_tag` alone silently gets this family wrong.
+
+    Args:
+        name: Perceptual metric name, e.g. ``'lpips'``.
+        scope: ``'val'`` for the validation loop, else a benchmark dataset name.
+
+    Returns:
+        The TensorBoard tag.
+    """
+    return f"{name}/{scope}"
+
+
+def expected_tags(eval_config: SREvalConfig, scope: str) -> list[str]:
+    """Every tag a run under *eval_config* will log at *scope*.
+
+    The values-free half of the grammar: :meth:`Scores.tagged` answers "which
+    tags exist" **with** numbers, this answers it without any. Both derive from
+    :func:`metric_tag` and :func:`perceptual_tag`, so a caller that needs to
+    know the tag namespace before a single batch has been scored -- seeding
+    TensorBoard's HParams columns, or validating a checkpoint monitor -- asks
+    the owner instead of re-deriving the grammar from f-strings.
+
+    That re-derivation is not hypothetical: the checkpoint monitor validator,
+    whose whole job is knowing which tags will exist, had its own copy. When
+    the two disagree the failure is silent -- a correct monitor is rejected, or
+    an incorrect one accepted and the run keeps its worst checkpoint.
+
+    Args:
+        eval_config: The evaluation settings the run will score under.
+        scope: ``'val'`` for the validation loop, else a benchmark dataset name.
+
+    Returns:
+        Every tag, PSNR then SSIM then perceptual, in the order
+        :meth:`Scores.tagged` produces them.
+    """
+    tags = [metric_tag("psnr", scope, k) for k in eval_config.psnr_keys]
+    tags += [metric_tag("ssim", scope, k) for k in eval_config.ssim_keys]
+    tags += [perceptual_tag(name, scope) for name in eval_config.perceptual_keys]
+    return tags
+
+
 class Scores:
     """Metric values for one scored pair, before any tag prefixing.
 
@@ -76,15 +134,15 @@ class Scores:
 
     def __init__(
         self,
-        psnr: dict[str, torch.Tensor],
-        ssim: dict[str, torch.Tensor],
-        perceptual: dict[str, torch.Tensor],
+        psnr: dict[str, ScoreValue],
+        ssim: dict[str, ScoreValue],
+        perceptual: dict[str, ScoreValue],
     ) -> None:
         self.psnr = psnr
         self.ssim = ssim
         self.perceptual = perceptual
 
-    def tagged(self, scope: str) -> dict[str, torch.Tensor]:
+    def tagged(self, scope: str) -> dict[str, ScoreValue]:
         """Flatten to ``tag -> value`` under ``scope``.
 
         Perceptual metrics carry no colorspace key, so they tag as
@@ -99,7 +157,7 @@ class Scores:
         """
         tags = {metric_tag("psnr", scope, k): v for k, v in self.psnr.items()}
         tags |= {metric_tag("ssim", scope, k): v for k, v in self.ssim.items()}
-        tags |= {f"{name}/{scope}": v for name, v in self.perceptual.items()}
+        tags |= {perceptual_tag(name, scope): v for name, v in self.perceptual.items()}
         return tags
 
 
