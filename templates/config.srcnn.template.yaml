@@ -21,6 +21,9 @@ model:
           num_filters: [64, 32]
           kernel_sizes: [9, 1, 5]
           padding: 0
+          # The authors' SRCNN.m runs inference imfilter(..., 'same', 'replicate').
+          eval_padding: same
+          eval_padding_mode: replicate
       processor:
         class_path: sisr.processors.YChannelProcessor
       training_config:

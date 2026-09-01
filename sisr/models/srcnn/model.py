@@ -25,6 +25,14 @@ class SRCNN(SRModel):
             original architecture).
         padding: ``'valid'``, ``'same'``, or an explicit pixel count.
             Defaults to ``'valid'``.
+        eval_padding: Padding to use outside training mode, or ``None``
+            (default) to use ``padding`` throughout. Only ``'same'`` is
+            accepted: the authors train with ``pad: 0`` and run inference
+            with SAME padding, so the model is deliberately not the same
+            function in the two modes. Requires odd kernels.
+        eval_padding_mode: Border mode for ``eval_padding``, in
+            ``torch.nn.functional.pad``'s vocabulary. ``'replicate'``
+            (default) is what the authors' ``imfilter`` call uses.
     """
 
     #: Resolution-preserving: LR arrives already bicubic-upsampled to HR size.
@@ -36,16 +44,34 @@ class SRCNN(SRModel):
         num_filters: tuple[int, ...],
         kernel_sizes: tuple[int, ...],
         padding: str | int = "valid",
+        eval_padding: Literal["same"] | None = None,
+        eval_padding_mode: str = "replicate",
     ):
         super().__init__()
 
         self._check_architecture(num_filters, kernel_sizes)
+        if eval_padding is not None:
+            if eval_padding != "same":
+                raise ValueError(
+                    f"eval_padding must be 'same' or None, got {eval_padding!r}. Valid "
+                    f"convolution at eval is what padding={padding!r} already gives."
+                )
+            if any(k % 2 == 0 for k in kernel_sizes):
+                raise ValueError(
+                    f"eval_padding='same' needs odd kernel sizes to pad symmetrically; "
+                    f"got kernel_sizes={kernel_sizes}."
+                )
+
+        self.eval_padding = eval_padding
+        self.eval_padding_mode = eval_padding_mode
 
         self._hparams = {
             "num_channels": num_channels,
             "num_filters": num_filters,
             "kernel_sizes": kernel_sizes,
             "padding": padding,
+            "eval_padding": eval_padding,
+            "eval_padding_mode": eval_padding_mode,
         }
 
         self.feat = torch.nn.Sequential(
@@ -122,6 +148,30 @@ class SRCNN(SRModel):
                 if module.bias is not None:
                     torch.nn.init.constant_(module.bias, 0.0)
 
+    def _eval_layer(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Run one layer under ``eval_padding``, padding a Conv2d's own input.
+
+        The border is re-derived at every convolution, which is what the
+        authors' per-layer ``imfilter(..., 'same', 'replicate')`` does.
+        Padding the input once by the whole receptive field and convolving
+        valid is a different function: later layers would then see a border
+        built from replicated *input* pixels, not replicated features.
+
+        Args:
+            layer: A ``Conv2d`` or an activation from the conv stacks.
+            x: That layer's input.
+
+        Returns:
+            The layer's output, spatially unchanged for a ``Conv2d``.
+        """
+        if not isinstance(layer, torch.nn.Conv2d):
+            return layer(x)
+        pad_h, pad_w = ((k - 1) // 2 for k in layer.kernel_size)
+        x = torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h), mode=self.eval_padding_mode)
+        return torch.nn.functional.conv2d(
+            x, layer.weight, layer.bias, layer.stride, 0, layer.dilation, layer.groups
+        )
+
     @property
     def variant_tag(self) -> str:
         """The kernel-size triple, e.g. ``'915'`` -- how the paper names its variants."""
@@ -148,14 +198,20 @@ class SRCNN(SRModel):
             clamp_minmax: Min/max values for clamping the output.
 
         Returns:
-            Output tensor. Same shape as *x* only when ``padding='same'``;
-            with the default ``'valid'`` (or an explicit int), each conv
-            layer shrinks H/W by ``kernel_size - 1 - 2*padding``, e.g. -12 px
-            total for the shipped ``(9, 1, 5)`` kernels at padding 0.
+            Output tensor. Same shape as *x* when ``padding='same'``, or
+            when ``eval_padding='same'`` and the module is not in training
+            mode; otherwise each conv layer shrinks H/W by
+            ``kernel_size - 1 - 2*padding``, e.g. -12 px total for the
+            shipped ``(9, 1, 5)`` kernels at padding 0. **The output shape
+            therefore depends on training mode** whenever ``eval_padding``
+            is set -- deliberately, since the authors train valid and test
+            same.
         """
-        x = self.feat(x)
-        x = self.mapping(x)
-        x = self.recon(x)
+        if self.training or self.eval_padding is None:
+            x = self.recon(self.mapping(self.feat(x)))
+        else:
+            for layer in (*self.feat, *self.mapping, self.recon):
+                x = self._eval_layer(layer, x)
 
         if clamp_output:
             x = torch.clamp(x, min=clamp_minmax[0], max=clamp_minmax[1])

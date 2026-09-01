@@ -66,6 +66,8 @@ def test_build_metadata_model_class_path_and_init_args():
         "num_filters": [8, 4],
         "kernel_sizes": [5, 1, 3],
         "padding": 0,
+        "eval_padding": None,
+        "eval_padding_mode": "replicate",
     }
 
 
