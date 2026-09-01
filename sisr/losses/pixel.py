@@ -58,29 +58,24 @@ class CharbonnierLoss(torch.nn.Module):
 class TotalVariationLoss(torch.nn.Module):
     """Total-variation loss: isotropic ``sqrt(dx^2 + dy^2 + eps^2)``, reduced per ``reduction``.
 
-    Ledig et al. §3.4 add this to the VGG22 content loss at weight
-    ``2e-8`` when training SRResNet-VGG22 — the one VGG variant reproducible
-    without a discriminator, so this is required for that recipe rather than
-    optional. Their ``l_TV = 1/(r^2 WH) * sum ||grad G(I_LR)||`` is a norm of
-    the gradient *vector*, i.e. the isotropic form; ``isotropic=False`` gives
-    the more common ``|dx| + |dy|`` reimplementation, which is a different
-    function (up to ``sqrt(2)`` larger on diagonal structure) and not a
-    rescaling of it.
+    Ledig et al. Sec. 3.4 add this to the VGG22 content loss at weight ``2e-8``
+    for SRResNet-VGG22 — the one VGG variant reproducible without a
+    discriminator, so it is required for that recipe, not optional. Their
+    ``l_TV`` is a norm of the gradient *vector*, i.e. isotropic;
+    ``isotropic=False`` gives the common ``|dx| + |dy|`` reimplementation, which
+    is a **different function** (up to ``sqrt(2)`` larger on diagonal
+    structure), not a rescaling. Both difference grids are cropped to a common
+    ``(H-1, W-1)`` so the norm can combine them per pixel.
 
-    Both difference grids are cropped to a common ``(H-1, W-1)`` so the
-    isotropic norm can combine them per pixel.
+    Two traps before setting a weight:
 
-    Two things worth knowing before setting a weight:
-
-    - ``target`` is **ignored**. This is a regulariser, not a distance; the
-      uniform ``(pred, target)`` signature is what lets
-      :class:`~sisr.losses.composite.WeightedSumLoss` dispatch every term
-      identically.
-    - The value **scales with the intensity range**, so the paper's ``2e-8``
-      presumes the model's ``[-1, 1]`` output range
-      (:class:`~sisr.processors.rgb.RGBSignedOutputProcessor`). Under a
-      ``[0, 1]`` processor the same image gives exactly half the TV, so the
-      effective weight differs by 2x.
+    - ``target`` is **ignored** — this is a regulariser, not a distance. The
+      uniform ``(pred, target)`` signature exists so ``WeightedSumLoss`` can
+      dispatch every term identically.
+    - **The value scales with the intensity range.** The paper's ``2e-8``
+      presumes a ``[-1, 1]`` output range; under a ``[0, 1]`` processor the
+      same image gives exactly half the TV, so the effective weight differs
+      by 2x.
 
     Args:
         isotropic: Use the paper's ``sqrt(dx^2 + dy^2)`` norm. ``False``

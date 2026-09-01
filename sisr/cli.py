@@ -291,26 +291,22 @@ class SRLightningCLI(LightningCLI):
         (any nested subclass field with a fallback, e.g. ``eval_config``) — see
         below for which and why.
 
-        The reason: jsonargparse's subclass-merge machinery
-        (``ActionTypeHint._check_type``) looks up the field's *previous* value as
-        ``cfg.get(self.dest)`` — ``self.dest`` is the action's bare name (``"model"``),
-        not a subcommand-qualified one. Reached through the subcommand's own
-        parser, ``cfg`` is already scoped to that subcommand, so ``cfg.get("model")``
-        finds the real, already-resolved value and merges our override's keys onto
-        it, preserving every sibling key we don't mention (``model``, ``processor``,
-        nested ``class_path`` identities) and any subclass-only default our override
-        never names. Reached through the top-level parser, ``cfg`` is the
-        *unscoped* full config, so the same ``cfg.get("model")`` misses the value
-        (it actually lives at ``cfg["validate"]["model"]``) and silently gets
-        "no previous value" instead of a lookup error — jsonargparse then rebuilds
-        the field from schema defaults, which are ``None`` for ``model``/
-        ``processor`` (no default; required) and the bare annotation type for any
-        nested subclass field (``eval_config`` reverts to base ``SREvalConfig``).
-        A resumed run would then either hit that "arguments are required"
-        ``SystemExit`` outright, or — for a field with a valid bare-default
-        fallback — silently drop back to the config file's/annotation's values with
-        nothing in the logs to say so. Re-inlining this as ``self.parser`` "for
-        simplicity" reintroduces exactly that.
+        **The reason**: jsonargparse's subclass-merge
+        (``ActionTypeHint._check_type``) looks up the previous value as
+        ``cfg.get(self.dest)``, and ``self.dest`` is the bare name (``"model"``),
+        never subcommand-qualified. Through the subcommand's parser ``cfg`` is
+        already scoped, so the lookup finds the resolved value and merges onto
+        it, preserving sibling keys and subclass-only defaults. Through the
+        top-level parser ``cfg`` is unscoped, the value actually lives at
+        ``cfg["validate"]["model"]``, and the miss reads as "no previous value"
+        rather than an error — so jsonargparse rebuilds from schema defaults:
+        ``None`` for the required ``model``/``processor``, and the bare
+        annotation for any nested subclass field (``eval_config`` reverts to
+        base ``SREvalConfig``).
+
+        **So a resumed run either dies on "arguments are required" or silently
+        reverts to annotation defaults with nothing in the logs.** Re-inlining
+        this as ``self.parser`` "for simplicity" reintroduces exactly that.
         """
         if not self.config.get("subcommand"):
             return
