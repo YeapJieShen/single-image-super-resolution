@@ -281,6 +281,24 @@ def test_eval_padding_is_recorded_in_hparams(srcnn_authors: SRCNN):
     assert srcnn_authors.hparams["eval_padding_mode"] == "replicate"
 
 
+@pytest.mark.parametrize("bad", ["valid", "replicate", 0])
+def test_eval_padding_rejects_anything_but_same(bad):
+    """`same` is the only override worth having — valid at eval is what `padding` gives.
+
+    Rejecting rather than accepting-and-ignoring matters here: silently
+    honouring `eval_padding='valid'` as "no override" would read like the
+    authors' path was configured when it was not.
+    """
+    with pytest.raises(ValueError, match="must be 'same' or None"):
+        SRCNN(
+            num_channels=1,
+            num_filters=(64, 32),
+            kernel_sizes=(9, 1, 5),
+            padding=0,
+            eval_padding=bad,
+        )
+
+
 def test_eval_padding_rejects_an_even_kernel():
     """`same` is not expressible for an even kernel without an asymmetric pad."""
     with pytest.raises(ValueError, match="odd kernel"):
