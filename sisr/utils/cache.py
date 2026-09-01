@@ -129,13 +129,26 @@ class LMDBCacheBuildContext:
     def write_batch(self, pairs: Sequence[tuple[str, bytes]]) -> None:
         """Writes a batch of key-value pairs in a single transaction.
 
+        Context-managed, so a failed put aborts the transaction immediately.
+        Uncontext-managed it was aborted only by garbage collection, which
+        means it survived exactly as long as the raised exception's traceback
+        -- and anything that logs with ``exc_info=True``, stores the exception,
+        wraps and re-raises it, or merely holds it while a ``tqdm`` bar and a
+        pool of futures are still live keeps the write lock held. That is
+        precisely the state :meth:`parallel_build` is in when a job fails.
+
+        The environment here is owned by the caller and outlives this method,
+        and ``parallel_build`` calls it in a loop, so nothing else bounds it.
+        A ``put`` raising ``MapFullError`` partway through is a known,
+        designed-for event -- ``hr_cache.estimate_map_size`` exists because of
+        it.
+
         Args:
             pairs: Sequence of ``(key, value)`` tuples to write.
         """
-        txn = self.env.begin(write=True)
-        for key, value in pairs:
-            txn.put(key.encode(), value)
-        txn.commit()
+        with self.env.begin(write=True) as txn:
+            for key, value in pairs:
+                txn.put(key.encode(), value)
 
     def parallel_build(
         self,
@@ -170,47 +183,49 @@ class LMDBCacheBuildContext:
 
         pbar = tqdm(total=n_items, desc=desc, unit="item") if self.use_tqdm else None
 
-        # <= 1 effective worker: skip the pool. Its spawn/import cost, plus the
-        # hazard of nesting one inside a test/xdist worker, isn't worth it here.
-        if num_workers <= 1:
-            for i in range(n_items):
-                args = (items[i],)
-                if process_args is not None:
-                    args = args + tuple(process_args[i])
-                self.write_batch(process_fn(*args))
-                if pbar is not None:
-                    pbar.update(1)
-            if pbar is not None:
-                pbar.close()
-            return
-
-        next_submit = 0
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            pending: set[Future] = set()
-
-            def _submit() -> None:
-                nonlocal next_submit
-                if next_submit < n_items:
-                    args = (items[next_submit],)
+        # finally, not the success path: an exception used to leave the bar
+        # open, which corrupts every subsequent line of terminal output.
+        try:
+            # <= 1 effective worker: skip the pool. Its spawn/import cost, plus
+            # the hazard of nesting one inside a test/xdist worker, isn't worth
+            # it here.
+            if num_workers <= 1:
+                for i in range(n_items):
+                    args = (items[i],)
                     if process_args is not None:
-                        args = args + tuple(process_args[next_submit])
-                    pending.add(executor.submit(process_fn, *args))
-                    next_submit += 1
-
-            for _ in range(num_workers):
-                _submit()
-
-            while pending:
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    pending.discard(future)
-                    self.write_batch(future.result())
+                        args = args + tuple(process_args[i])
+                    self.write_batch(process_fn(*args))
                     if pbar is not None:
                         pbar.update(1)
+                return
+
+            next_submit = 0
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                pending: set[Future] = set()
+
+                def _submit() -> None:
+                    nonlocal next_submit
+                    if next_submit < n_items:
+                        args = (items[next_submit],)
+                        if process_args is not None:
+                            args = args + tuple(process_args[next_submit])
+                        pending.add(executor.submit(process_fn, *args))
+                        next_submit += 1
+
+                for _ in range(num_workers):
                     _submit()
 
-        if pbar is not None:
-            pbar.close()
+                while pending:
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        pending.discard(future)
+                        self.write_batch(future.result())
+                        if pbar is not None:
+                            pbar.update(1)
+                        _submit()
+        finally:
+            if pbar is not None:
+                pbar.close()
 
 
 class LMDBCache:
