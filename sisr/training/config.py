@@ -17,6 +17,7 @@ correlated-field validation seam: ``num_channels`` (model) and ``class_path``
 so the cross-object check runs once both exist, orchestrated by
 ``SRLightning.__init__``.
 """
+
 from dataclasses import dataclass, field
 from typing import Literal
 
