@@ -128,8 +128,20 @@ class SRScorer:
 
         Returns:
             The cropped tensors, in the order given.
+
+        Raises:
+            ValueError: If ``crop_border`` is still ``None``. That means the
+                config never passed through ``SRLightning``, which resolves the
+                derive-from-scale sentinel; scoring against an unresolved border
+                would silently pick a different region than the run intends.
         """
         n = self.eval_config.crop_border
+        if n is None:
+            raise ValueError(
+                "eval_config.crop_border is still None at scoring time. It is a sentinel "
+                "meaning 'crop the model's scale', resolved by SRLightning at construction "
+                "-- build the scorer from a module's eval_config, or set an explicit int."
+            )
         if n <= 0:
             return tensors
         return tuple(t[..., n:-n, n:-n] for t in tensors)

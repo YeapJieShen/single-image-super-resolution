@@ -102,6 +102,6 @@ class SRResNetEvalConfig(SREvalConfig):
             which reports Wang. See :mod:`sisr.metrics.ssim`.
     """
 
-    crop_border: int = 4
+    crop_border: int | None = None
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
     ssim_impl: Literal["wang", "daala"] = "daala"

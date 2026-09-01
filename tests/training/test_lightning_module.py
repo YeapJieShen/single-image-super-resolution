@@ -2016,3 +2016,66 @@ def test_an_explicit_example_input_shape_is_still_checked_not_overwritten(
 
     with pytest.raises(ValueError, match="example_input_shape"):
         lit.setup(stage="fit")
+
+
+def test_subclass_crop_border_follows_the_models_scale_not_a_constant():
+    """A paper-default eval config crops `scale` pixels at ANY scale, not a fixed 3 or 4.
+
+    The SR field's convention -- and the SRCNN authors' own demo code -- crop the
+    outer ``scale`` pixels before scoring. `SRResNetEvalConfig` shipped a hardcoded
+    ``4`` and `SRCNNEvalConfig` a hardcoded ``3``, which are correct only because
+    those templates happen to ship x4 and x3. At any other scale the constant is
+    silently the wrong border, and a border changes the reported PSNR/SSIM without
+    changing the model.
+    """
+    model = SRResNet(scale=2, num_residual_blocks=1, hidden_channel=4)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SRResNetEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.eval_config.crop_border == 2, (
+        "a scale-2 run must crop 2 border pixels, not the shipped constant"
+    )
+    assert lit.scorer.eval_config.crop_border == 2, "the scorer must see the resolved border"
+
+
+def test_explicit_crop_border_still_wins_over_the_scale_default():
+    """An explicit value is an intent, and is never overwritten by the derivation."""
+    model = SRResNet(scale=2, num_residual_blocks=1, hidden_channel=4)
+    lit = SRLightning(
+        model=model,
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(scale=2),
+        eval_config=SRResNetEvalConfig(crop_border=8),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    assert lit.eval_config.crop_border == 8
+
+
+def test_derived_crop_border_refuses_when_no_scale_exists_to_derive_from():
+    """The sentinel needs a scale. With none available, say so rather than guess.
+
+    SRCNN declares no ``scale`` hparam of its own, so a bare
+    ``SRTrainingConfig()`` leaves nothing to derive from. Silently falling back
+    to 0 would score the full image while the config asked for the field
+    convention -- a different measurement with nothing to indicate it.
+    """
+    model = SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    with pytest.raises(ValueError, match="no scale is available"):
+        SRLightning(
+            model=model,
+            processor=YChannelProcessor(),
+            training_config=SRTrainingConfig(),
+            eval_config=SREvalConfig(crop_border=None),
+            optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+        )
+
+
+def test_scorer_refuses_an_unresolved_crop_border_sentinel():
+    """A scorer built outside SRLightning must not silently treat None as 0."""
+    scorer = SRScorer(SREvalConfig(crop_border=None))
+    with pytest.raises(ValueError, match="still None at scoring time"):
+        scorer.crop(torch.rand(1, 3, 16, 16))
