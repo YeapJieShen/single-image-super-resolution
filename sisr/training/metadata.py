@@ -15,13 +15,11 @@ cannot drift apart either. Each carries a ``kind`` field: ``"sr_model"`` for :fu
 change — ``FORMAT_VERSION`` is unchanged, and its absence on a file written before ``kind``
 existed means ``"sr_model"``, the only kind that existed then.
 
-:func:`build_metadata` carries ``format``, ``kind``, ``created``, ``versions``, ``model``,
-``processor``, ``criterion``, ``io``, ``eval_config``, and ``training`` — it describes the
-*generator*. :func:`build_component_metadata` carries ``format``, ``kind``, ``created``,
-``versions``, ``component``, ``io``, and ``training`` — it describes one other named component
-only. Attaching the former to the latter's weights would describe things the file does not
-contain (``io.scale``, ``criterion``, ``eval_config``); this is the silent-wrong-artifact class
-this metadata exists to prevent, so the two never share a shape beyond the envelope.
+The first describes the *generator*, the second one other named component; each
+function's ``Returns`` lists its own fields. **Attaching the generator's shape to a
+component's weights would describe things the file does not contain**
+(``io.scale``, ``criterion``, ``eval_config``) — the silent-wrong-artifact class
+this metadata exists to prevent — so the two never share a shape beyond the envelope.
 
 Deliberately omits dataset paths: Ultralytics' ``train_args`` leaks local filesystem layout into
 distributed files; this stays leak-free by construction. If dataset provenance is ever added,

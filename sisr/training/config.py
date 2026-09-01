@@ -1,31 +1,22 @@
 """Per-architecture training and evaluation configuration dataclasses.
 
-Split into two classes by lifecycle:
-
-* ``SRTrainingConfig`` controls behaviour during ``cli fit`` — per-Conv2d
-  learning rates, paper-init knobs, and the example input shape used to log
-  the model graph to TensorBoard.
-* ``SREvalConfig`` controls validation/test metric computation —
-  boundary-pixel exclusion (``crop_border``) and which colorspaces PSNR/SSIM
-  are reported in.
+Split by lifecycle: ``SRTrainingConfig`` controls ``cli fit`` (per-Conv2d LRs,
+paper-init knobs, the TensorBoard graph's example input); ``SREvalConfig``
+controls validation/test scoring only (border exclusion, metric colorspaces).
 
 Per-architecture defaults live in subclasses next to the model code (e.g.
-``sisr.models.srcnn.SRCNNTrainingConfig``); a YAML user picks them via
-``class_path`` on ``model.training_config`` / ``model.eval_config`` and
-overrides individual fields with ``init_args``.
+``sisr.models.srcnn.SRCNNTrainingConfig``); YAML picks one via ``class_path``
+on ``model.training_config`` / ``model.eval_config``.
 
-The colorspace the model trains in is no longer a string field here; it is
-expressed by the choice of processor (see ``sisr.processors``).
+The model's training colorspace is not a field here — it is the choice of
+processor (see ``sisr.processors``).
 
-``SRTrainingConfig.validate_against`` / ``SREvalConfig.psnr_keys`` /
-``SREvalConfig.ssim_keys`` are the config-side half of the correlated-field
-validation seam: fields like
-``num_channels`` (model) and ``class_path`` (processor) live in sibling
-objects a single dataclass ``__post_init__`` cannot see across, so the
-cross-object check happens once both are constructed, orchestrated by
+``validate_against`` / ``psnr_keys`` / ``ssim_keys`` are the config half of the
+correlated-field validation seam: ``num_channels`` (model) and ``class_path``
+(processor) live in sibling objects no single ``__post_init__`` can see across,
+so the cross-object check runs once both exist, orchestrated by
 ``SRLightning.__init__``.
 """
-
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -35,16 +26,10 @@ from ..metrics.perceptual import PERCEPTUAL_METRICS
 from ..models.base import SRModel
 from ..processors.base import SRProcessor
 
-# Colorspace entries map to their sub-channel names, expanded only when
-# separate_psnr=True; single-channel entries (e.g. 'Y') map to () since
-# there's nothing further to decompose — this lets a bare channel name be
-# requested as a first-class psnr_channels/ssim_channels entry (e.g.
-# ['RGB', 'Y'] for the paper's Y-only metric without YCbCr's
-# smoother-chroma-diluted aggregate).
-# Doubles as the set of supported ``psnr_channels``/``ssim_channels`` entries
-# (validated in `SREvalConfig.__post_init__`) — shared by both metric
-# families so PSNR and SSIM cannot silently diverge on which colorspace
-# names are legal.
+# Maps a colorspace to its sub-channel names, expanded only when separate_psnr=True;
+# single-channel entries map to () so a bare channel name is itself a legal
+# psnr_channels/ssim_channels entry. Doubles as the allowlist for both metric
+# families, so PSNR and SSIM cannot diverge on which names are legal.
 _CHANNEL_SUBNAMES: dict[str, tuple[str, ...]] = {
     "RGB": ("R", "G", "B"),
     "YCbCr": ("Y", "Cb", "Cr"),
@@ -62,90 +47,64 @@ class SRTrainingConfig:
     """How to train the SR model — affects optimizer setup and weight init.
 
     Args:
-        layer_lrs: Absolute per-``Conv2d`` learning rates (one entry per
-            ``Conv2d`` in the model, in module-traversal order).  When
-            ``None`` (default), training uses the optimizer's base ``lr``
-            uniformly across all parameters.  Only valid for architectures
-            where every trainable parameter lives in a ``Conv2d`` (no
-            BatchNorm / PReLU); ``SRLightning.configure_optimizers``
-            raises ``ValueError`` otherwise.
+        layer_lrs: Absolute per-``Conv2d`` LRs, one per ``Conv2d`` in
+            module-traversal order. ``None`` (default) uses the optimizer's
+            base ``lr`` uniformly. Only valid where every trainable parameter
+            lives in a ``Conv2d`` — no BatchNorm / PReLU;
+            ``SRLightning.configure_optimizers`` raises ``ValueError``
+            otherwise. Applies to a layer's weight *and* bias together.
 
-        example_input_shape: Shape of a single input sample *excluding* the
-            batch dimension (e.g. ``(1, 33, 33)`` for a 33×33 Y-channel patch).
-            When provided, ``self.example_input_array`` is set so the
-            TensorBoard logger can capture the model graph, and
-            :meth:`validate_against` probes the model with it.
+        example_input_shape: One sample's shape *excluding* batch (e.g.
+            ``(1, 33, 33)``). Sets ``example_input_array`` so TensorBoard can
+            capture the graph, and gives :meth:`validate_against` a probe.
 
-        init_strategy: ``'paper'`` triggers a paper-faithful weight init via
-            ``SRModel.reset_parameters`` in ``SRLightning``'s constructor;
-            ``'default'`` (the default) skips it and uses PyTorch's defaults.
-            Subclasses pin a paper-faithful default (e.g. ``SRCNNTrainingConfig``
-            uses ``'paper'``).
+        init_strategy: ``'paper'`` runs ``SRModel.reset_parameters`` from
+            ``SRLightning``'s constructor; ``'default'`` uses PyTorch's.
+            Subclasses pin a paper-faithful default.
 
-        init_mean: Mean of the Gaussian for ``init_strategy='paper'``
-            implementations. Not itself paper-derived — this shared base
-            has no single paper to match; architectures with a paper init
-            (e.g. ``SRCNNTrainingConfig``) override with their actual value.
-            Defaults to ``0.0``.
+        init_mean: Gaussian mean for ``init_strategy='paper'``. **Not
+            paper-derived** — this base has no single paper; architectures with
+            one override it.
 
-        init_std: Std of the Gaussian for ``init_strategy='paper'``
-            implementations. Not itself paper-derived — see ``init_mean``;
-            e.g. ``SRCNNTrainingConfig`` overrides this to ``0.001``, the
-            value its paper specifies. Defaults to ``0.01``.
+        init_std: Gaussian std for ``init_strategy='paper'``. Not paper-derived
+            either — see ``init_mean``.
 
-        scale: The model's upscaling factor, for provenance metadata and
-            cross-checking against the model's own ``scale`` hparam (see
-            :meth:`validate_against`). **Required for any run that writes an
-            artifact** on an architecture carrying no ``scale`` hparam of its
-            own — :func:`~sisr.training.metadata.build_metadata` refuses rather
-            than recording a null. It used to be documented as optional there,
-            which held while the metadata was read only by us; a file handed to
-            a stranger has to state the factor, because for a pre-upsampled
-            architecture it is what they must resize the input by. Still
-            deliberately not inferred from
-            ``trainer.datamodule.train_dataset.scale``: that attribute lives
-            outside the ``SRDataset`` contract (``PredictDataset`` has none at
-            all), whereas per-paper knobs already live here.
+        scale: The model's upscaling factor, for provenance metadata and for
+            cross-checking the model's own ``scale`` hparam. **Required for any
+            run that writes an artifact** on an architecture carrying no
+            ``scale`` hparam: :func:`~sisr.training.metadata.build_metadata`
+            refuses rather than record a null, because a file handed to a
+            stranger must state the factor — for a pre-upsampled architecture
+            it is what they resize the input by. Deliberately not inferred from
+            the datamodule: that attribute is outside the ``SRDataset``
+            contract (``PredictDataset`` has none), whereas per-paper knobs
+            already live here.
 
-        compile_backend: Name of a ``torch._dynamo`` backend (e.g.
-            ``'cudagraphs'``, ``'inductor'``) to compile the training-mode
-            forward with via ``torch.compile``; ``None`` (default) trains
-            eager. Only ``training_step`` is compiled — ``SRLightning``
-            dispatches on ``self.training``, so validation/test/predict
-            always run eager, which the widely varying benchmark image
-            sizes require (CUDA-graph-style backends need static shapes).
-            An unrecognized name raises immediately at ``SRLightning``
-            construction (``torch._dynamo.exc.InvalidBackend``); a
-            recognized name whose toolchain is missing (e.g. ``'inductor'``
-            without a Triton install) only fails on first call, which
-            ``SRLightning.on_fit_start`` turns into an immediate failure via
-            a warm-up forward instead of an arbitrary mid-run crash.
-            Measured on one RTX 5060 Laptop (SRResNet, batch 16, 24x24 LR):
-            ``'inductor'`` is the only backend that pays, and by a mid-teens
-            percent rather than the multiples a microbenchmark suggests;
-            ``'cudagraphs'`` is within noise of eager — it captures the model
-            forward only, so backward and the optimizer step stay eager and
-            most kernel launches in a training step are never captured — and
-            ``'aot_eager'`` is slower. On SRCNN eager wins every comparison.
-            No backend is bit-identical to eager on SRResNet, so a compiled
-            run does not reproduce an eager one exactly. Defaults to ``None``,
-            and staying there is the standing recommendation.
+        compile_backend: A ``torch._dynamo`` backend to compile the
+            training-mode forward with; ``None`` (default) trains eager. **Only
+            ``training_step`` is compiled** — validation/test/predict stay eager,
+            which the widely varying benchmark image sizes require. An
+            unrecognized name raises at ``SRLightning`` construction; a
+            recognized name with a missing toolchain (e.g. ``'inductor'``
+            without Triton) would fail on first call, so
+            ``SRLightning.on_fit_start`` forces it early with a warm-up forward
+            rather than crash mid-run. Measured: ``'inductor'`` is the only
+            backend that pays, by a mid-teens percent; ``'cudagraphs'`` is
+            within noise (it captures the forward only) and ``'aot_eager'`` is
+            slower; on SRCNN eager wins outright. **No backend is bit-identical
+            to eager on SRResNet**, so a compiled run does not reproduce an
+            eager one. Staying at ``None`` is the standing recommendation.
 
-        compile_mode: ``torch.compile``'s ``mode`` — ``'reduce-overhead'``,
-            ``'max-autotune'``, ... — applied alongside ``compile_backend``.
-            ``None`` (default) leaves inductor on its own default mode, which
-            is what every configured run got before this field existed: the
-            call site passed ``backend`` and nothing else, so a published
-            ``reduce-overhead`` or ``max-autotune`` figure described something
-            no YAML could select. Requires ``compile_backend='inductor'``,
-            because ``mode`` is an inductor setting and torch forwards it to
-            any other backend as a keyword its compiler function does not
-            accept — a failure on the first compiled call, which this refuses
-            at construction instead. An unrecognized mode also raises there,
-            from torch. Which mode wins does not hold across precisions on
-            this hardware: ``'max-autotune'`` beat ``'reduce-overhead'`` under
-            bf16 and lost to it under fp32, so treat a mode as measured per
-            configuration, never as a default.
+        compile_mode: ``torch.compile``'s ``mode``, applied alongside
+            ``compile_backend``. ``None`` (default) leaves inductor on its own
+            default. **Requires ``compile_backend='inductor'``** — ``mode`` is
+            an inductor setting, and torch forwards it to any other backend as
+            a keyword its compiler does not accept, failing on the first
+            compiled call; this refuses at construction instead. An
+            unrecognized mode raises there too, from torch. **Which mode wins
+            does not hold across precisions**: ``'max-autotune'`` beat
+            ``'reduce-overhead'`` under bf16 and lost under fp32 — measure per
+            configuration, never assume.
     """
 
     layer_lrs: list[float] | None = None
@@ -176,40 +135,26 @@ class SRTrainingConfig:
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Validate this config against the model/processor it will pair with.
 
-        Universal, architecture-agnostic checks:
+        Universal checks: ``self.scale`` must agree with the model's ``'scale'``
+        hparam when both exist (either absent skips, rather than guessing); and
+        when ``example_input_shape`` is set its channel dimension must equal
+        ``processor.model_channels`` and a ``no_grad`` forward of the real
+        model must succeed. The probe exercises the actual ``nn.Module``, so it
+        cannot go stale as the architecture evolves.
 
-        - When ``self.scale`` is set and ``model.hparams`` declares a
-          ``'scale'`` entry, the two must agree. Either side being absent
-          (``self.scale is None``, or the model has no ``'scale'`` hparam —
-          e.g. SRCNN) skips the check silently rather than guessing.
-        - When ``example_input_shape`` is set, its channel dimension must
-          equal ``processor.model_channels``, and a ``torch.no_grad()``
-          forward pass of the real ``model`` on a zero tensor of that shape
-          must succeed. The probe exercises the actual ``nn.Module`` rather
-          than a separate description of it, so it cannot go stale as the
-          architecture evolves. This half is a no-op when
-          ``example_input_shape`` is unset — it is optional (TensorBoard
-          graph / FLOPs reporting only).
-
-        Subclasses (e.g. ``SRCNNTrainingConfig``) override this to add
-        architecture-specific correlation checks — e.g. ``num_channels`` vs
-        ``processor.model_channels`` — that exist purely to raise an
-        actionable message *before* a mismatched pairing would otherwise
-        surface as a raw shape-mismatch error from this probe. They call
-        ``super().validate_against(model, processor)`` to keep the universal
-        checks.
+        Subclasses add architecture-specific correlation checks so a mismatched
+        pairing raises an actionable message *before* it would surface as a raw
+        shape mismatch from this probe; they call ``super()`` to keep these.
 
         Args:
-            model: The constructed :class:`~sisr.models.base.SRModel` this
-                config will train/evaluate.
+            model: The constructed :class:`~sisr.models.base.SRModel`.
             processor: The :class:`~sisr.processors.base.SRProcessor` paired
-                with ``model`` for this run.
+                with ``model``.
 
         Raises:
-            ValueError: If ``self.scale`` is set and disagrees with the
-                model's own ``scale`` hparam, or if ``example_input_shape``
-                is set and its channel dimension doesn't match
-                ``processor.model_channels``.
+            ValueError: If ``self.scale`` disagrees with the model's ``scale``
+                hparam, or ``example_input_shape``'s channel dimension does not
+                match ``processor.model_channels``.
         """
         if self.scale is not None and "scale" in model.hparams:
             model_scale = model.hparams["scale"]

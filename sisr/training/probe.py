@@ -15,19 +15,11 @@ guarantees have to hold, and neither is visible at the call site:
   ``spawn`` must pickle the dataset to reach worker processes — and the crash
   lands inside torch or Lightning, far from here.
 
-Before this module both guarantees lived in ``SRLightning.setup``: the RNG
-snapshot inline in the method body, the pickle clone in a sibling staticmethod,
-and neither reachable without going through a ``LightningModule`` with a
-``Trainer`` and a datamodule attached. ``SRLightning._extra_probe`` is the proof
-that this was the wrong shape — its docstring says it exists so a subclass can
-validate against real data *without repeating* the discipline, which is another
-way of saying the discipline could be avoided but never reused.
-
-Here the guarantees are the module's, and :func:`probe_pair` is a context
-manager for exactly that reason: there is no way to obtain a sample without
-being inside the guarded region, and everything the caller then does with that
-sample is guarded too. What used to be a convention a reviewer had to remember
-is now the shape of the API.
+The guarantees are the module's, and :func:`probe_pair` is a context manager
+for exactly that reason: **there is no way to obtain a sample without being
+inside the guarded region**, and whatever the caller then does with it is
+guarded too. What was once a convention a reviewer had to remember is now the
+shape of the API.
 
 This module depends on ``random``, ``pickle`` and duck-typed dataset/datamodule
 reads — no Lightning, no ``SRLightning``, no torch beyond the type annotation.
@@ -125,23 +117,20 @@ def _sample_zero(dataset: Any) -> Any:
     the throwaway clone, which is discarded immediately — the original is never
     touched and stays exactly as picklable as it was.
 
-    Falls back to reading ``dataset`` directly when it can't currently be
-    pickled. That happens when something *else* already opened its environment
-    for real — e.g. a ``num_workers=0`` training read, harmless on its own since
-    such a loader never pickles, but enough to fail this call's own pickle
-    attempt on a re-probe (``fit`` then ``test`` in one process). Reading the
-    live object at that point adds no new harm: this function only guarantees it
-    will never be the *first* thing to open a pristine dataset's environment. It
-    does not promise a dataset stays picklable regardless of what real training
-    does to it afterwards.
+    Falls back to reading ``dataset`` directly when it cannot be pickled —
+    something else already opened its environment for real (e.g. a
+    ``num_workers=0`` read, then a re-probe in the same process). That adds no
+    new harm: **the guarantee is only that this is never the *first* thing to
+    open a pristine dataset's environment**, not that a dataset stays picklable
+    through whatever real training does to it.
 
     Args:
-        dataset: The live dataset instance. Mutated only in the fallback case,
-            and only exactly as a real ``num_workers=0`` read already would.
+        dataset: The live dataset. Mutated only in the fallback case, exactly as
+            a real ``num_workers=0`` read already would.
 
     Returns:
-        ``dataset[0]`` — an ``(lr, hr)`` tuple for every paired dataset, or a
-        bare LR tensor for :class:`~sisr.datasets.predict.PredictDataset`.
+        ``dataset[0]`` — an ``(lr, hr)`` tuple, or a bare LR tensor for
+        :class:`~sisr.datasets.predict.PredictDataset`.
     """
     try:
         clone = pickle.loads(pickle.dumps(dataset))
