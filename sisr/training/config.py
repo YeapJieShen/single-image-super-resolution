@@ -102,6 +102,35 @@ class SRTrainingConfig:
             to eager on SRResNet**, so a compiled run does not reproduce an
             eager one. Staying at ``None`` is the standing recommendation.
 
+        scalar_logging: Which per-step scalars a training step records.
+            ``self.log`` costs real host time on **every** step, and
+            ``log_every_n_steps`` gates the *flush*, not the accumulate, so the
+            existing cadence knob does not touch it. Those scalars are the run's
+            evidence, so this is opt-in and never silently applied.
+
+            - ``'all'`` (default) -- unchanged behaviour, every scalar below.
+            - ``'essential'`` -- keeps only the objective each optimiser
+              actually steps on: ``loss/train``, plus ``loss/train/d`` under
+              manual optimization. **Stops recording:** ``loss/train/content``
+              and ``loss/train/adv`` on the adversarial path, and every
+              per-term tag a composite criterion exposes through
+              ``last_terms`` (``loss/train/<term>``). Validation scalars are
+              untouched -- they are per-cycle, not per-step.
+
+            **What this is measured to be worth, so the trade is visible
+            here rather than inferred.** On an RTX 5060 Laptop: one ``self.log``
+            call costs **1.132 ms on a 6.167 ms SRCNN step (18.4%)**, and is
+            **below the noise floor of a 36 ms SRResNet step**. But that 1.132 ms
+            is ``loss/train`` itself — the objective, which ``'essential'``
+            keeps — so on both *shipped* configs this knob recovers nothing
+            measurable. It pays only for a criterion with many terms, where the
+            decomposition is several extra calls per step. Treat it as a lever
+            for that case, not as a general speedup.
+
+            **Two runs that logged different scalar sets are not
+            interchangeable**, which is why this lives on the training config
+            and so reaches ``hparams`` and the checkpoint, rather than on a
+            callback.
         compile_mode: ``torch.compile``'s ``mode``, applied alongside
             ``compile_backend``. ``None`` (default) leaves inductor on its own
             default. **Requires ``compile_backend='inductor'``** — ``mode`` is
@@ -122,6 +151,7 @@ class SRTrainingConfig:
     scale: int | None = None
     compile_backend: str | None = None
     compile_mode: str | None = None
+    scalar_logging: Literal["all", "essential"] = "all"
 
     def __post_init__(self) -> None:
         """Reject a compile mode that nothing will apply, and values that mean nothing.
@@ -191,6 +221,12 @@ class SRTrainingConfig:
                 "Fix model.training_config.init_args.init_strategy in your YAML."
             )
 
+        if self.scalar_logging not in ("all", "essential"):
+            raise ValueError(
+                f"training_config.scalar_logging must be 'all' or 'essential'; got "
+                f"{self.scalar_logging!r}. Fix "
+                f"model.training_config.init_args.scalar_logging in your YAML."
+            )
         if self.compile_mode is not None and self.compile_backend != "inductor":
             raise ValueError(
                 f"compile_mode={self.compile_mode!r} needs compile_backend='inductor'; got "

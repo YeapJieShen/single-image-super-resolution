@@ -655,6 +655,11 @@ class SRLightning(lightning.LightningModule):
         criterion exposing that mapping participates. Empty (and so a no-op)
         for every scalar loss.
 
+        Skipped for the training stage under
+        ``training_config.scalar_logging='essential'`` — these are the per-step
+        scalars that knob exists to drop. Validation still logs them: they are
+        per-cycle, so they cost nothing per step.
+
         Args:
             stage: ``"train"`` or ``"val"`` — the middle tag segment.
         """
@@ -662,6 +667,8 @@ class SRLightning(lightning.LightningModule):
         if not terms:
             return
         on_step = stage == "train"
+        if on_step and self.training_config.scalar_logging == "essential":
+            return
         for name, value in terms.items():
             self.log(
                 f"loss/{stage}/{name}",

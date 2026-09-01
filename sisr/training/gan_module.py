@@ -418,8 +418,12 @@ class SRGANLightning(SRLightning):
         self.untoggle_optimizer(opt_g)
 
         self.log("loss/train", g_loss, prog_bar=True, on_step=True)
-        self.log("loss/train/content", content, on_step=True)
-        self.log("loss/train/adv", adversarial, on_step=True)
+        # The decomposition, not the objective: dropped by scalar_logging='essential'.
+        # loss/train and loss/train/d stay unconditionally -- they are what the two
+        # optimisers actually step on, and a run without them has no objective trace.
+        if self.training_config.scalar_logging != "essential":
+            self.log("loss/train/content", content, on_step=True)
+            self.log("loss/train/adv", adversarial, on_step=True)
         self._log_loss_terms("train")
 
     def _time_schedulers(self) -> list[torch.optim.lr_scheduler.LRScheduler]:

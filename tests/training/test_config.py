@@ -59,6 +59,7 @@ def test_sr_training_config_field_names():
         "scale",
         "compile_backend",
         "compile_mode",
+        "scalar_logging",
     }
 
 
@@ -380,3 +381,14 @@ def test_training_config_rejects_a_non_integer_scale_with_an_actionable_message(
     for bad in ("4", 4.0, True, [4]):
         with pytest.raises(ValueError, match="scale"):
             SRTrainingConfig(scale=bad)
+
+
+def test_scalar_logging_defaults_to_all_and_rejects_anything_else():
+    """The knob is opt-in: an existing config must behave exactly as before, and a
+    typo must not silently produce a run with a different evidence set."""
+    from sisr.training.config import SRTrainingConfig
+
+    assert SRTrainingConfig().scalar_logging == "all"
+    assert SRTrainingConfig(scalar_logging="essential").scalar_logging == "essential"
+    with pytest.raises(ValueError, match="scalar_logging must be 'all' or 'essential'"):
+        SRTrainingConfig(scalar_logging="minimal")

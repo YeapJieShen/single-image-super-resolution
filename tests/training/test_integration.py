@@ -30,6 +30,7 @@ from sisr.training import (
     SREvalConfig,
     SRLightning,
     SRPredictionWriter,
+    SRTrainingConfig,
 )
 
 
@@ -321,6 +322,51 @@ def test_fast_dev_run_logs_per_term_loss_tags_for_a_composite_criterion(
 
     metrics = set(trainer.callback_metrics)
     assert {"loss/train", "loss/train/vgg22", "loss/train/tv"} <= metrics
+    assert {"loss/val", "loss/val/vgg22", "loss/val/tv"} <= metrics
+
+
+@pytest.mark.filterwarnings("ignore::lightning.pytorch.utilities.warnings.PossibleUserWarning")
+def test_scalar_logging_essential_drops_the_per_step_terms_and_keeps_validation(
+    tiny_rgb_image_dir: Path,
+):
+    """The opt-out must remove exactly the per-step decomposition and nothing else.
+
+    Ships its own mutation: `loss/train` and every validation tag are asserted
+    still present, so a change that simply stopped logging would fail here rather
+    than look like a successful opt-out.
+    """
+    with pytest.warns(UserWarning, match="randomly initialised"):
+        vgg = VGG19FeatureLoss(layer="vgg22", weights=None)
+    model = SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
+    module = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scalar_logging="essential"),
+        eval_config=SREvalConfig(crop_border=0),
+        criterion=WeightedSumLoss(
+            terms={"vgg22": vgg, "tv": TotalVariationLoss()},
+            weights={"vgg22": 1.0, "tv": 2.0e-8},
+        ),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    trainer = lightning.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    trainer.fit(module, datamodule=_make_datamodule(tiny_rgb_image_dir))
+
+    metrics = set(trainer.callback_metrics)
+    assert "loss/train" in metrics, "the objective itself must survive the opt-out"
+    assert not {"loss/train/vgg22", "loss/train/tv"} & metrics, (
+        "per-step term tags must be gone under scalar_logging='essential'"
+    )
+    # Validation is per-cycle, not per-step, so it costs nothing and is untouched.
     assert {"loss/val", "loss/val/vgg22", "loss/val/tv"} <= metrics
 
 
