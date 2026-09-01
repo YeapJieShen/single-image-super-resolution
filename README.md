@@ -314,14 +314,53 @@ picking a value and asserting it in code — that would dress a guess as a check
 
 | choice | what ships | what it rests on |
 |---|---|---|
-| SRCNN batch size | `64` | **Nothing.** Not in the paper, not on the authors' project page, re-verified twice. The authors' released Caffe solver prototxt would settle it and **has not been inspected**; a community reimplementation is not a substitute. |
-| SRCNN training budget | `max_steps: 10000000`, ≈0.8× the paper's figure | The paper gives *"the same number of backpropagations (i.e. 8×10⁸)"*. Read here as **per-sample** updates, because the mini-batch reading implies an implausible iterations-per-second rate on 2014 hardware. That is an inference. An earlier reading of ours recorded *"up to 8×10⁸"* — a ceiling rather than a target — and the two readings are **unreconciled**. |
 | SRCNN evaluation border | `crop_border: 3`, on top of the 6 px per side that `padding: valid` already trims | The paper states no test-time boundary convention. Neither value is correct or incorrect, only stated. |
 | SRResNet PReLU parameterisation | `torch.nn.PReLU()` — one shared slope | The paper specifies neither shared nor per-channel, and no official reference implementation exists to check against. |
 
 The practical consequence: a reproduction that differs from this project on any of these
 rows is not necessarily wrong, and neither is this one. Compare the rows before comparing
 the numbers.
+
+#### Two rows left this table on 2026-09-01
+
+SRCNN's **batch size** and **training budget** were listed here as resting on nothing
+checkable. They are now specified by a primary source, so they no longer belong in a list of
+choices with nothing to be faithful to.
+
+The SRCNN authors released a Caffe training package (`SRCNN_train.zip`, from the project page
+both papers link; retrieved 2026-09-01, SHA-256
+`001146419f7acfb12a3e7929c8acd5de88a08d687d6881085f81321ad6982b1a`). Its two files settle
+both rows at once:
+
+| field | authors' value | what this project now ships |
+|---|---|---|
+| `hdf5_data_param.batch_size` (train) | `128` | `batch_size: 128` (was `64`) |
+| `max_iter` | `15000000` | see below |
+| `base_lr` / `momentum` / `weight_decay` | `0.0001` / `0.9` / `0` | already matched |
+| per-layer `lr_mult` (weights) | `1`, `1`, `0.1` | already matched — `layer_lrs: [1e-4, 1e-4, 1e-5]` |
+| `weight_filler` std | `0.001` | already matched |
+
+`max_iter` settles one thing and opens another.
+
+**Settled:** the paper's *"the same number of backpropagations (i.e. 8×10⁸)"* **cannot** mean
+iterations — 8×10⁸ exceeds the authors' own cap of 1.5×10⁷ by two orders of magnitude. Per-sample
+is the only consistent reading, which this project had already inferred and no longer has to.
+
+**Open, and deliberately left open:** at batch 128 the authors' `max_iter` is
+15,000,000 × 128 = **1.92×10⁹** backpropagations, against the paper's stated **8×10⁸** — which
+would be 6,250,000 iterations. **The released code and the paper disagree, by 2.4×.**
+
+This project ships the authors' value, `max_steps: 15000000`, because that is the number a
+primary source states. Choosing 6,250,000 instead would make the paper's sentence come out exact
+at the cost of shipping a value no source states, resolved by our inference that `max_iter` is a
+ceiling rather than a target. Their `snapshot: 500` makes that inference plausible — but **which
+snapshot produced the published numbers is recorded nowhere**, so it stays an inference, and the
+honest position is to follow the file and say the two disagree.
+
+Practically this is a long run; stop at a checkpoint rather than lower the config to an
+unsourced number.
+
+No published number changes: SRCNN has no publishable row.
 
 ### What these were computed against
 
