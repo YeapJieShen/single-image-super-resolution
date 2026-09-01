@@ -82,22 +82,16 @@ def _degrade(hr_arr: np.ndarray, scale: int) -> np.ndarray:
 class TrainDataset(HRCachedTrainDataset):
     """Dataset serving deterministic LR/HR sub-image pairs, HR held in an LMDB cache.
 
-    On first instantiation with a given set of files, every HR image is
-    decoded once and stored whole (uint8, RGB) in an LMDB database — see
-    :mod:`~sisr.datasets.base`/:mod:`~sisr.datasets.hr_cache` for why. Each
-    ``__getitem__`` maps its flat index to a source image and a deterministic
-    ``(top, left)`` grid position in O(1) (via :func:`_grid_dims`), reads that
-    image's cached bytes through :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`,
-    slices out the ``subimg_size`` square HR sub-image, and degrades it to LR
-    with :func:`_degrade`. The sliding-window grid itself — which sub-images
-    exist and in what order — is derived from exactly one place
-    (:func:`_grid_dims`), so indices can never silently misalign.
+    Every HR image is decoded once into an LMDB cache (uint8 RGB, whole) — see
+    :mod:`~sisr.datasets.base` for why. Each ``__getitem__`` maps its flat index
+    to a source image and a deterministic ``(top, left)`` grid position in O(1),
+    slices the ``subimg_size`` square HR sub-image, and degrades it to LR.
+    **The grid is derived from exactly one place** (:func:`_grid_dims`), so
+    indices can never silently misalign.
 
-    A SHA-256 checksum over the file manifest (plus a format tag) is stored
-    inside the LMDB so subsequent runs over the same files skip the build
-    entirely — the checksum does not depend on
-    ``subimg_size``/``stride``/``scale``, since none of them affect the raw
-    bytes written.
+    **The checksum keys only on the file manifest** (plus a format tag), not on
+    ``subimg_size``/``stride``/``scale`` — none of those affect the bytes
+    written — so subsequent runs over the same files skip the build.
 
     Reference:
         Image Super-Resolution Using Deep Convolutional Networks
