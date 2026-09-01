@@ -1359,3 +1359,84 @@ def test_close_is_safe_before_the_environment_is_ever_opened(tmp_path: Path):
     cache.close()
     cache.close()
     assert cache._env is None
+
+
+# ---------------------------------------------------------------------------
+# A failed write_batch must not hold the write lock
+# ---------------------------------------------------------------------------
+
+
+def test_failed_write_batch_leaves_the_env_writable_while_the_exception_is_held(tmp_path):
+    """The transaction was aborted only by garbage collection, so it survived
+    exactly as long as the exception's traceback did.
+
+    The weak version of this test -- let the `except` block exit, then write --
+    PASSES today and proves nothing: refcounting has already collected the
+    transaction by then. Holding a reference is what a real caller does. Anything
+    that logs with exc_info=True, stores the exception, wraps and re-raises it,
+    or holds it while a tqdm bar and a pool of futures are still live keeps the
+    write lock held -- which is exactly the state parallel_build is in when a
+    job fails.
+
+    MapFullError mid-build is a designed-for event here: hr_cache.estimate_map_size
+    exists because of it."""
+    import lmdb
+
+    from sisr.utils.cache import LMDBCacheBuildContext
+
+    # Big enough that a small write always fits, small enough that the
+    # oversized batch below cannot: the abort has to be what frees the lock,
+    # not spare capacity.
+    env = lmdb.open(str(tmp_path / "db"), map_size=1 << 20, subdir=True)
+    try:
+        ctx = LMDBCacheBuildContext(env)
+        ctx.write_batch([("small", b"x")])  # a normal write first
+
+        held = None
+        try:
+            ctx.write_batch([(f"big{i}", b"y" * 4096) for i in range(1024)])
+        except lmdb.MapFullError as exc:
+            held = exc  # the traceback -- and the failed txn -- stay alive
+
+        assert held is not None, "the oversized batch was expected to exhaust the map"
+        # With `held` still referenced, the aborted-by-GC path cannot have run.
+        ctx.write_batch([("after", b"z")])
+        with env.begin() as txn:
+            assert txn.get(b"after") == b"z"
+    finally:
+        env.close()
+
+
+def test_parallel_build_closes_the_progress_bar_on_the_failure_path(tmp_path, monkeypatch):
+    """pbar.close() was called only on the success path, in both branches. An
+    exception left the bar open, which corrupts subsequent terminal output."""
+    import lmdb
+
+    from sisr.utils import cache as cache_mod
+    from sisr.utils.cache import LMDBCacheBuildContext
+
+    closed: list[bool] = []
+
+    class _Bar:
+        def __init__(self, *a, **k):
+            pass
+
+        def update(self, _n):
+            pass
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cache_mod, "tqdm", _Bar)
+
+    def _boom(_item):
+        raise RuntimeError("job failed")
+
+    env = lmdb.open(str(tmp_path / "db2"), map_size=1 << 20, subdir=True)
+    try:
+        ctx = LMDBCacheBuildContext(env, use_tqdm=True)
+        with pytest.raises(RuntimeError, match="job failed"):
+            ctx.parallel_build(items=[1], process_fn=_boom, num_workers=1)
+        assert closed, "the progress bar was left open on the exception path"
+    finally:
+        env.close()
