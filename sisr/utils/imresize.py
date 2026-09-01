@@ -1,39 +1,31 @@
 """MATLAB-compatible bicubic image resizing.
 
-Vendored -- not a dependency -- from ``fatheral/matlab_imresize``
-(https://github.com/fatheral/matlab_imresize/blob/master/imresize.py), MIT
-License, Copyright (c) 2020 Alex; full license text below. That file is
-itself a line-for-line Python port of MATLAB's own
-``toolbox/images/images/imresize.m``. The BasicSR / SwinIR / Real-ESRGAN
-lineage carries the same algorithm (Apache-2.0 / BSD-3-Clause respectively,
-and in BasicSR's case a ``torch.FloatTensor`` i.e. float32 port that rounds
-only once at the very end); this module follows the original MIT source
-instead, since it already computes in double and rounds every pass -- see
-below for why both of those turned out load-bearing, not incidental.
+Vendored -- not a dependency -- from ``fatheral/matlab_imresize`` (MIT, (c) 2020
+Alex; licence verbatim below), itself a line-for-line port of MATLAB's
+``toolbox/images/images/imresize.m``. The BasicSR / SwinIR / Real-ESRGAN lineage
+carries the same algorithm, but BasicSR's float32 port rounds only once at the
+end; this follows the MIT original, which computes in double and rounds every
+pass -- both of which are load-bearing, not incidental.
 
-Two corrections were needed on top of a literal port, both because the
-upstream file does not itself achieve MATLAB parity here:
+**Three details are load-bearing for byte-equality and must not be
+"simplified".** Each was confirmed by building the broken variant:
 
-* **Round half away from zero** on every uint8 cast. MATLAB's ``round``
-  ties away from zero; NumPy's ``np.round``/``np.around`` ties to even
-  (banker's rounding) -- the upstream file uses ``np.around`` and inherits
-  this off-by-one, the classic reason a "faithful" port fails byte-equality.
-* **Re-quantize to uint8 after *each* 1-D pass, not only at the end.**
-  MATLAB's ``imresizemex`` re-quantizes to the image's class between the
-  row-pass and the column-pass. Skipping that (as e.g. BasicSR's float32
-  port does, rounding only once at the very end) is a second, independent
-  source of drift from real MATLAB -- confirmed against the unmodified
-  upstream file, which does the same double-rounding (see
-  ``tests/utils/test_imresize.py``).
+* **float64 throughout.** MATLAB computes in double; a float32 port drifts by
+  fractions of a level, invisible until a uint8 cast scatters it into +/-1
+  errors.
+* **Round half away from zero on every uint8 cast.** MATLAB's ``round`` ties
+  away from zero, ``np.round`` ties to even. The upstream file uses
+  ``np.around`` and inherits the off-by-one -- the classic reason a "faithful"
+  port fails byte-equality. Banker's rounding scores 19/57.
+* **Re-quantize to uint8 after *each* 1-D pass, not only at the end.** MATLAB's
+  ``imresizemex`` re-quantizes between the row and column passes. It looks
+  redundant; skipping it is an independent source of drift. Rounding once at the
+  end scores 0/57.
 
-All arithmetic runs in float64 throughout (MATLAB computes ``imresize`` in
-double; a float32 port drifts by fractions of a level -- invisible until a
-uint8 cast turns it into scattered +/-1 errors).
-
-The two real deltas this closes vs. a naive OpenCV-style bicubic resize:
-MATLAB widens the kernel by ``1/scale`` when downscaling (antialiasing --
-OpenCV does not antialias at all, the dominant term) and the bicubic
-coefficient differs (MATLAB a=-0.5, OpenCV a=-0.75).
+Two real deltas this closes against a naive OpenCV-style bicubic: MATLAB widens
+the kernel by ``1/scale`` when downscaling (antialiasing, which OpenCV does not
+do at all -- the dominant term), and the bicubic coefficient differs
+(MATLAB a=-0.5, OpenCV a=-0.75).
 
 ------------------------------------------------------------------------------
 MIT License

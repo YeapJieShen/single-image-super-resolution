@@ -63,19 +63,11 @@ _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if sys.platform == "w
 def _pid_alive_windows(pid: int) -> bool:
     """Windows liveness check for :func:`_pid_alive`, split out for testing.
 
-    ``OpenProcess`` failing does not always mean "no such process": a
-    builder running under another user account or session is a real,
-    live process this one simply lacks permission to query
-    (``ERROR_ACCESS_DENIED``) and must not be treated as dead. Only an
-    actually-missing pid reports something else (``ERROR_INVALID_PARAMETER``
-    in practice).
-
-    Args:
-        pid: Process id to check.
-
-    Returns:
-        ``True`` if *pid* is a running process, or one this process is
-        merely not permitted to query.
+    **``OpenProcess`` failing does not always mean "no such process".** A
+    builder under another user or session is live but unqueryable
+    (``ERROR_ACCESS_DENIED``) and must not be read as dead; an
+    actually-missing pid reports ``ERROR_INVALID_PARAMETER``. So ``True`` here
+    means "running, or merely not permitted to query".
     """
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
@@ -155,12 +147,9 @@ class LMDBCacheBuildContext:
     ) -> None:
         """Processes *items* and writes the results to LMDB.
 
-        *process_fn* must be a top-level (picklable) callable returning a
-        list of ``(key, value_bytes)`` tuples. With more than one effective
-        worker a ``ProcessPoolExecutor`` runs a sliding window of
-        *num_workers* in-flight jobs while the main process writes completed
-        results; with ``<= 1`` effective worker the jobs run inline (no
-        subprocess).
+        With more than one effective worker a ``ProcessPoolExecutor`` runs a
+        sliding window of in-flight jobs while the main process writes results;
+        at ``<= 1`` the jobs run inline with no subprocess.
 
         Args:
             items: One item per job (e.g. a list of image paths).
@@ -234,26 +223,21 @@ class LMDBCache:
     After construction the cache is read-only. Call :meth:`get` to
     retrieve individual entries, or :meth:`get_env` for direct LMDB access.
 
-    Two independent processes building the same cache (same *cache_dir*,
-    *name*, *checksum*) race by design — LMDB itself already serialises
-    writers and ``__checksum__`` is written last, so a half-built cache is
-    never mistaken for a complete one. An advisory file lock (see
-    :meth:`_acquire_lock`) exists only to *avoid duplicate work*, not to
-    provide correctness: a losing process polls for the winner's result and
-    joins it. The lock's holder is never preempted while it is provably
-    alive (its pid running — and not merely this waiting process's own pid,
-    which a crashed holder's can be recycled to — corroborated by a
-    heartbeat that refreshes the sentinel's mtime during the build) — a
-    losing process instead keeps waiting past *lock_timeout*, re-logging
-    periodically, rather than racing a slow but healthy build. Only a
-    holder whose pid has died (or is our own) *and* whose sentinel has gone
-    stale for longer than *lock_timeout* is treated as abandoned and taken
-    over. Waiting on a *live* holder is itself capped: past
-    ``3 * lock_timeout`` this raises ``TimeoutError`` naming the sentinel
-    and the manual remedy, rather than blocking forever with no way for an
-    operator to notice. Waiting forever on a genuinely stale lock is the
-    other failure mode this must never have; rebuilding a cache that
-    already exists is merely wasted time.
+    **Two processes building the same cache race by design.** LMDB serialises
+    writers and ``__checksum__`` is written last, so a half-built cache is never
+    mistaken for a complete one. The advisory lock (:meth:`_acquire_lock`) exists
+    only to avoid duplicate work, never for correctness: a loser polls for the
+    winner's result and joins it. Three rules govern it:
+
+    * **A provably live holder is never preempted** — pid running, *and* not this
+      process's own pid (a crashed holder's can be recycled to us), corroborated
+      by a heartbeat refreshing the sentinel's mtime.
+    * **Takeover needs both** a dead (or our own) pid *and* a sentinel stale past
+      *lock_timeout*.
+    * **Waiting on a live holder is itself capped** at ``3 * lock_timeout``, then
+      raises ``TimeoutError`` naming the sentinel and the remedy — blocking
+      forever on a stale lock is the failure this must never have, while
+      rebuilding an existing cache is merely wasted time.
 
     Args:
         cache_dir: Parent directory for the LMDB database.
@@ -382,15 +366,12 @@ class LMDBCache:
     def get_buffer(self, key: str) -> Iterator[memoryview | None]:
         """Yields a zero-copy view onto the raw value stored at *key*.
 
-        The read transaction is opened on entry and committed on exit, so the
-        yielded ``memoryview`` aliases memory that is **only valid inside this
-        ``with`` block** — LMDB is free to reclaim it the moment the
-        transaction closes. Do all interpretation (``np.frombuffer``, slicing)
-        and copying (``.copy()``, ``torch.from_numpy(...).clone()``) *before*
-        the block exits. This is a context manager rather than a plain return
-        specifically so a caller cannot accidentally retain the view past its
-        transaction — there is no variable holding the buffer until you
-        actually enter the ``with``.
+        The read transaction opens on entry and commits on exit, so the
+        ``memoryview`` aliases memory that is **only valid inside the ``with``
+        block** — LMDB may reclaim it the moment the transaction closes. Do all
+        interpretation and copying before the block exits. It is a context
+        manager rather than a plain return precisely so a caller cannot retain
+        the view past its transaction.
 
         Args:
             key: The string key to look up.
@@ -435,15 +416,12 @@ class LMDBCache:
 
         Args:
             checksum: Hex digest the stored ``__checksum__`` must match.
-            strict: When ``True``, an environmental open failure raises
-                instead of returning ``False``. Used at the two call sites
-                where this process is about to become the builder: silently
-                treating "another handle is already open" as "rebuild me"
-                previously caused a full, destructive rebuild of a perfectly
-                valid cache. Left ``False`` (the default) while merely
-                polling on someone else's lock, where the identical failure
-                is often a transient, self-resolving artifact of a
-                concurrent writer in another process.
+            strict: Raise on an environmental open failure instead of
+                returning ``False``. Set at the two sites where this process is
+                about to become the builder, because treating "another handle is
+                already open" as "rebuild me" once destroyed a perfectly valid
+                cache. Left ``False`` while polling someone else's lock, where
+                the same failure is usually transient.
 
         Returns:
             ``True`` if the cache is present, checksum-matched, and ready.
@@ -541,30 +519,17 @@ class LMDBCache:
     def _acquire_lock(self, checksum: str, poll_interval: float, timeout: float) -> bool:
         """Becomes the sole builder for *checksum*, or waits on whoever already is.
 
-        A live holder — its pid still running, and *not this process's own
-        pid* (a crashed builder's pid can be recycled to this very process;
-        Windows in particular reuses pids in small multiples, making
-        crash-then-restart-with-the-same-pid a real scenario, not a
-        theoretical one) — is never preempted: this waits past *timeout*,
-        re-logging periodically so a long wait stays diagnosable, rather
-        than racing a slow but healthy build. Takeover only happens once the
-        holder's pid is confirmed dead (or is our own) *and* its sentinel's
-        mtime (refreshed by the holder's heartbeat while it builds, see
-        :meth:`_start_heartbeat`) has gone stale for longer than *timeout*
-        — i.e. it crashed without releasing the lock. Waiting on a
-        confirmed-*live* holder is itself capped at
-        ``_LOCK_WAIT_MULTIPLE * timeout``: past that this raises
-        rather than blocking forever, so a genuinely stuck wait surfaces
-        instead of hanging silently.
+        The three rules are in the class docstring. The one worth repeating at
+        the implementation: **"live" excludes this process's own pid**, because a
+        crashed builder's pid can be recycled to us -- Windows reuses pids in
+        small multiples, so crash-then-restart-with-the-same-pid is real, not
+        theoretical.
 
-        Note on filesystem assumptions: staleness is judged by the
-        sentinel's mtime against wall-clock ``time.time()``, so it assumes
-        all racing processes share a consistent clock and a filesystem with
-        working mtimes (true for a local disk; a clock-skewed network
-        filesystem, or an NTP step during the wait, could misjudge
-        staleness in either direction). This lock is advisory and best-effort
-        by design (see the class docstring) — that assumption is accepted,
-        not solved, here.
+        **Filesystem assumption, accepted rather than solved:** staleness is the
+        sentinel's mtime against wall-clock ``time.time()``, so it assumes racing
+        processes share a clock and the filesystem has working mtimes. True on a
+        local disk; a clock-skewed network filesystem or an NTP step mid-wait
+        could misjudge in either direction. The lock is advisory by design.
 
         Returns:
             ``True`` if the caller should proceed to build — either it won
@@ -662,15 +627,13 @@ class LMDBCache:
         check's own false negatives (e.g. a pid query blocked or denied for
         a transient reason) with an independent liveness signal.
 
-        The interval is a quarter of *timeout*, but clamped, and the clamp is
-        what a test has to watch. Below a ``lock_timeout`` of
-        ``4 * _HEARTBEAT_MIN_INTERVAL`` the floor wins and the interval stops
-        shrinking with the timeout; at or under ``_HEARTBEAT_MIN_INTERVAL``
-        the heartbeat can no longer refresh faster than the sentinel goes
-        stale. A test that pairs one process's long ``lock_timeout`` against
-        another's very short one is then asserting nothing -- the lock reads
-        as stale on the first check regardless of whether the heartbeat works
-        -- so keep the short side comfortably above that floor.
+        The interval is a quarter of *timeout*, **clamped, and the clamp is
+        what a test has to watch**: below ``4 * _HEARTBEAT_MIN_INTERVAL`` the
+        floor wins and the interval stops shrinking; at or under
+        ``_HEARTBEAT_MIN_INTERVAL`` the heartbeat can no longer outrun
+        staleness. A test pairing a long ``lock_timeout`` against a very short
+        one then asserts nothing — the lock reads stale on the first check
+        either way — so keep the short side above that floor.
 
         Args:
             timeout: The caller's ``lock_timeout``; the refresh interval is
@@ -812,14 +775,12 @@ class LMDBCache:
     def _sibling_tmp_path(self, kind: str) -> Path:
         """Builds a unique ``<name>.<kind>.<seq>.<pid>.tmp`` sibling path.
 
-        The pid stays last so :meth:`_pid_from_sibling_name` can still read it
-        and :meth:`_sweep_stale_siblings` can still tell a dead owner's leftover
-        from a live one's. The sequence number in front of it is what makes the
-        name unique *within* this process: a trash sibling whose cleanup lost
-        the race against a lingering reader is still on disk when the next
-        publish runs, and reusing the name would make ``os.replace`` fail onto
-        the non-empty leftover -- reporting a stale-cache error for what is
-        only a naming collision.
+        **The pid stays last** so :meth:`_pid_from_sibling_name` can read it and
+        :meth:`_sweep_stale_siblings` can tell a dead owner's leftover from a
+        live one's. **The sequence number makes the name unique within this
+        process**: a trash sibling whose cleanup lost the race is still on disk
+        at the next publish, and reusing the name would make ``os.replace`` fail
+        onto it -- reporting a stale-cache error for a naming collision.
 
         Args:
             kind: ``'build'`` or ``'trash'``.
@@ -837,26 +798,21 @@ class LMDBCache:
     def _publish(self, tmp_path: Path) -> None:
         """Atomically moves a finished build from *tmp_path* into :attr:`_lmdb_path`.
 
-        Never ``rmtree``s :attr:`_lmdb_path` in place: a pre-existing
-        directory there is moved *aside* to a pid-suffixed trash sibling via
-        ``os.replace`` (a rename, not a delete -- safe even against a
-        reader/mapper still holding files inside it open, unlike unlinking
-        them directly), the finished build is renamed into the now-vacant
-        real path, and only then is the trash sibling opportunistically
-        removed. This leaves no window where anything is unlinked out from
-        under an open handle, at the cost of transiently roughly doubling
-        peak disk usage (old + new both present) until that last cleanup
-        runs -- or indefinitely, if it can never win the race against a
-        lingering reader; see :meth:`_sweep_stale_siblings` for the backstop.
+        **Never ``rmtree``s :attr:`_lmdb_path` in place.** A pre-existing
+        directory is moved *aside* to a pid-suffixed trash sibling via
+        ``os.replace`` -- a rename, safe against a reader still holding files
+        inside it open, unlike unlinking them -- then the finished build is
+        renamed in, then the sibling is opportunistically removed. No window
+        exists where anything is unlinked under an open handle. The cost is
+        transiently doubled peak disk usage, or indefinitely so if that cleanup
+        never wins against a lingering reader; :meth:`_sweep_stale_siblings` is
+        the backstop.
 
-        Reaching here means :meth:`_acquire_lock` gave this process the
-        exclusive, live-verified build lock, so any pre-existing directory
-        at :attr:`_lmdb_path` is provably not another process's in-progress
-        build — only a genuinely stale (failed-checksum or corrupt)
-        leftover can land here. If moving it aside or moving the new build
-        into place fails anyway (e.g. a lingering open handle on Windows),
-        that is raised as a clear error instead of silently discarding the
-        build just finished.
+        Reaching here means the exclusive, live-verified lock is held, so a
+        pre-existing directory is provably not another process's in-progress
+        build -- only a stale or corrupt leftover. If a move fails anyway (a
+        lingering Windows handle), that raises rather than silently discarding
+        the build just finished.
 
         Args:
             tmp_path: The completed build's temporary directory.
