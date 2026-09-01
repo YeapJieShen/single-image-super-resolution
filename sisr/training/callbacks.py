@@ -26,6 +26,7 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from .. import artifacts
 from ..metrics.perceptual import PERCEPTUAL_METRICS
+from ..metrics.scoring import Scores, expected_tags, perceptual_tag
 from .metadata import build_component_metadata, build_metadata
 
 if TYPE_CHECKING:  # `SRLightning` is referenced in annotations only, and a
@@ -386,9 +387,12 @@ class BenchmarkImageLogger(Callback):
             # pooling) and agreeing with validation_step only because this loop
             # slices one image at a time.
             scores = _sr(pl_module).scorer.score(sr[i : i + 1], hr_cropped[i : i + 1])
-            psnr_dict = {key: value.item() for key, value in scores.psnr.items()}
-            ssim_dict = {key: value.item() for key, value in scores.ssim.items()}
-            perceptual_dict = {name: value.item() for name, value in scores.perceptual.items()}
+            # float(), not .item(): Scores carries either tensors (this path,
+            # straight from the scorer) or plain floats (the means _flush_buffer
+            # builds). Exact for a 0-dim tensor, and total over both.
+            psnr_dict = {key: float(value) for key, value in scores.psnr.items()}
+            ssim_dict = {key: float(value) for key, value in scores.ssim.items()}
+            perceptual_dict = {name: float(value) for name, value in scores.perceptual.items()}
             self._buffer[dataset_name].append(
                 BenchmarkSample(filename, psnr_dict, ssim_dict, perceptual_dict)
             )
@@ -444,30 +448,20 @@ class BenchmarkImageLogger(Callback):
             if not samples:
                 continue
 
-            psnr_keys = samples[0].psnr.keys()
-            ssim_keys = samples[0].ssim.keys()
-
-            for key in psnr_keys:
-                mean_psnr = sum(s.psnr[key] for s in samples) / len(samples)
-                pl_module.log(
-                    f"psnr/{dataset_name}/{key}",
-                    mean_psnr,
-                    add_dataloader_idx=False,
-                    sync_dist=True,
-                )
-            for key in ssim_keys:
-                mean_ssim = sum(s.ssim[key] for s in samples) / len(samples)
-                pl_module.log(
-                    f"ssim/{dataset_name}/{key}",
-                    mean_ssim,
-                    add_dataloader_idx=False,
-                    sync_dist=True,
-                )
-            for name in samples[0].perceptual:
-                mean = sum(s.perceptual[name] for s in samples) / len(samples)
-                pl_module.log(
-                    f"{name}/{dataset_name}", mean, add_dataloader_idx=False, sync_dist=True
-                )
+            # Mean each family, then let Scores.tagged apply the grammar --
+            # the same call validation_step's own emission goes through. The
+            # perceptual family's different tag shape comes along for free,
+            # which is the part a hand-rolled f-string kept getting to own.
+            n = len(samples)
+            means = Scores(
+                psnr={k: sum(s.psnr[k] for s in samples) / n for k in samples[0].psnr},
+                ssim={k: sum(s.ssim[k] for s in samples) / n for k in samples[0].ssim},
+                perceptual={
+                    k: sum(s.perceptual[k] for s in samples) / n for k in samples[0].perceptual
+                },
+            )
+            for tag, mean in means.tagged(dataset_name).items():
+                pl_module.log(tag, mean, add_dataloader_idx=False, sync_dist=True)
 
         self._buffer.clear()
 
@@ -914,17 +908,16 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
             return
 
         eval_config = _sr(pl_module).eval_config
-        higher_better = {f"psnr/val/{key}" for key in eval_config.psnr_keys}
-        higher_better |= {f"ssim/val/{key}" for key in eval_config.ssim_keys}
-        higher_better |= {
-            f"{name}/val" for name in eval_config.perceptual_keys if not PERCEPTUAL_METRICS[name]
-        }
+        # "Which tags will this run log?" is exactly expected_tags' question, and
+        # it is the grammar's owner. Re-deriving it here is what let the emitted
+        # set and the accepted set drift apart, silently.
+        valid_metrics = set(expected_tags(eval_config, "val"))
         lower_better = {
-            f"{name}/val" for name in eval_config.perceptual_keys if PERCEPTUAL_METRICS[name]
+            perceptual_tag(name, "val")
+            for name in eval_config.perceptual_keys
+            if PERCEPTUAL_METRICS[name]
         }
-
         label = type(self).__name__
-        valid_metrics = higher_better | lower_better
         if self.monitor not in valid_metrics:
             raise MisconfigurationException(
                 f"`{label}(monitor_metric={self.monitor!r})` does not match any "
