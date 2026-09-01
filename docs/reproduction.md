@@ -113,8 +113,17 @@ both rows at once:
 | `hdf5_data_param.batch_size` (train) | `128` | `batch_size: 128` (was `64`) |
 | `max_iter` | `15000000` | see below |
 | `base_lr` / `momentum` / `weight_decay` | `0.0001` / `0.9` / `0` | already matched |
-| per-layer `lr_mult` (weights) | `1`, `1`, `0.1` | already matched — `layer_lrs: [1e-4, 1e-4, 1e-5]` |
+| per-layer `lr_mult` (weights) | `1`, `1`, `0.1` | already matched |
+| per-layer `lr_mult` (biases) | `0.1`, `0.1`, `0.1` | **now matched** — see below |
 | `weight_filler` std | `0.001` | already matched |
+
+The **bias** row was not matched, and the same file is what exposed it. Caffe applies a
+layer's two `param` blocks to its blobs in order — weights, then bias — so conv1 and conv2 pair
+`lr_mult` 1 with 0.1 and every bias trains at a tenth of `base_lr`, independently of the
+per-layer weight schedule. This project assigned one rate to a layer's weight *and* bias, so
+conv1 and conv2 biases trained at 10x the authors' rate; conv3 happened to agree, because its
+weight rate is already 1e-5. A `layer_lrs` entry may now be a `[weight_lr, bias_lr]` pair, and
+the shipped SRCNN recipe uses one per layer.
 
 `max_iter` settles one thing and opens another.
 
