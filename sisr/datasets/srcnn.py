@@ -31,6 +31,38 @@ from .base import HRCachedTrainDataset, SRDataset
 from .hr_cache import process_hr_image as _process_hr_image
 
 
+def _modcrop_extent(length: int, scale: int) -> int:
+    """Returns the largest multiple of *scale* not exceeding *length*.
+
+    The single owner of the authors' ``modcrop`` convention, in the one form
+    both callers need: :func:`_grid_dims` wants the cropped extent as a number,
+    :func:`_modcrop` wants to slice by it. Before this existed the convention
+    was spelled out at two sites and absent from a third, which is how SRCNN
+    came to be degraded one way at training time and another at evaluation.
+    """
+    return length - (length % scale)
+
+
+def _modcrop(arr: np.ndarray, scale: int) -> np.ndarray:
+    """Crops *arr* so both spatial axes are whole multiples of *scale*.
+
+    The authors' released ``demo_SR.m`` applies this to the ground truth
+    **before** the bicubic round trip::
+
+        im_gnd = modcrop(im, up_scale);
+        im_l   = imresize(im_gnd, 1/up_scale, 'bicubic');
+        im_b   = imresize(im_l,   up_scale,   'bicubic');
+
+    Without it, an image whose height is not a multiple of *scale* is
+    downsampled to ``h // scale`` rows and stretched back over ``h``, so the LR
+    sampling grid does not align with the HR one. At x3 most standard benchmark
+    images are affected -- 481x321 and 512x512 both are -- so this is the
+    common case, not the corner.
+    """
+    h, w = arr.shape[:2]
+    return arr[: _modcrop_extent(h, scale), : _modcrop_extent(w, scale)]
+
+
 def _grid_dims(
     height: int, width: int, scale: int, sub_img_size: int, stride: int
 ) -> tuple[int, int]:
@@ -39,9 +71,12 @@ def _grid_dims(
     Single source of truth for the deterministic patch grid: :func:`_iter_patch_origins`
     and :meth:`TrainDataset.__getitem__`'s O(1) index -> origin lookup both derive
     positions from this, so they can never silently disagree and misalign an index.
+
+    The extent comes from :func:`_modcrop_extent`, the same function the
+    validation loader crops by, so the two cannot drift apart again.
     """
-    h_crop = height - (height % scale)
-    w_crop = width - (width % scale)
+    h_crop = _modcrop_extent(height, scale)
+    w_crop = _modcrop_extent(width, scale)
     n_rows = len(range(0, h_crop - sub_img_size + 1, stride))
     n_cols = len(range(0, w_crop - sub_img_size + 1, stride))
     return n_rows, n_cols
@@ -209,6 +244,12 @@ class ValidationDataset(SRDataset):
     produced by bicubic-downsampling and bicubic-upsampling back to the
     original size.
 
+    **The HR image is modcropped first** (:func:`_modcrop`), matching the
+    authors' released order and what :class:`TrainDataset`'s grid already did.
+    So the HR served here is up to ``scale - 1`` pixels smaller per axis than
+    the file on disk -- that is the reference the paper's numbers are computed
+    against.
+
     Args:
         img_dir (str | Path): Directory containing the high-resolution
             images.
@@ -235,10 +276,12 @@ class ValidationDataset(SRDataset):
 
         Returns:
             A ``(lr_tensor, hr_tensor)`` tuple of ``float32`` tensors
-            with shape ``(C, H, W)`` and values in ``[0, 1]``.
+            with shape ``(C, H, W)`` and values in ``[0, 1]``. Both are
+            modcropped to a whole multiple of ``scale``, so ``H``/``W`` may be
+            up to ``scale - 1`` smaller than the source file's.
         """
         path = self.img_paths[idx]
-        arr = self._load_rgb(path)  # HWC uint8 RGB
+        arr = _modcrop(self._load_rgb(path), self.scale)  # HWC uint8 RGB
         lr_arr = _degrade(arr, self.scale)
 
         return self._to_tensor(lr_arr), self._to_tensor(arr)
