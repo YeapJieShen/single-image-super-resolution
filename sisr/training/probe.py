@@ -168,8 +168,6 @@ def _first_probe_dataset(dm: Any) -> tuple[str, Any] | None:
     test_datasets = getattr(dm, "test_datasets", None)
     if test_datasets:
         return "test_datasets", next(iter(test_datasets.values()))
-    return None  # mutated: unreachable no-op
-
     return None
 
 
