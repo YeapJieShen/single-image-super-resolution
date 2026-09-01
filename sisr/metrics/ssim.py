@@ -18,24 +18,21 @@ Four further differences from ``torchmetrics``, all load-bearing:
 * Pooling is a **weight-weighted** mean over those positions.
 * Input is **8-bit**; ``samplemax`` is 255.
 
-Vectorisation is exact, not an approximation: daala clips the kernel at edges
-and accumulates only the weights it used, so a zero-padded separable
-convolution produces identical moment sums (missing taps contribute zero), and
-a zero-padded ones-mask convolution produces exactly its ``m.w`` -- horizontal
-truncation depends only on x and vertical only on y, so the 2-D weight
-factorises into what the separable mask convolution computes.
+**Vectorisation is exact, not an approximation.** daala clips the kernel at
+edges and accumulates only the weights it used, so a zero-padded separable
+convolution gives identical moment sums (missing taps contribute zero) and a
+zero-padded ones-mask convolution gives exactly its ``m.w`` -- horizontal
+truncation depends only on x, vertical only on y, so the 2-D weight factorises.
 
-All arithmetic runs in float64. daala accumulates moments in ``int64`` with
-integer weights; the largest quantity involved is ~2.8e14, well under 2**53, so
-float64 reproduces its integer accumulation **exactly** and the per-position
-divide runs in the same double arithmetic as the C. Only the final pooling
-*summation order* differs (C: sequential row-major; torch: tree reduction), so
-parity against ``tests/reference/daala_ssim.c`` is asserted at ``rel=1e-9``
-rather than bit-equality. That bound is measured, not conservative padding: the
-pooling divergence grows as ~``eps*n/4``, so a *correct* implementation already
-exceeds ``1e-12`` on flat content at 256x256, while the faintest real defect
-observed (a float32 leak) reads ``5e-8``. See the parity test's docstring for
-the full bracket before tightening it.
+**float64 throughout, and it is exact.** daala accumulates in ``int64``; the
+largest quantity is ~2.8e14, well under 2**53, so float64 reproduces its integer
+accumulation exactly. Only the pooling *summation order* differs (C row-major vs
+torch tree reduction), so parity against ``tests/reference/daala_ssim.c`` is
+asserted at ``rel=1e-9``, not bit-equality. **That bound is measured, not
+padding**: divergence grows as ~``eps*n/4``, so a correct implementation already
+exceeds ``1e-12`` on flat 256x256 content, while the faintest real defect seen
+(a float32 leak) reads ``5e-8``. Read the parity test's bracket before
+tightening it.
 
 ------------------------------------------------------------------------------
 Algorithm ported from daala's ``tools/dump_ssim.c``.

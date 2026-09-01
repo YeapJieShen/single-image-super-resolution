@@ -31,26 +31,21 @@ from .hr_cache import process_hr_image as _process_hr_image
 class TrainDataset(HRCachedTrainDataset):
     """Random-crop HR/LR pairs for SRResNet-style training, HR held in an LMDB cache.
 
-    On first instantiation with a given set of parameters, every HR image is
-    decoded once and stored whole (uint8, RGB, with its own ``(H, W)`` header)
-    in an LMDB database — see :mod:`~sisr.datasets.base`/
-    :mod:`~sisr.datasets.hr_cache` for why. Each ``__getitem__`` then reads
-    that image's cached bytes via
-    :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`, takes a fresh
-    random ``hr_crop_size`` square crop (plain numpy slicing — crop
-    randomness must survive the cache, so only the *decode* is memoized,
-    never the crop), and bicubic-downsamples it by ``scale`` (via
-    :func:`sisr.utils.imresize.resize`) to form the LR input. Unlike
-    :class:`sisr.datasets.srcnn.TrainDataset` there is **no
-    downsample+upsample round-trip** and the LR is *not* upsampled back —
-    the model is responsible for the ×``scale`` upsampling, so the LR tensor is
-    ``hr_crop_size // scale`` on a side.
+    Every HR image is decoded once into an LMDB cache (uint8 RGB, whole, with
+    its ``(H, W)`` header) — see :mod:`~sisr.datasets.base` for why. Each
+    ``__getitem__`` reads those bytes, takes a fresh random ``hr_crop_size``
+    square crop, and bicubic-downsamples by ``scale`` for the LR input.
+    **Only the decode is memoized, never the crop** — crop randomness has to
+    survive the cache.
 
-    Because the cache holds whole decoded images rather than crops, it is independent of
-    ``hr_crop_size``/``crops_per_image``/``scale`` — the checksum keys only on
-    the file manifest, so changing the crop recipe never invalidates the
-    cache. HR is always served as RGB; Y/YCbCr selection happens downstream in
-    :class:`SRLightning`.
+    Unlike :class:`sisr.datasets.srcnn.TrainDataset` there is **no
+    downsample+upsample round-trip**: the LR is not upsampled back, the model
+    owns the x``scale`` upsampling, and the LR tensor is
+    ``hr_crop_size // scale`` a side.
+
+    **The checksum keys only on the file manifest**, so changing
+    ``hr_crop_size``/``crops_per_image``/``scale`` never invalidates the cache.
+    HR is always RGB; Y/YCbCr selection happens downstream.
 
     Reference:
         Photo-Realistic Single Image Super-Resolution Using a Generative
