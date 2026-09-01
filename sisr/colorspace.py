@@ -1,37 +1,26 @@
 """BT.601 RGB <-> YCbCr conversion, full-range and studio-range.
 
-Two distinct ranges live here, deliberately kept apart:
+**Two ranges, never one.** Unifying them is the mistake this split guards against.
 
-* **Full-range** (:func:`rgb_to_ycbcr` / :func:`ycbcr_to_rgb`) is the
-  project's *training* chroma space — what :class:`~sisr.processors.SRProcessor`
-  subclasses (``YChannelProcessor``, ``YCbCrProcessor``) feed the model.
-  Changing these would silently renumber a trained model's inputs and
-  invalidate existing checkpoints, so they are frozen.
-* **Studio-range** (:func:`rgb_to_ycbcr_studio`) is the *metric* colorspace —
-  what MATLAB's ``rgb2ycbcr``, BasicSR's ``bgr2ycbcr(y_only=...)``, and every
-  published SR benchmark actually score against. It exists solely for
-  :class:`~sisr.training.lightning_module.SRLightning`'s PSNR/SSIM
-  computation and must never be used as a processor's colorspace.
+* **Full-range** (:func:`rgb_to_ycbcr` / :func:`ycbcr_to_rgb`) is the *training*
+  space every :class:`~sisr.processors.SRProcessor` feeds the model. Frozen:
+  changing it renumbers a trained model's inputs and invalidates checkpoints.
+* **Studio-range** (:func:`rgb_to_ycbcr_studio`) is the *metric* space MATLAB's
+  ``rgb2ycbcr``, BasicSR and every published SR benchmark score against. Scoring
+  only -- never a processor's colorspace.
 
-Do not "unify" these two — that is the one mistake this split guards against.
-These pure tensor functions live on their own so callers can convert
-colorspaces without depending on Lightning or model code.
+Pure tensor functions, so callers convert without importing Lightning or models.
 """
 
 import torch
 
-# BT.601 full-range RGB <-> YCbCr conversion (ITU-R Rec. BT.601-7).
-# Both colorspaces are normalised to [0, 1]. Cb and Cr have a +0.5 offset on
-# their stored representation so that signed chroma values in [-0.5, +0.5]
-# map onto unsigned [0, 1]. This is the *full-range* (a.k.a. "JPEG") variant
-# of BT.601 — distinct from the studio-range variant below, which scales Y to
-# [16/255, 235/255] and Cb/Cr to [16/255, 240/255].
+# BT.601-7 full-range ("JPEG") variant. Both spaces are [0, 1]; Cb/Cr carry a
+# +0.5 offset so signed chroma in [-0.5, +0.5] stores as unsigned [0, 1].
 
 _RGB_TO_Y = (0.299, 0.587, 0.114)
-# Ratios of MATLAB's published rgb2ycbcr studio-range matrix (see
-# rgb_to_ycbcr_studio below) over the chroma legal-range scale of 224 —
-# kept as literal ratios rather than pre-divided decimals so the MATLAB
-# source constants stay visible and transcription cannot silently drift.
+# MATLAB's published rgb2ycbcr matrix over the 224-level chroma range. Left as
+# literal ratios, not decimals: the source constants stay visible, so a
+# transcription slip cannot hide.
 _RGB_TO_CB = (-37.797 / 224, -74.203 / 224, 112 / 224)  # output offset +0.5
 _RGB_TO_CR = (112 / 224, -93.786 / 224, -18.214 / 224)  # output offset +0.5
 _YCBCR_TO_R = 1.402  # cr coefficient
@@ -39,14 +28,11 @@ _YCBCR_TO_G_CB = -0.344136  # cb coefficient
 _YCBCR_TO_G_CR = -0.714136  # cr coefficient
 _YCBCR_TO_B = 1.772  # cb coefficient
 
-# BT.601 studio-range ("limited"/"TV" range) rescale, applied on top of the
-# full-range YCbCr above. Luma occupies 219 of 255 levels ([16, 235]); chroma
-# occupies 224 of 255 levels ([16, 240], centered on 128) — the two scales
-# differ, so collapsing them to one constant would itself be a fidelity bug.
-# A full-range diff scales by exactly one of these two factors on conversion,
-# so PSNR computed in studio range sits a *constant*, algebraically exact
-# 20*log10(255/219) dB above full-range for Y (and 20*log10(255/224) dB for
-# Cb/Cr) — see tests/test_colorspace.py for the identity this predicts.
+# Studio ("limited"/"TV") rescale over the full-range values above. Luma spans
+# 219 of 255 levels, chroma 224 -- two different scales, so collapsing them to
+# one constant is itself a fidelity bug. The consequence: studio-range PSNR sits
+# a constant 20*log10(255/219) dB above full-range for Y, 20*log10(255/224) for
+# Cb/Cr. tests/test_colorspace.py asserts that identity.
 _STUDIO_Y_SCALE = 219 / 255
 _STUDIO_Y_OFFSET = 16 / 255
 _STUDIO_C_SCALE = 224 / 255
@@ -57,12 +43,10 @@ def rgb_to_ycbcr(img: torch.Tensor) -> torch.Tensor:
     """Convert a normalised RGB tensor to YCbCr (BT.601 full-range).
 
     Args:
-        img (torch.Tensor): RGB tensor of shape ``(B, 3, H, W)`` with
-            values in ``[0, 1]``.
+        img: RGB ``(B, 3, H, W)`` in ``[0, 1]``.
 
     Returns:
-        torch.Tensor: YCbCr tensor of shape ``(B, 3, H, W)`` in
-        ``[0, 1]`` with Cb/Cr offset by +0.5.
+        YCbCr ``(B, 3, H, W)`` in ``[0, 1]``, Cb/Cr offset by +0.5.
     """
     r, g, b = img[:, 0:1], img[:, 1:2], img[:, 2:3]
     y = _RGB_TO_Y[0] * r + _RGB_TO_Y[1] * g + _RGB_TO_Y[2] * b
@@ -75,12 +59,10 @@ def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
     """Convert a YCbCr tensor to RGB (BT.601 full-range, clamped to [0, 1]).
 
     Args:
-        img (torch.Tensor): YCbCr tensor of shape ``(B, 3, H, W)`` with
-            Cb/Cr offset by +0.5.
+        img: YCbCr ``(B, 3, H, W)``, Cb/Cr offset by +0.5.
 
     Returns:
-        torch.Tensor: RGB tensor of shape ``(B, 3, H, W)`` clamped to
-        ``[0, 1]``.
+        RGB ``(B, 3, H, W)`` clamped to ``[0, 1]``.
     """
     y, cb, cr = img[:, 0:1], img[:, 1:2] - 0.5, img[:, 2:3] - 0.5
     r = y + _YCBCR_TO_R * cr
@@ -92,20 +74,17 @@ def ycbcr_to_rgb(img: torch.Tensor) -> torch.Tensor:
 def rgb_to_ycbcr_studio(img: torch.Tensor) -> torch.Tensor:
     """Convert a normalised RGB tensor to YCbCr (BT.601 studio-range) — metric only.
 
-    Rescales :func:`rgb_to_ycbcr`'s full-range output onto the studio
-    ("limited"/"TV") range MATLAB's ``rgb2ycbcr`` and the SR literature
-    report PSNR/SSIM against. This is a one-way conversion for scoring —
-    there is no ``ycbcr_to_rgb_studio``, since nothing reconstructs an
-    image from it. Do not feed this to a model; every :class:`SRProcessor`
-    trains in full-range (see module docstring).
+    Rescales :func:`rgb_to_ycbcr`'s output onto the range MATLAB's
+    ``rgb2ycbcr`` and the SR literature report PSNR/SSIM against. One-way:
+    nothing reconstructs an image from it, so there is no studio inverse.
+    **Never feed this to a model** -- every processor trains full-range.
 
     Args:
-        img (torch.Tensor): RGB tensor of shape ``(B, 3, H, W)`` with
-            values in ``[0, 1]``.
+        img: RGB ``(B, 3, H, W)`` in ``[0, 1]``.
 
     Returns:
-        torch.Tensor: YCbCr tensor of shape ``(B, 3, H, W)``, Y in
-        ``[16/255, 235/255]``, Cb/Cr in ``[16/255, 240/255]``.
+        YCbCr ``(B, 3, H, W)``: Y in ``[16/255, 235/255]``, Cb/Cr in
+        ``[16/255, 240/255]``.
     """
     full = rgb_to_ycbcr(img)
     y, cb, cr = full[:, 0:1], full[:, 1:2], full[:, 2:3]

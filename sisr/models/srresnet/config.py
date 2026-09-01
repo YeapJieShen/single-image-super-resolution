@@ -1,9 +1,7 @@
 """SRResNet-paper-faithful training and evaluation defaults.
 
-Subclassing :class:`~sisr.training.config.SRTrainingConfig` /
-:class:`~sisr.training.config.SREvalConfig` lets the SRResNet recipe live
-alongside the model architecture, so an SRResNet experiment YAML only has
-to point at these classes via ``class_path`` to inherit defaults.
+Subclassing the base configs keeps the recipe beside the architecture, so an
+experiment YAML inherits it by naming these classes in ``class_path``.
 
 Reference: Photo-Realistic Single Image Super-Resolution Using a
 Generative Adversarial Network (https://arxiv.org/pdf/1609.04802),
@@ -22,28 +20,20 @@ from sisr.training.config import SREvalConfig, SRTrainingConfig
 class SRResNetTrainingConfig(SRTrainingConfig):
     """SRResNet-paper-faithful training defaults.
 
-    The paper trains on full RGB using Adam (lr 1e-4) and no per-layer LRs.
-    Colorspace *and* intensity range are both selected at the YAML layer by
-    the processor: :class:`~sisr.processors.RGBSignedOutputProcessor` for
-    the paper's LR ``[0, 1]`` / HR ``[-1, 1]`` asymmetry,
-    :class:`~sisr.processors.RGBProcessor` for plain ``[0, 1]`` throughout.
+    Full RGB, Adam at lr 1e-4, no per-layer LRs. Colorspace *and* intensity
+    range are chosen by the processor in YAML:
+    :class:`~sisr.processors.RGBSignedOutputProcessor` for the paper's LR
+    ``[0, 1]`` / HR ``[-1, 1]`` asymmetry, :class:`~sisr.processors.RGBProcessor`
+    for plain ``[0, 1]``.
 
-    The paper does not specify a weight-initialization scheme.
-    ``init_strategy='paper'`` is reserved for a future PR that wires up a
-    project-chosen init (e.g. Kaiming-style for the PReLU activations) via
-    :meth:`SRResNet.reset_parameters`. Today the field defaults to
-    ``'default'`` so SRResNet ships with PyTorch's built-in init; flipping
-    to ``'paper'`` is currently a no-op because
-    :meth:`SRModel.reset_parameters` (the inherited base) does nothing.
-    The field exists now so a future PR can add the implementation without
-    a YAML schema change.
+    **The paper specifies no weight init**, so ``init_strategy`` defaults to
+    ``'default'``. Setting ``'paper'`` is a no-op today: the inherited
+    :meth:`SRModel.reset_parameters` does nothing. The field exists so an
+    implementation can land without a YAML schema change.
 
-    ``scale`` defaults to ``4``: unlike SRCNN (whose paper reports multiple
-    scales and whose model carries no ``scale`` hparam at all), the SRResNet
-    baseline this project reproduces (Ledig et al. §3.2) is fixed at a single
-    4x upscaling factor, matching ``SRResNet``'s own ``scale`` hparam. The
-    default is therefore validated, not just recorded — see
-    ``SRTrainingConfig.validate_against``.
+    ``scale`` defaults to ``4`` -- the baseline reproduced here is fixed at one
+    factor, unlike SRCNN, whose model carries no ``scale`` hparam at all. It is
+    validated against the model, not merely recorded.
     """
 
     init_strategy: Literal["default", "paper"] = "default"
@@ -52,13 +42,12 @@ class SRResNetTrainingConfig(SRTrainingConfig):
     def validate_against(self, model: SRModel, processor: SRProcessor) -> None:
         """Extend the base checks with SRResNet's ``in_out_channels``/processor correlation.
 
-        Raises a readable error before the base's forward probe would
-        otherwise surface the same defect as a cryptic Conv2d shape mismatch.
+        Fires before the base's forward probe, which would surface the same
+        defect as a cryptic Conv2d shape mismatch.
 
         Args:
-            model: The constructed :class:`~sisr.models.srresnet.SRResNet` instance.
-            processor: The :class:`~sisr.processors.base.SRProcessor` paired
-                with ``model``.
+            model: The constructed ``SRResNet``.
+            processor: The processor paired with it.
 
         Raises:
             ValueError: If ``model``'s ``in_out_channels`` doesn't match
@@ -81,25 +70,21 @@ class SRResNetTrainingConfig(SRTrainingConfig):
 class SRResNetEvalConfig(SREvalConfig):
     """SRResNet-paper-faithful eval defaults.
 
-    Reports PSNR on RGB and Y — Ledig et al. quote Y-channel only (the full
-    YCbCr aggregate reads optimistically high since chroma planes are far
-    smoother than luma); excludes the outer ``scale=4`` pixels before
-    computing PSNR / SSIM, matching the standard SR-evaluation convention;
-    and computes SSIM with the daala convention Ledig et al. themselves used,
-    rather than the field-standard Wang SSIM most SR papers report.
+    PSNR on RGB and Y (Ledig et al. quote Y only; the YCbCr aggregate reads
+    optimistically high, chroma being far smoother than luma), the field's
+    border convention, and the daala SSIM the paper itself used.
 
     Args:
-        crop_border: Overrides the base default to ``4`` (outer pixels
-            excluded before PSNR / SSIM at the standard ``x4`` scale).
-        psnr_channels: Overrides the base default to ``['RGB', 'Y']`` —
-            ``'Y'`` is the paper's own metric; ``'RGB'`` is a supplementary
-            aggregate.
-        ssim_impl: Overrides the base default to ``'daala'`` — Ledig et al.
-            computed SSIM with the daala package, whose gaussian sigma scales
-            with image height, not with Wang's fixed 11x11. PSNR is unaffected
-            (it is implementation-invariant); SSIM under this setting is
-            comparable to the paper and **not** to the wider SR literature,
-            which reports Wang. See :mod:`sisr.metrics.ssim`.
+        crop_border: ``None`` -- derive the field convention's ``scale`` pixels
+            from the model rather than pin a constant. Resolved by
+            ``SRLightning``; for this config that is 4.
+        psnr_channels: ``['RGB', 'Y']`` -- ``'Y'`` is the paper's metric,
+            ``'RGB'`` a supplementary aggregate.
+        ssim_impl: ``'daala'``, whose gaussian sigma scales with image height
+            rather than Wang's fixed 11x11. **SSIM under this setting is
+            comparable to the paper and not to the wider SR literature**, which
+            reports Wang. PSNR is unaffected, being implementation-invariant.
+            See :mod:`sisr.metrics.ssim`.
     """
 
     crop_border: int | None = None

@@ -10,24 +10,20 @@ Usage:
 The ``sisr`` console script is registered by ``pyproject.toml``; ``python -m
 sisr.cli ...`` also works.
 
-Top-level YAML keys ``optimizer:`` / ``lr_scheduler:`` are linked into
-``model.init_args.optimizer`` / ``model.init_args.lr_scheduler`` by
-``SRLightningCLI`` so :class:`~sisr.training.SRLightning` can build its
-``configure_optimizers`` from them while keeping the YAML symmetric across
-architectures.
+Top-level ``optimizer:`` / ``lr_scheduler:`` are linked into
+``model.init_args.*`` so ``SRLightning.configure_optimizers`` can build from
+them and the YAML stays symmetric across architectures.
 
-Top-level ``matmul_precision:`` (``'highest' | 'high' | 'medium'``) calls
-:func:`torch.set_float32_matmul_precision` once at startup. Set to ``'high'``
-on Ampere+ GPUs to enable TF32 matmul kernels.
+Top-level ``matmul_precision:`` calls
+:func:`torch.set_float32_matmul_precision` once at startup (``'high'`` enables
+TF32 matmul kernels on Ampere+).
 
-``sisr export`` is a thin CLI wrapper around
-:func:`sisr.export.to_onnx` — see that module for what gets exported and its
-SRCNN limitation. It requires the optional ``export`` extra
-(``pip install '.[export]'``).
+``sisr export`` wraps :func:`sisr.export.to_onnx` -- see that module for its
+SRCNN limitation. Needs the ``export`` extra.
 
-cuDNN autotuning is *not* exposed here — Lightning's own ``trainer.benchmark:``
-already assigns ``torch.backends.cudnn.benchmark``, and it coordinates with
-``trainer.deterministic``. A separate top-level key would silently bypass that.
+**cuDNN autotuning is deliberately not exposed.** ``trainer.benchmark:``
+already assigns it and coordinates with ``trainer.deterministic``; a separate
+top-level key would silently bypass that.
 """
 
 import sys
@@ -42,11 +38,9 @@ from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCL
 from .export import to_onnx
 from .training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
 
-# Checkpoints saved before SRLightning.__init__ stopped flattening self.hparams for
-# TensorBoard display (see its docstring) stored ONLY these two dataclasses' fields —
-# under '/'-joined keys, e.g. 'training_config/example_input_shape/0' — plus incidental
-# 'model/*'/'processor'/'criterion' entries that were never part of the loadable
-# contract. _reconstruct_ckpt_hparams rebuilds exactly what current SRLightning saves.
+# The only keys a checkpoint's hyper_parameters can restore. Legacy checkpoints also
+# carry 'model/*'/'processor'/'criterion', which were TensorBoard-only and never part
+# of the loadable contract.
 _CKPT_HPARAM_KEYS = ("training_config", "eval_config")
 
 # jsonargparse's own crash (see SRLightningCLI.parse_arguments) when a whole-dict
@@ -57,17 +51,13 @@ _JSONARGPARSE_INIT_ARGS_CRASH = "'dict' object has no attribute 'init_args'"
 def _reconstruct_ckpt_hparams(hparams: dict[str, Any], sep: str = "/") -> dict[str, Any]:
     """Rebuild a checkpoint's training_config/eval_config overrides for ``--ckpt_path``.
 
-    Tolerates both the current nested ``hyper_parameters`` format (each key already
-    a plain dict, e.g. ``{"training_config": {...}}``) and the legacy '/'-flattened
-    one older checkpoints carry (e.g. ``training_config/example_input_shape/0``).
-    ``LightningCLI._parse_ckpt_path`` re-parses ``hyper_parameters`` verbatim as CLI
-    options (``model.<key>``); a literal ``/`` in a key isn't a valid option-name
-    character, so every legacy checkpoint failed to reload via ``--ckpt_path``
-    (``fit`` resume, ``validate``, ``test``, ``export``) with a jsonargparse
-    ``SystemExit``. Non-config entries (``model/*``, ``processor``, ``criterion``,
-    ``_instantiator``) are dropped — they were TensorBoard-only in old checkpoints,
-    and the ``--config`` file required alongside ``--ckpt_path`` already supplies
-    those classes.
+    Accepts both the current nested format and the legacy ``'/'``-flattened one
+    (``training_config/example_input_shape/0``). ``LightningCLI._parse_ckpt_path``
+    re-parses ``hyper_parameters`` verbatim as ``model.<key>`` CLI options, and
+    ``/`` is not a valid option-name character -- so every legacy checkpoint died
+    with a jsonargparse ``SystemExit`` on any ``--ckpt_path`` subcommand.
+    Non-config entries are dropped; the ``--config`` required alongside
+    ``--ckpt_path`` already supplies those classes.
 
     Args:
         hparams: The checkpoint's raw ``hyper_parameters`` dict, in either format.
@@ -142,23 +132,15 @@ class SRLightningCLI(LightningCLI):
     With ``auto_configure_optimizers=False``, LightningCLI does *not* inject
     a default ``configure_optimizers`` into the model.  Instead we explicitly
     add the top-level args via ``add_optimizer_args(link_to=...)`` so they
-    populate ``model.init_args.optimizer`` / ``model.init_args.lr_scheduler``
-    as ``OptimizerCallable`` / ``LRSchedulerCallable``.  ``SRLightning``'s
-    own ``configure_optimizers`` then constructs the optimizer (uniform or
-    per-Conv2d ``param_groups`` depending on ``training_config.layer_lrs``).
+    populate ``model.init_args.optimizer`` / ``.lr_scheduler``, which
+    ``SRLightning.configure_optimizers`` then builds from. Also exposes
+    top-level ``matmul_precision``, which ``Trainer`` has no equivalent for.
 
-    Also exposes a top-level ``matmul_precision`` YAML key that calls
-    :func:`torch.set_float32_matmul_precision` in
-    :meth:`before_instantiate_classes`. ``Trainer`` has no equivalent, unlike
-    cuDNN autotuning which ``trainer.benchmark:`` already covers.
-
-    Defaults ``trainer_class`` to :class:`_ExportTrainer`: :meth:`subcommands`
-    unconditionally registers ``export``, and ``LightningCLI`` resolves every
-    subcommand's parser via ``getattr(trainer_class, subcommand)`` regardless
-    of which subcommand is actually invoked — so any caller constructing this
-    class needs a ``trainer_class`` that has an ``export`` method, not just
-    ``main()``. Callers may still override it explicitly (e.g. a project-specific
-    ``Trainer`` subclass), as long as it also provides ``export``.
+    **``trainer_class`` must have an ``export`` method.** :meth:`subcommands`
+    registers ``export`` unconditionally and ``LightningCLI`` resolves *every*
+    subcommand's parser at construction, whichever one is invoked. Hence the
+    :class:`_ExportTrainer` default; override it with anything that also
+    provides ``export``.
     """
 
     def __init__(
@@ -175,45 +157,32 @@ class SRLightningCLI(LightningCLI):
                 f"an `export` method with the same signature."
             )
         # Must precede super().__init__(), which builds every subcommand's parser.
-        # jsonargparse treats a pure dataclass as a *closed* type by default (its
-        # `is_pure_dataclass` selector), so a dotted override such as
-        # --model.init_args.eval_config.crop_border=0 arrives as a NestedArg and
-        # rebuilds the whole field from the bare annotation, discarding the
-        # architecture's subclass and every subclass-only default with it. Naming
-        # the two base classes re-enables subclasses for all their descendants;
-        # disabling the selector by name instead would change parsing for every
-        # dataclass-typed field in Lightning and jsonargparse too.
+        # jsonargparse treats a pure dataclass as a *closed* type, so a dotted
+        # override like --model.init_args.eval_config.crop_border=0 rebuilds the
+        # field from the bare annotation and discards the architecture's subclass
+        # with every subclass-only default. Naming the two bases re-enables
+        # subclasses for all descendants; disabling the selector instead would
+        # change parsing for every dataclass field in Lightning too.
         set_parsing_settings(subclasses_enabled=[SREvalConfig, SRTrainingConfig])
-        # mypy cannot rule out a positional *args long enough to reach the parent's own
-        # trainer_class parameter. No caller does that -- every one of ours passes model
-        # and datamodule classes by keyword -- and narrowing *args to forbid it would mean
-        # restating LightningCLI's whole signature here.
+        # mypy cannot rule out an *args long enough to reach the parent's own
+        # trainer_class. No caller does that, and forbidding it would mean restating
+        # LightningCLI's whole signature here.
         super().__init__(*args, trainer_class=trainer_class, **kwargs)  # type: ignore[misc]
 
     def parse_arguments(self, parser: LightningArgumentParser, args: ArgsType) -> None:
         """Parse CLI arguments, turning a known jsonargparse crash into an actionable error.
 
-        A whole-dict/JSON CLI override of a ``data.*_dataset`` field (e.g.
-        ``--data.train_dataset='{...}'`` or
-        ``--data.train_dataset.init_args='{...}'``) only crashes when it
-        collides with an *existing* ``class_path``/``init_args`` value for
-        that field — typically one set by ``--config`` (both shipped
-        templates set ``train_dataset``/``val_dataset``/``test_datasets``,
-        so overriding those this way always collides). jsonargparse's merge
-        logic then reaches for ``prev_val.init_args`` assuming ``prev_val``
-        is a ``Namespace``, but every ``data.*_dataset`` field on
-        :class:`~sisr.training.SRDataModule` is typed ``dict[str, Any]``
-        (not the real dataset class, so datasets can be instantiated lazily —
-        see that module's docstring), so ``prev_val`` is a plain ``dict`` and
-        the attribute access raises. When there is no prior value (e.g.
-        ``predict_dataset``, which neither template sets — the documented
-        ``sisr predict`` workflow overrides it this exact way), the same
-        whole-dict override parses fine.
+        A whole-dict override of a ``data.*_dataset`` field crashes **only**
+        when it collides with an existing ``class_path``/``init_args`` value,
+        which ``--config`` always supplies for ``train``/``val``/``test``.
+        jsonargparse's merge then reads ``prev_val.init_args`` assuming a
+        ``Namespace``, but those fields are typed ``dict[str, Any]`` (so
+        datasets stay lazily instantiable), and the attribute access raises.
+        With no prior value it parses fine -- which is exactly the documented
+        ``sisr predict`` workflow overriding ``predict_dataset``.
 
-        A prior version of this guard pre-scanned the raw CLI tokens and
-        rejected *any* whole-dict override of these fields, which broke that
-        working ``predict_dataset`` case. Catching the actual jsonargparse
-        failure here instead only intercepts the forms that really crash.
+        **Catch the failure, do not pre-scan.** An earlier guard rejected every
+        whole-dict override of these fields and broke that working case.
 
         Args:
             parser: The top-level parser (unchanged, passed through).
@@ -240,11 +209,10 @@ class SRLightningCLI(LightningCLI):
     def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
         """Wire top-level ``optimizer:`` / ``lr_scheduler:`` / ``matmul_precision:`` keys.
 
-        Subclass mode (``subclass_mode_model=True``) means the module's init args
-        live under ``model.init_args.<arg>``, which is what these links must
-        target. Subclass mode exists so a YAML can name its Lightning module by
-        ``class_path`` — without it ``model_class`` is fixed and no config can
-        select :class:`~sisr.training.SRGANLightning`.
+        Subclass mode puts init args under ``model.init_args.<arg>``, which is
+        what these links target. It exists so a YAML can name its Lightning
+        module by ``class_path``; without it ``model_class`` is fixed and no
+        config could select ``SRGANLightning``.
         """
         parser.add_optimizer_args(link_to="model.init_args.optimizer")
         parser.add_lr_scheduler_args(link_to="model.init_args.lr_scheduler")
@@ -270,43 +238,30 @@ class SRLightningCLI(LightningCLI):
     def _parse_ckpt_path(self) -> None:
         """Reload ``--ckpt_path`` hyperparameters via ``_reconstruct_ckpt_hparams`` first.
 
-        Duplicates ``LightningCLI._parse_ckpt_path`` (``lightning/pytorch/cli.py``)
-        with two substitutions. First, the raw ``hyper_parameters`` dict is rebuilt
-        through :func:`_reconstruct_ckpt_hparams` before being handed to
-        ``parse_object``, so both the current nested format and checkpoints saved
-        before that fix (which reload with a jsonargparse ``SystemExit`` otherwise —
-        see that function's docstring) work through every subcommand that accepts
-        ``--ckpt_path`` (``fit`` resume, ``validate``, ``test``, ``export``).
+        Duplicates ``LightningCLI._parse_ckpt_path`` with two substitutions.
+        First, ``hyper_parameters`` is rebuilt through
+        :func:`_reconstruct_ckpt_hparams`, so legacy checkpoints reload rather
+        than exiting.
 
-        Second, under ``subclass_mode_model=True`` the module's fields are options
-        at ``model.init_args.<key>``, not ``model.<key>``, so the reconstructed
-        hparams are nested one level deeper — and that nested override MUST be
-        parsed through the *subcommand's own* parser/config branch
-        (``self._parser(subcommand)``, ``self.config[subcommand]``), never through
-        the top-level subcommand-dispatching one (``self.parser``, ``self.config``),
-        even though both expose the same ``model.init_args.<key>`` option path.
-        The top-level route parses without a syntax error, but per-field the
-        outcome is either a hard ``SystemExit`` (``model``, ``processor``: no
-        default, required) or a silent revert to the bare-annotation default
-        (any nested subclass field with a fallback, e.g. ``eval_config``) — see
-        below for which and why.
+        Second -- **and this is the trap** -- under ``subclass_mode_model=True``
+        the reconstructed override sits at ``model.init_args.<key>`` and MUST be
+        parsed through the *subcommand's own* parser and config branch
+        (``self._parser(subcommand)``, ``self.config[subcommand]``), never the
+        top-level ``self.parser`` / ``self.config``, though both expose the same
+        option path.
 
-        **The reason**: jsonargparse's subclass-merge
-        (``ActionTypeHint._check_type``) looks up the previous value as
-        ``cfg.get(self.dest)``, and ``self.dest`` is the bare name (``"model"``),
-        never subcommand-qualified. Through the subcommand's parser ``cfg`` is
-        already scoped, so the lookup finds the resolved value and merges onto
-        it, preserving sibling keys and subclass-only defaults. Through the
-        top-level parser ``cfg`` is unscoped, the value actually lives at
-        ``cfg["validate"]["model"]``, and the miss reads as "no previous value"
-        rather than an error — so jsonargparse rebuilds from schema defaults:
-        ``None`` for the required ``model``/``processor``, and the bare
-        annotation for any nested subclass field (``eval_config`` reverts to
-        base ``SREvalConfig``).
+        jsonargparse's subclass merge (``ActionTypeHint._check_type``) looks up
+        the previous value as ``cfg.get(self.dest)``, and ``self.dest`` is the
+        bare name, never subcommand-qualified. Scoped, the lookup hits and merges
+        onto the resolved value, keeping sibling keys and subclass-only defaults.
+        Unscoped, the value really lives at ``cfg["validate"]["model"]`` and the
+        miss reads as *no previous value* rather than an error -- so jsonargparse
+        rebuilds from schema defaults.
 
-        **So a resumed run either dies on "arguments are required" or silently
-        reverts to annotation defaults with nothing in the logs.** Re-inlining
-        this as ``self.parser`` "for simplicity" reintroduces exactly that.
+        **A resumed run then either dies on "arguments are required"
+        (``model``/``processor``, which have no default) or silently reverts a
+        nested subclass field to its bare annotation, with nothing in the logs.**
+        Re-inlining this as ``self.parser`` "for simplicity" reintroduces it.
         """
         if not self.config.get("subcommand"):
             return
@@ -331,10 +286,8 @@ class SRLightningCLI(LightningCLI):
     def subcommands() -> dict[str, set[str]]:
         """Register ``export`` alongside the stock ``fit``/``validate``/``test``/``predict``.
 
-        ``{"model", "datamodule"}`` is skipped from ``export``'s CLI-parsed
-        arguments the same way ``fit`` skips them — both are already wired
-        from the top-level ``model:`` / ``data:`` YAML keys, not re-specified
-        per-subcommand.
+        ``export`` skips ``{"model", "datamodule"}`` as ``fit`` does: both come
+        from the top-level ``model:`` / ``data:`` keys, not per-subcommand.
         """
         subcommands = LightningCLI.subcommands()
         subcommands["export"] = {"model", "datamodule"}
@@ -344,11 +297,8 @@ class SRLightningCLI(LightningCLI):
 def main() -> None:
     """Console-script entrypoint.
 
-    Invoked as ``sisr ...`` via the entry point registered in
-    ``pyproject.toml``, and also as ``python -m sisr.cli ...``.
-    ``freeze_support`` lives inside ``main`` (not the ``__main__`` block)
-    so it also runs under the console-script path, which bypasses
-    ``__main__``.
+    ``freeze_support`` sits inside ``main``, not the ``__main__`` block, so it
+    also runs under the console-script path, which bypasses ``__main__``.
     """
     if sys.platform == "win32":
         from multiprocessing import freeze_support

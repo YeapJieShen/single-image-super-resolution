@@ -1,26 +1,21 @@
 """The distributable weights artifact: one owner for writing, reading and checking it.
 
-A run produces two kinds of file. The resumable ``.ckpt`` belongs to Lightning —
-it carries optimizer moments, loop state and hyperparameters, and stays exactly
-as it is. This module owns the other one: the bare, optimizer-free weights file
-that gets handed to somebody else.
+A run produces two kinds of file. The resumable ``.ckpt`` is Lightning's, and
+stays as it is. This module owns the other: the bare, optimizer-free weights
+file handed to somebody else. Writing, reading and validation live here so the
+payload's shape has one owner rather than being re-derived per reader.
 
-**Why it exists.** The payload used to be written in one place and its shape
-re-derived by hand in three readers, one of which checked nothing at all. The
-format was `torch.save`, decided at the write site. Adding a second format meant
-editing four files, and the readers had no way to agree with each other.
+**Why safetensors.** Not because our readers are unsafe -- every ``torch.load``
+here passes ``weights_only=True`` against a pinned torch floor. The exposure is
+a *consumer* loading a published file without it, or on an older torch.
+safetensors removes that by construction rather than by mitigation, and it is
+what the surrounding ecosystem reads.
 
-**Why safetensors.** Not because our own readers were unsafe — every
-``torch.load`` here already passes ``weights_only=True`` and the torch floor is
-pinned for it. The exposure is a *consumer* loading a published file with that
-turned off, or on an older torch. safetensors removes it by construction rather
-than by mitigation, and it is what the surrounding ecosystem reads.
-
-**The header is flat.** safetensors metadata is ``str -> str``, so the nested
-provenance block is written one entry per top-level field, with non-strings
-JSON-encoded. Deliberately not a single blob: per-field survives inspection by
-anything that can open the file, which is most of the value. The ONNX sink made
-the same call for the same reason and now shares this encoder.
+**The header is flat.** safetensors metadata is ``str -> str``, so the block is
+written one entry per top-level field, non-strings JSON-encoded. Not a single
+blob, deliberately: per-field survives inspection by anything that can open the
+file, which is most of the value. The ONNX sink shares this encoder for the
+same reason.
 """
 
 from __future__ import annotations

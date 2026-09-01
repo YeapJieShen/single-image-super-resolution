@@ -7,24 +7,21 @@ class AdversarialLoss(torch.nn.Module):
     """Non-saturating GAN objective over discriminator **logits**.
 
     Deliberately **not** an :class:`~sisr.losses.base.SRLoss`: that contract is
-    ``forward(pred, target)`` in model space, and the generator's term
-    ``-log D(G(I_LR))`` has no target at all. Bending it to fit would put a
-    dummy argument in the signature the whole loss library depends on. Being a
-    separate class also makes the objective testable without a training loop
-    and swappable from YAML (LSGAN, relativistic) without touching the module.
+    ``forward(pred, target)`` and the generator term ``-log D(G(I_LR))`` has no
+    target, so fitting it would put a dummy argument in the signature the whole
+    loss library depends on. Standing apart also makes it testable without a
+    training loop and swappable from YAML (LSGAN, relativistic).
 
-    Takes logits, not probabilities — see
-    :class:`~sisr.models.srgan.SRDiscriminator`. Parameter-free, so it adds
-    nothing to any ``state_dict``.
+    Takes **logits**, not probabilities. Parameter-free, so it adds nothing to
+    any ``state_dict``.
     """
 
     def generator_loss(self, logits_fake: torch.Tensor) -> torch.Tensor:
         """Generator's adversarial term: make the discriminator call fakes real.
 
-        The **non-saturating** form (``-log D(G(x))``, i.e. BCE against a
-        *real* target) rather than ``+log(1 - D(G(x)))`` — the latter's gradient
-        vanishes exactly when the discriminator is winning, which is when the
-        generator most needs signal.
+        The **non-saturating** form (BCE against a *real* target), not
+        ``+log(1 - D(G(x)))``, whose gradient vanishes exactly when the
+        discriminator is winning and the generator most needs signal.
 
         Args:
             logits_fake: Discriminator logits for generated images, ``(B, 1)``.
