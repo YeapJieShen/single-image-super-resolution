@@ -43,3 +43,28 @@ def test_eval_config_perceptual_metrics_independent_per_instance():
     b = SRGANEvalConfig()
     a.perceptual_metrics.append("x")
     assert b.perceptual_keys == ["lpips", "dists"]
+
+
+def test_srgan_training_config_runs_its_parents_post_init():
+    """SRGANTrainingConfig.__post_init__ overrode its parent's without calling
+    super(), so the compile_mode/compile_backend guard was dead for every SRGAN
+    config -- the longest-running configuration in the project, and so the most
+    expensive place to lose a startup check. An audit found this the only
+    __post_init__ in the package that skipped its parent."""
+    with pytest.raises(ValueError, match="compile_mode"):
+        SRGANTrainingConfig(compile_mode="max-autotune", compile_backend=None)
+
+
+def test_srgan_training_config_rejects_negative_adversarial_weight():
+    """A negative weight inverts the generator's adversarial objective: it would
+    train to look MORE fake. Zero is legitimate -- it is the content-only
+    ablation the golden-mse run uses."""
+    SRGANTrainingConfig(adversarial_weight=0.0)  # valid -- must not raise
+    with pytest.raises(ValueError, match="adversarial_weight"):
+        SRGANTrainingConfig(adversarial_weight=-1e-3)
+
+
+def test_srgan_training_config_keeps_its_own_validation():
+    """super() must be added without losing what was already there."""
+    with pytest.raises(ValueError, match="d_steps_per_g_step"):
+        SRGANTrainingConfig(d_steps_per_g_step=0)

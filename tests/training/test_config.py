@@ -307,3 +307,66 @@ def test_validate_against_rejects_scale_mismatch():
     model = SRResNet(scale=4, num_residual_blocks=1)
     with pytest.raises(ValueError, match="scale"):
         cfg.validate_against(model, RGBProcessor())
+
+
+# --- Field validation: a nonsense value must not reach a published number ---
+
+
+def test_eval_config_rejects_negative_crop_border():
+    """A negative border silently scores UNCROPPED: the slice guard is `n <= 0`,
+    so -4 and 0 produce byte-identical numbers and neither errors. `None` is the
+    derive-from-scale sentinel, so -1 is exactly what someone reaches for when
+    they mean "auto" — it must not be a valid way to ask for that."""
+    SREvalConfig(crop_border=0)  # valid -- must not raise
+    SREvalConfig(crop_border=4)  # valid -- must not raise
+    SREvalConfig(crop_border=None)  # the derive-from-scale sentinel
+    with pytest.raises(ValueError, match="crop_border"):
+        SREvalConfig(crop_border=-1)
+    with pytest.raises(ValueError, match="crop_border"):
+        SREvalConfig(crop_border=-4)
+
+
+def test_training_config_rejects_non_positive_scale():
+    """`scale` is unvalidated, and for an architecture with no `scale` hparam
+    (SRCNN, deliberately) `validate_against` checks nothing either. It then
+    resolves `crop_border`, so a negative scale becomes a negative border and
+    the score is silently uncropped."""
+    SRTrainingConfig(scale=4)  # valid -- must not raise
+    SRTrainingConfig(scale=None)  # unset is legitimate
+    for bad in (-3, 0):
+        with pytest.raises(ValueError, match="scale"):
+            SRTrainingConfig(scale=bad)
+
+
+def test_training_config_rejects_non_positive_layer_lrs():
+    """Length is checked when the optimizer is built; the values never are.
+    A negative LR trains every layer in the wrong direction."""
+    SRTrainingConfig(layer_lrs=[1e-4, [1e-4, 1e-5]])  # valid -- must not raise
+    with pytest.raises(ValueError, match="layer_lrs"):
+        SRTrainingConfig(layer_lrs=[-1e-4, -1e-4, -1e-4])
+    with pytest.raises(ValueError, match="layer_lrs"):
+        SRTrainingConfig(layer_lrs=[1e-4, [1e-4, -1e-5]])
+    with pytest.raises(ValueError, match="layer_lrs"):
+        SRTrainingConfig(layer_lrs=[0.0])
+
+
+def test_training_config_rejects_non_positive_init_std():
+    """Reaches torch.nn.init.normal_ as-is. init_mean stays unconstrained."""
+    SRTrainingConfig(init_std=0.001, init_mean=-1.0)  # valid -- must not raise
+    for bad in (-0.001, 0.0):
+        with pytest.raises(ValueError, match="init_std"):
+            SRTrainingConfig(init_std=bad)
+
+
+def test_training_config_rejects_unknown_init_strategy():
+    """The dispatch is `== "paper"`, so ANY other string means "default".
+    'Paper' therefore produces a run that looks configured for the paper's
+    initialisation and is not, with nothing saying so. The Literal annotation
+    is enforced by jsonargparse at the CLI and by nothing in Python, so a
+    directly-constructed config — every test, every script — has no guard."""
+    SRTrainingConfig(init_strategy="paper")  # valid -- must not raise
+    SRTrainingConfig(init_strategy="default")  # valid -- must not raise
+    with pytest.raises(ValueError, match="init_strategy"):
+        SRTrainingConfig(init_strategy="Paper")
+    with pytest.raises(ValueError, match="init_strategy"):
+        SRTrainingConfig(init_strategy="xavier")
