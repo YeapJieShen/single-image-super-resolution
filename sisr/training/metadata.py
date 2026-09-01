@@ -143,17 +143,14 @@ def build_metadata(
     model = module.model
     processor = module.processor
 
-    scale = module.training_config.scale
-    if scale is None:
-        scale = model.hparams.get("scale")
-    if scale is None:
-        raise ValueError(
-            f"Cannot describe a {type(model).__name__} artifact without a scale: "
-            f"training_config.scale is None and the model declares no 'scale' "
-            f"hyperparameter. A reader cannot use the file without it -- for a "
-            f"pre-upsampled architecture the scale is what they must resize the input "
-            f"by before feeding it. Set training_config.scale in your config."
-        )
+    # One resolver, shared with SRLightning's own crop-border derivation. A
+    # second copy here is what let artifact provenance record a str while the
+    # evaluation border recorded an int, from one config.
+    scale = module.resolved_scale(
+        f"Cannot describe a {type(model).__name__} artifact without a scale. A reader "
+        f"cannot use the file without it -- for a pre-upsampled architecture the scale "
+        f"is what they must resize the input by before feeding it"
+    )
 
     meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value, batch_step)
     meta["model"] = {
