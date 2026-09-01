@@ -32,10 +32,13 @@ docs/superpowers/
 *.log
 
 # ---------------------------------------------------------------------------
-# Stock GitHub Python template, trimmed 2026-09-01. Removed: Django, Flask,
-# Scrapy, Celery, SageMath, Abstra, Cursor, PyInstaller, PyBuilder, Sphinx,
-# mkdocs, Spyder, Rope, IPython, Cython, Pyre, pytype, PEP 582, and the
-# pipenv/poetry/pdm/uv lockfile commentary -- none of which this project uses.
+# Modified from the stock GitHub Python template:
+#   https://github.com/github/gitignore/blob/main/Python.gitignore
+#
+# Trimmed 2026-09-01. Removed: Django, Flask, Scrapy, Celery, SageMath, Abstra,
+# Cursor, PyInstaller, PyBuilder, Sphinx, mkdocs, Spyder, Rope, IPython, Cython,
+# Pyre, pytype, PEP 582, and the pipenv/poetry/pdm/uv lockfile commentary --
+# none of which this project uses.
 # Also dropped `lib/` and `lib64/`: virtualenv-layout leftovers that are dead
 # here (`.venv` is ignored wholesale) and broad enough to swallow a real source
 # directory named `lib`.
