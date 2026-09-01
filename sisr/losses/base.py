@@ -10,31 +10,27 @@ from ..processors import SRProcessor
 class SRLoss(torch.nn.Module, abc.ABC):
     """A criterion that needs facts only the :class:`SRProcessor` knows.
 
-    :class:`~sisr.training.lightning_module.SRLightning` calls :meth:`bind`
-    exactly once at construction, passing the processor wired alongside the
-    model. Plain :class:`torch.nn.Module` criteria (``MSELoss``, ``L1Loss``,
-    :class:`~sisr.losses.pixel.CharbonnierLoss`) need no such adaptation and
-    are used directly — this base exists only for the losses that do.
+    ``SRLightning`` calls :meth:`bind` once at construction with the processor
+    wired alongside the model. Plain ``torch.nn.Module`` criteria (``MSELoss``,
+    ``CharbonnierLoss``) need no adaptation and are used directly; this base is
+    only for the losses that do.
 
-    A loss may optionally expose ``last_terms: dict[str, torch.Tensor]``, a
-    structural protocol :class:`SRLightning` checks via ``getattr`` rather
-    than ``isinstance``, so any criterion holding one participates in
-    per-term logging as ``loss/<stage>/<name>``
-    (:class:`~sisr.losses.composite.WeightedSumLoss` is the one that does).
-    The tensors are written in place across ordinary steps and only replaced
-    when the existing buffer cannot be reused (first use, a device/dtype
-    change, or leaving :func:`torch.inference_mode`).
+    **Optional structural protocol:** a loss exposing
+    ``last_terms: dict[str, torch.Tensor]`` gets per-term logging as
+    ``loss/<stage>/<name>``. ``SRLightning`` checks it with ``getattr``, not
+    ``isinstance``, so any criterion holding one participates. Those tensors are
+    written **in place** and replaced only when the buffer cannot be reused
+    (first use, device/dtype change, leaving :func:`torch.inference_mode`).
     """
 
     @abc.abstractmethod
     def bind(self, processor: SRProcessor) -> None:
         """Adopt the model's output space, or raise if it cannot be served.
 
-        Abstract rather than defaulted to a no-op, for the same reason
-        :attr:`SRProcessor.output_range` is: a wrong inherited default is
-        exactly the failure this declaration exists to prevent. It is also
-        the one place an impossible model/loss pairing can fail loudly
-        instead of silently computing the wrong quantity.
+        Abstract rather than a defaulted no-op: a wrong inherited default is
+        the failure this exists to prevent, and this is the one place an
+        impossible model/loss pairing fails loudly rather than silently
+        computing the wrong quantity.
 
         Args:
             processor: The processor wired alongside the model, supplying
@@ -52,7 +48,6 @@ class SRLoss(torch.nn.Module, abc.ABC):
     def describe(self) -> str:
         """One-line recipe for the TensorBoard HParams column.
 
-        Concrete with a class-name default: this is presentation, so a new
-        loss must not be forced to implement it.
+        Defaulted, not abstract -- presentation must not be a subclass burden.
         """
         return type(self).__name__

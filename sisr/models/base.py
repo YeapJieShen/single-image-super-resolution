@@ -18,13 +18,10 @@ class SRModel(nn.Module, abc.ABC):
     _hparams: dict
 
     #: How the model expects its LR input: ``'pre_upsampled'`` if LR arrives
-    #: already resized to the HR grid (e.g. SRCNN, which is resolution-
-    #: preserving), or ``'native_lr'`` if the model consumes true low-
-    #: resolution and upsamples internally (e.g. SRResNet's sub-pixel conv).
-    #: Declared per-architecture rather than inferred (e.g. from ``'scale'
-    #: in hparams``) — that check happens to hold for both current
-    #: architectures but would silently break on a third that doesn't follow
-    #: the same pattern.
+    #: already on the HR grid (SRCNN), ``'native_lr'`` if the model upsamples
+    #: internally (SRResNet). Declared, never inferred -- a rule like
+    #: ``'scale' in hparams`` holds for both current architectures and would
+    #: silently break on a third.
     input_contract: ClassVar[Literal["pre_upsampled", "native_lr"]]
 
     @property
@@ -37,15 +34,13 @@ class SRModel(nn.Module, abc.ABC):
     def variant_tag(self) -> str:
         """Short token distinguishing this configuration from siblings of the same class.
 
-        Appears in artifact filenames, so a directory of weights can be read
-        without opening anything: ``SRCNN_x2_Y_915`` and ``SRResNet_x4_RGB_16B64F``
-        differ in exactly this token when the architecture and scale match.
+        Appears in artifact filenames, so a directory of weights reads without
+        opening anything: ``SRCNN_x2_Y_915``, ``SRResNet_x4_RGB_16B64F``.
 
-        Abstract, never defaulted, for the same reason ``input_contract`` is
-        declared rather than inferred: no rule over ``hparams`` produces a
-        readable tag for every architecture, and an inherited default would
-        silently label two different configurations identically. Keep it short,
-        stable, and filename-safe.
+        Abstract, never defaulted, for the same reason ``input_contract`` is:
+        no rule over ``hparams`` yields a readable tag for every architecture,
+        and an inherited default would label two configurations identically.
+        Keep it short, stable and filename-safe.
         """
 
     @abc.abstractmethod
@@ -53,12 +48,10 @@ class SRModel(nn.Module, abc.ABC):
         """Run the model on input ``x`` and return the SR output tensor."""
 
     def reset_parameters(self, **kwargs: Any) -> None:
-        """Optional paper-style weight init. Default: no-op (kwargs ignored).
+        """Optional paper-style weight init. Default: no-op.
 
-        Subclasses may declare specific kwargs (e.g. ``SRCNN``'s ``mean`` /
-        ``std``). The base accepts ``**kwargs`` so callers like
-        ``SRLightning`` can pass paper-init options
-        polymorphically without knowing the subclass signature — models that
-        don't override absorb the kwargs as no-ops.
+        ``**kwargs`` lets ``SRLightning`` pass paper-init options
+        polymorphically; subclasses declare what they read (``SRCNN``'s
+        ``mean``/``std``), and models that do not override absorb them.
         """
         pass

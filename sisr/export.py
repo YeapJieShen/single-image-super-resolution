@@ -1,34 +1,27 @@
 """Bare-model ONNX export.
 
-Exports ``module.model`` — the wrapped :class:`~sisr.models.base.SRModel`,
-*without* the :class:`~sisr.processors.SRProcessor` — so the graph matches
-:meth:`SRLightning.forward` exactly (which is itself model-only; see
-``sisr/training/lightning_module.py``). This is a deliberate choice, not an
-oversight: a consumer of the exported graph is expected to have ``sisr``
-importable and call ``processor.extract`` / ``processor.reconstruct``
-themselves.
+Exports ``module.model`` **without** the processor, so the graph matches
+:meth:`SRLightning.forward`, which is itself model-only. Deliberate: a consumer
+is expected to have ``sisr`` importable and call ``processor.extract`` /
+``reconstruct`` itself.
 
-The exported graph also carries the same provenance metadata as the checkpoint
-sinks (:func:`sisr.training.metadata.build_metadata`), written one field per
-``onnx.ModelProto.metadata_props`` entry rather than a single opaque JSON blob —
-Netron renders per-field props as a readable table, which is most of the value.
-``metadata_props`` is string->string only, so non-string fields are JSON-encoded.
+**What that means per processor:**
 
-For :class:`~sisr.processors.RGBProcessor` architectures (SRResNet), those
-methods are identity functions, so the bare graph is already an end-to-end
-LR-RGB -> SR-RGB pipeline. Under
-:class:`~sisr.processors.RGBSignedOutputProcessor` the same graph emits
-``[-1, 1]`` and the consumer must apply ``(out + 1) / 2``; the input side is
-unchanged. For :class:`~sisr.processors.YChannelProcessor`
-architectures (SRCNN), the graph only covers Y -> Y: reconstructing an RGB
-image needs the LR image's Cb/Cr channels back (bicubic-upsampled to the SR
-size), which this export omits. A non-Python ONNX consumer of an SRCNN graph
-must reimplement that chroma path itself — see the README's ONNX section.
+- :class:`~sisr.processors.RGBProcessor` (SRResNet): both are identity, so the
+  bare graph is already end-to-end LR-RGB -> SR-RGB.
+- :class:`~sisr.processors.RGBSignedOutputProcessor`: the same graph emits
+  ``[-1, 1]``; the consumer applies ``(out + 1) / 2``. Input side unchanged.
+- :class:`~sisr.processors.YChannelProcessor` (SRCNN): **Y -> Y only.**
+  Rebuilding RGB needs the LR image's Cb/Cr bicubic-upsampled to the SR size,
+  which this omits -- a non-Python consumer must reimplement that chroma path.
 
-Requires the optional ``export`` extra (``onnx``, ``onnxruntime``). The
-import is gated inside :func:`to_onnx` so plain ``import sisr`` — and
-``import sisr.export`` itself — stays free of the dependency until export is
-actually invoked.
+The graph carries the same provenance metadata as the checkpoint sinks, one
+field per ``metadata_props`` entry rather than one blob, because Netron renders
+per-field props as a readable table. That map is string->string, so non-strings
+are JSON-encoded.
+
+Requires the ``export`` extra. The import is gated inside :func:`to_onnx`, so
+even ``import sisr.export`` stays free of the dependency until it is invoked.
 """
 
 from __future__ import annotations

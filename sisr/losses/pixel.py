@@ -24,16 +24,14 @@ def _check_reduction(reduction: str) -> str:
 class CharbonnierLoss(torch.nn.Module):
     """Charbonnier distance ``sqrt((pred - target)^2 + eps^2)``.
 
-    A differentiable variant of L1: the ``eps`` floor gives a finite gradient
-    at ``pred == target``, which is where ``|x|`` has none. That is the whole
-    reason to prefer it — at the default ``eps`` the *value* is numerically
-    close to L1 for typical residuals, so do not expect a PSNR change from
-    swapping one for the other.
+    A differentiable L1: the ``eps`` floor gives a finite gradient at
+    ``pred == target``, where ``|x|`` has none. That is the only reason to
+    prefer it -- the *value* is numerically close to L1 at the default, so
+    expect no PSNR change from swapping them.
 
-    ``eps`` is **squared inside the root**, which spans both conventions in
-    circulation: LapSRN's ``sqrt(diff^2 + eps^2)`` at ``eps=1e-3`` (the
-    default here, and the paper that brought Charbonnier to SISR), and
-    BasicSR's ``sqrt(diff^2 + 1e-12)`` at ``eps=1e-6``.
+    ``eps`` is **squared inside the root**, spanning both live conventions:
+    LapSRN's ``eps=1e-3`` (the default, and the paper that brought Charbonnier
+    to SISR) and BasicSR's ``eps=1e-6``.
 
     Args:
         eps: Intensity-scale floor, squared inside the root. Defaults to
@@ -58,24 +56,21 @@ class CharbonnierLoss(torch.nn.Module):
 class TotalVariationLoss(torch.nn.Module):
     """Total-variation loss: isotropic ``sqrt(dx^2 + dy^2 + eps^2)``, reduced per ``reduction``.
 
-    Ledig et al. Sec. 3.4 add this to the VGG22 content loss at weight ``2e-8``
-    for SRResNet-VGG22 — the one VGG variant reproducible without a
-    discriminator, so it is required for that recipe, not optional. Their
-    ``l_TV`` is a norm of the gradient *vector*, i.e. isotropic;
-    ``isotropic=False`` gives the common ``|dx| + |dy|`` reimplementation, which
-    is a **different function** (up to ``sqrt(2)`` larger on diagonal
-    structure), not a rescaling. Both difference grids are cropped to a common
-    ``(H-1, W-1)`` so the norm can combine them per pixel.
+    Required, not optional, for SRResNet-VGG22: Ledig et al. Sec. 3.4 add it to
+    the VGG22 content loss at weight ``2e-8``, and that is the one VGG variant
+    reproducible without a discriminator. Their ``l_TV`` is a norm of the
+    gradient *vector*; ``isotropic=False`` gives the common ``|dx| + |dy|``
+    reimplementation, a **different function** (up to ``sqrt(2)`` larger on
+    diagonals), not a rescaling. Both grids crop to ``(H-1, W-1)`` so the norm
+    combines them per pixel.
 
     Two traps before setting a weight:
 
-    - ``target`` is **ignored** — this is a regulariser, not a distance. The
-      uniform ``(pred, target)`` signature exists so ``WeightedSumLoss`` can
-      dispatch every term identically.
+    - ``target`` is **ignored** -- a regulariser, not a distance. The uniform
+      signature exists so ``WeightedSumLoss`` dispatches every term identically.
     - **The value scales with the intensity range.** The paper's ``2e-8``
-      presumes a ``[-1, 1]`` output range; under a ``[0, 1]`` processor the
-      same image gives exactly half the TV, so the effective weight differs
-      by 2x.
+      presumes ``[-1, 1]``; under a ``[0, 1]`` processor the same image gives
+      exactly half the TV, so the effective weight differs by 2x.
 
     Args:
         isotropic: Use the paper's ``sqrt(dx^2 + dy^2)`` norm. ``False``
