@@ -340,15 +340,25 @@ both rows at once:
 | per-layer `lr_mult` (weights) | `1`, `1`, `0.1` | already matched — `layer_lrs: [1e-4, 1e-4, 1e-5]` |
 | `weight_filler` std | `0.001` | already matched |
 
-`max_iter` also settles how to read the paper's *"the same number of backpropagations
-(i.e. 8×10⁸)"*. It **cannot** mean iterations: 8×10⁸ exceeds the authors' own cap of 1.5×10⁷
-by two orders of magnitude. Per-sample is the only consistent reading — which is what this
-project had already inferred, and it is no longer an inference. Nor is `max_iter` the paper's
-budget: paired with `snapshot: 500` it is a run-long ceiling to snapshot from, which is what
-an earlier reading of *"up to 8×10⁸"* was picking up on. Both readings reconcile.
+`max_iter` settles one thing and opens another.
 
-`max_steps` is therefore **6,250,000** — 6,250,000 × 128 = 8×10⁸ backpropagations exactly,
-where before it was an approximation at ≈0.8× the paper's figure.
+**Settled:** the paper's *"the same number of backpropagations (i.e. 8×10⁸)"* **cannot** mean
+iterations — 8×10⁸ exceeds the authors' own cap of 1.5×10⁷ by two orders of magnitude. Per-sample
+is the only consistent reading, which this project had already inferred and no longer has to.
+
+**Open, and deliberately left open:** at batch 128 the authors' `max_iter` is
+15,000,000 × 128 = **1.92×10⁹** backpropagations, against the paper's stated **8×10⁸** — which
+would be 6,250,000 iterations. **The released code and the paper disagree, by 2.4×.**
+
+This project ships the authors' value, `max_steps: 15000000`, because that is the number a
+primary source states. Choosing 6,250,000 instead would make the paper's sentence come out exact
+at the cost of shipping a value no source states, resolved by our inference that `max_iter` is a
+ceiling rather than a target. Their `snapshot: 500` makes that inference plausible — but **which
+snapshot produced the published numbers is recorded nowhere**, so it stays an inference, and the
+honest position is to follow the file and say the two disagree.
+
+Practically this is a long run; stop at a checkpoint rather than lower the config to an
+unsourced number.
 
 No published number changes: SRCNN has no publishable row.
 

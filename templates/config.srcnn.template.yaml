@@ -77,11 +77,18 @@ data:
 
 trainer:
   max_epochs: -1
-  # The paper's 8e8 backpropagations exactly, at batch 128. "Backpropagations" is
-  # per-sample: the authors' solver caps at max_iter 15000000 ITERATIONS, so the
-  # mini-batch reading (8e8 iterations) is impossible against their own file.
-  max_steps: 6250000
-  val_check_interval: 312500   # 20 validation cycles over the run
+  # The authors' released solver: max_iter 15000000 ITERATIONS.
+  # !! This DISAGREES with the paper, and the disagreement is deliberate to
+  # preserve rather than resolve. 15000000 x 128 = 1.92e9 backpropagations,
+  # against the paper's stated 8e8 (which would be 6250000 iterations here).
+  # We follow the authors' file, because it is the value they state; the paper's
+  # figure is presumably where they snapshotted from (snapshot: 500), but which
+  # snapshot produced the published numbers is not recorded anywhere.
+  # PRACTICAL: this is a very long run. snapshot cadence is what it is for --
+  # stop early at a checkpoint rather than lowering this to a number no source
+  # states.
+  max_steps: 15000000
+  val_check_interval: 750000   # 20 validation cycles over the run
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 1000
