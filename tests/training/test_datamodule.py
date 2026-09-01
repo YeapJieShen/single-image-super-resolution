@@ -535,3 +535,79 @@ def test_accepted_init_args_gives_up_quietly_on_an_unresolvable_class(class_path
     reports the original constructor error, rather than replacing a real
     failure with an import error raised while composing the message."""
     assert _accepted_init_args(class_path) is None
+
+
+# ---------------------------------------------------------------------------
+# test_dataloader must not fail silently
+# ---------------------------------------------------------------------------
+
+
+def _make_dm_no_test_sets(image_dir: Path) -> SRDataModule:
+    """Same shape as _make_dm, with test_datasets left unset."""
+    return SRDataModule(
+        train_dataset={
+            "class_path": "sisr.datasets.srcnn.TrainDataset",
+            "init_args": {
+                "img_dir": str(image_dir),
+                "subimg_size": 33,
+                "stride": 14,
+                "scale": 2,
+                "use_tqdm": False,
+                "cache_dir": str(image_dir / ".lmdb_cache_nt"),
+                "build_num_workers": 1,
+            },
+        },
+        val_dataset={
+            "class_path": "sisr.datasets.srcnn.ValidationDataset",
+            "init_args": {"img_dir": str(image_dir), "scale": 2},
+        },
+        val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
+        # test_datasets and test_dataloader_kwargs both deliberately unset
+    )
+
+
+def test_test_dataloader_before_setup_raises_when_test_sets_are_configured(
+    tiny_rgb_image_dir: Path,
+):
+    """Its two siblings raise; this one returned [] silently, and it is the one
+    whose failure matters most.
+
+    The two states were indistinguishable: "configured with Set5, setup() never
+    run" and "configured with no test sets at all" both gave []. A `test` run in
+    the first state evaluates NOTHING and reports success -- and that is the
+    final evaluation path, so the number that never gets produced is the one
+    someone would publish."""
+    dm = _make_dm(tiny_rgb_image_dir)
+    with pytest.raises(RuntimeError, match="setup"):
+        dm.test_dataloader()
+
+
+def test_test_dataloader_still_returns_empty_when_no_test_sets_configured(
+    tiny_rgb_image_dir: Path,
+):
+    """That state is legitimate and must stay silent -- a fit run with no
+    benchmark sets is a normal thing to configure. It must not become an error
+    just because the other state now is one."""
+    dm = _make_dm_no_test_sets(tiny_rgb_image_dir)
+    assert dm.test_dataloader() == []
+    dm.setup(stage="test")
+    assert dm.test_dataloader() == []
+
+
+def test_test_dataloader_after_setup_is_unchanged(tiny_rgb_image_dir: Path):
+    """The working path must keep working: one loader per entry, in order."""
+    dm = _make_dm(tiny_rgb_image_dir)
+    dm.setup(stage="test")
+    loaders = dm.test_dataloader()
+    assert len(loaders) == 2
+    assert all(isinstance(dl, DataLoader) for dl in loaders)
+
+
+def test_val_and_test_dataloader_kwargs_are_not_the_same_object(tiny_rgb_image_dir: Path):
+    """`self._test_dl_kwargs is self._val_dl_kwargs` was True whenever
+    test_dataloader_kwargs was unset -- the same dict object, not a copy.
+    Nothing mutates them today, so it costs nothing now and couples the two
+    loaders silently the first time anything does."""
+    dm = _make_dm_no_test_sets(tiny_rgb_image_dir)
+    assert dm._test_dl_kwargs == dm._val_dl_kwargs
+    assert dm._test_dl_kwargs is not dm._val_dl_kwargs
