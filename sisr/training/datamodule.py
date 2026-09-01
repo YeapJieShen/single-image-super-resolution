@@ -216,7 +216,10 @@ class SRDataModule(lightning.LightningDataModule):
         self._predict_spec = predict_dataset
         self._train_dl_kwargs = train_dataloader_kwargs or {}
         self._val_dl_kwargs = val_dataloader_kwargs or {"batch_size": 1, "num_workers": 1}
-        self._test_dl_kwargs = test_dataloader_kwargs or self._val_dl_kwargs
+        # dict(...), not the object itself: unset, this used to BE
+        # _val_dl_kwargs, so the first thing to mutate either would silently
+        # change both loaders.
+        self._test_dl_kwargs = test_dataloader_kwargs or dict(self._val_dl_kwargs)
         self._predict_dl_kwargs = predict_dataloader_kwargs or {"batch_size": 1, "num_workers": 0}
 
         self._train_ds: Dataset | None = None
@@ -331,10 +334,31 @@ class SRDataModule(lightning.LightningDataModule):
     def test_dataloader(self) -> list[DataLoader]:
         """Test loaders only — for ``cli test --ckpt_path <path>`` final eval.
 
+        Separates "not configured" from "not set up", the way
+        :meth:`predict_dataloader` already does. Returning ``[]`` for both made
+        them indistinguishable, and a ``test`` run that reached the second
+        evaluated nothing and reported success. This is the final evaluation
+        path, so the number that does not get produced is the one someone would
+        publish.
+
         Returns:
             List of one DataLoader per entry in ``test_datasets``, in
-            insertion order. Empty when no test sets are configured.
+            insertion order. Empty when no test sets are configured — that
+            state is legitimate and stays silent.
+
+        Raises:
+            RuntimeError: If test sets are configured but ``setup`` has not
+                instantiated them. Lightning calls ``setup()`` itself; a direct
+                caller has to.
         """
+        if self._test_specs and not self._test_ds:
+            raise RuntimeError(
+                f"SRDataModule.test_dataloader() called before setup('test') instantiated "
+                f"the {len(self._test_specs)} configured test set(s) "
+                f"({', '.join(self._test_specs)}). Lightning calls setup() itself; a direct "
+                f"caller has to. Returning an empty list here would make a `test` run "
+                f"evaluate nothing and report success."
+            )
         return [
             DataLoader(ds, shuffle=False, **self._test_dl_kwargs) for ds in self._test_ds.values()
         ]
