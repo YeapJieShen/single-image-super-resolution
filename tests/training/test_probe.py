@@ -203,3 +203,80 @@ def test_a_datamodule_with_no_probeable_dataset_yields_no_sample():
     with probe_pair(_DM()) as probe:
         assert probe.sample is None
         assert probe.train_lr() is None
+
+
+# ---------------------------------------------------------------------------
+# _first_probe_dataset: the priority order the contract check depends on
+# ---------------------------------------------------------------------------
+
+
+def test_no_unreachable_statement_survives_in_probe():
+    """A dead `return None` after a `return None`, under a comment left over
+    from a mutation experiment. It went in with the commit that created the
+    module rather than as a deliberate marker, and an AST sweep of the package
+    found it the ONLY unreachable statement -- a one-off, not a pattern."""
+    import ast
+    import inspect
+
+    import sisr.training.probe as probe
+
+    tree = ast.parse(inspect.getsource(probe))
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for i, stmt in enumerate(body[:-1]):
+            assert not isinstance(stmt, ast.Return | ast.Raise), (
+                f"unreachable statement after {type(stmt).__name__} at line {body[i + 1].lineno}"
+            )
+
+
+def test_first_probe_dataset_priority_is_train_then_val_then_test():
+    """train > val > first test set -- whichever loader would actually run
+    first for the live stage, so the contract check fires for a bare
+    `validate`/`test` invocation and not only for `fit`."""
+    from types import SimpleNamespace
+
+    from sisr.training.probe import _first_probe_dataset
+
+    train, val, t5 = object(), object(), object()
+
+    assert _first_probe_dataset(
+        SimpleNamespace(train_dataset=train, val_dataset=val, test_datasets={"Set5": t5})
+    ) == ("train_dataset", train)
+    assert _first_probe_dataset(
+        SimpleNamespace(train_dataset=None, val_dataset=val, test_datasets={"Set5": t5})
+    ) == ("val_dataset", val)
+    assert _first_probe_dataset(
+        SimpleNamespace(train_dataset=None, val_dataset=None, test_datasets={"Set5": t5})
+    ) == ("test_datasets", t5)
+
+
+def test_first_probe_dataset_returns_none_when_nothing_is_set():
+    """All three unset, and an empty test_datasets dict, are both "nothing to
+    probe" rather than an error."""
+    from types import SimpleNamespace
+
+    from sisr.training.probe import _first_probe_dataset
+
+    assert _first_probe_dataset(SimpleNamespace()) is None
+    assert (
+        _first_probe_dataset(
+            SimpleNamespace(train_dataset=None, val_dataset=None, test_datasets={})
+        )
+        is None
+    )
+
+
+def test_first_probe_dataset_takes_the_first_test_set_in_insertion_order():
+    """`next(iter(...))` on a dict -- insertion order, so the YAML's first
+    entry wins rather than an arbitrary one."""
+    from types import SimpleNamespace
+
+    from sisr.training.probe import _first_probe_dataset
+
+    first, second = object(), object()
+    dm = SimpleNamespace(
+        train_dataset=None, val_dataset=None, test_datasets={"Set5": first, "Set14": second}
+    )
+    assert _first_probe_dataset(dm) == ("test_datasets", first)
