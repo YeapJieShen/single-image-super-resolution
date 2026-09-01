@@ -193,6 +193,8 @@ def test_to_onnx_writes_metadata_props(tmp_path):
         "num_filters": [8, 4],
         "kernel_sizes": [5, 1, 3],
         "padding": 0,
+        "eval_padding": None,
+        "eval_padding_mode": "replicate",
     }
 
     io_field = json.loads(props["io"])

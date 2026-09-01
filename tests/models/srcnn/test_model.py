@@ -155,7 +155,14 @@ def test_hparams_architectural_only():
         kernel_sizes=(9, 1, 5),
         padding=0,
     )
-    assert set(model.hparams.keys()) == {"num_channels", "num_filters", "kernel_sizes", "padding"}
+    assert set(model.hparams.keys()) == {
+        "num_channels",
+        "num_filters",
+        "kernel_sizes",
+        "padding",
+        "eval_padding",
+        "eval_padding_mode",
+    }
 
 
 def test_forward_multilayer_mapping_builds_extra_conv_and_preserves_shape():
@@ -184,3 +191,103 @@ def test_variant_tag_is_the_kernel_triple():
     """The paper names its variants by kernel sizes, so the artifact does too."""
     assert SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 1, 5)).variant_tag == "915"
     assert SRCNN(num_channels=1, num_filters=(64, 32), kernel_sizes=(9, 5, 5)).variant_tag == "955"
+
+
+# ---------------------------------------------------------------------------
+# eval_padding — the authors' test-time path (train valid, test same+replicate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def srcnn_authors() -> SRCNN:
+    """The authors' released setup: `pad: 0` at train, same+replicate at test."""
+    return SRCNN(
+        num_channels=1,
+        num_filters=(64, 32),
+        kernel_sizes=(9, 1, 5),
+        padding=0,
+        eval_padding="same",
+        eval_padding_mode="replicate",
+    )
+
+
+def test_eval_padding_only_applies_out_of_training_mode(srcnn_authors: SRCNN):
+    """Train shrinks by 12 px as before; eval returns the full size."""
+    x = torch.zeros(2, 1, 33, 33)
+
+    srcnn_authors.train()
+    assert srcnn_authors(x).shape == (2, 1, 21, 21)
+
+    srcnn_authors.eval()
+    assert srcnn_authors(x).shape == (2, 1, 33, 33)
+
+
+def test_eval_padding_none_keeps_valid_in_both_modes(srcnn_valid: SRCNN):
+    """The opt-out: `eval_padding=None` (the default) is valid convolution throughout."""
+    x = torch.zeros(2, 3, 33, 33)
+    for mode in (srcnn_valid.train, srcnn_valid.eval):
+        mode()
+        assert srcnn_valid(x).shape == (2, 3, 21, 21)
+
+
+def test_eval_padding_pads_per_layer_not_the_input_once(srcnn_authors: SRCNN):
+    """Replicate padding is re-derived per layer, as `SRCNN.m`'s imfilter is.
+
+    Pre-padding the input by the full 6 px receptive field and running valid
+    convolutions is the cheap-looking equivalent, and it is a different
+    function: layer 2 would then see a border computed from replicated
+    *input* pixels rather than replicated *layer-1 features*.
+    """
+    torch.manual_seed(0)
+    srcnn_authors.reset_parameters(std=0.2)
+    srcnn_authors.eval()
+    x = torch.rand(1, 1, 24, 24)
+
+    with torch.no_grad():
+        per_layer = srcnn_authors(x)
+        prepadded_input = torch.nn.functional.pad(x, (6, 6, 6, 6), mode="replicate")
+        srcnn_authors.eval_padding = None
+        prepadded = srcnn_authors(prepadded_input)
+
+    assert per_layer.shape == prepadded.shape
+    assert not torch.allclose(per_layer, prepadded, atol=1e-6)
+
+
+def test_eval_padding_matches_an_explicit_per_layer_reference(srcnn_authors: SRCNN):
+    """Pin the exact arithmetic against a hand-written pad-then-valid-conv loop."""
+    torch.manual_seed(0)
+    srcnn_authors.reset_parameters(std=0.2)
+    srcnn_authors.eval()
+    x = torch.rand(1, 1, 20, 20)
+
+    layers = [*srcnn_authors.feat, *srcnn_authors.mapping, srcnn_authors.recon]
+    with torch.no_grad():
+        expected = x
+        for layer in layers:
+            if isinstance(layer, torch.nn.Conv2d):
+                pad = (layer.kernel_size[0] - 1) // 2
+                expected = torch.nn.functional.pad(expected, (pad, pad, pad, pad), mode="replicate")
+                expected = torch.nn.functional.conv2d(expected, layer.weight, layer.bias)
+            else:
+                expected = layer(expected)
+        actual = srcnn_authors(x)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_eval_padding_is_recorded_in_hparams(srcnn_authors: SRCNN):
+    """Checkpoints must carry it — it changes what the model outputs at eval."""
+    assert srcnn_authors.hparams["eval_padding"] == "same"
+    assert srcnn_authors.hparams["eval_padding_mode"] == "replicate"
+
+
+def test_eval_padding_rejects_an_even_kernel():
+    """`same` is not expressible for an even kernel without an asymmetric pad."""
+    with pytest.raises(ValueError, match="odd kernel"):
+        SRCNN(
+            num_channels=1,
+            num_filters=(64, 32),
+            kernel_sizes=(9, 1, 4),
+            padding=0,
+            eval_padding="same",
+        )

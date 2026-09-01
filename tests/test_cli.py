@@ -597,6 +597,9 @@ def test_export_subcommand_runs_end_to_end_in_process(tmp_path):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=DeprecationWarning)
             warnings.filterwarnings("ignore", message="GPU available but not used.*")
+            # eval_padding lowers to an onnx::Slice the folder declines to fold.
+            # An optimization notice, not a correctness one -- the graph is exported.
+            warnings.filterwarnings("ignore", message="Constant folding - Only steps=1.*")
             SRLightningCLI(
                 model_class=SRLightning,
                 datamodule_class=SRDataModule,
@@ -868,6 +871,8 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                         "num_filters": [64, 32],
                         "kernel_sizes": [9, 1, 5],
                         "padding": 0,
+                        "eval_padding": None,
+                        "eval_padding_mode": "replicate",
                     },
                 },
                 "processor": {"class_path": "sisr.processors.RGBProcessor"},

@@ -11,7 +11,7 @@ import torchmetrics
 
 from sisr.losses import SRLoss
 from sisr.metrics.scoring import SRScorer
-from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig
+from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
 from sisr.processors import (
@@ -2158,3 +2158,37 @@ def test_scorer_refuses_an_unresolved_crop_border_sentinel():
     scorer = SRScorer(SREvalConfig(crop_border=None))
     with pytest.raises(ValueError, match="still None at scoring time"):
         scorer.crop(torch.rand(1, 3, 16, 16))
+
+
+def test_eval_padding_makes_the_scored_region_the_authors():
+    """With the authors' inference path the SR field's border is all that is lost.
+
+    Valid convolution costs 6 px per side before `crop_border` shaves any,
+    so the scored region sat strictly inside the authors'. Under
+    `eval_padding='same'` the model output is full-size, `_forward_sr`'s
+    center_crop becomes a no-op, and `crop_border` alone decides the region
+    — which #217 already derives from `scale`.
+    """
+    model = SRCNN(
+        num_channels=3,
+        num_filters=(64, 32),
+        kernel_sizes=(9, 1, 5),
+        padding=0,
+        eval_padding="same",
+    )
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRCNNTrainingConfig(scale=3),
+        eval_config=SRCNNEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lit.eval()
+    assert lit.eval_config.crop_border == 3  # from scale, not a pinned constant
+
+    hr = torch.rand(1, 3, 48, 48)
+    with torch.no_grad():
+        sr, hr_aligned = lit.predict_rgb(hr.clone(), hr)
+
+    assert sr.shape == hr.shape, "same-padded inference must not shrink the SR field"
+    assert hr_aligned.shape == hr.shape, "so center_crop must have nothing left to take"
