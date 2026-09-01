@@ -148,15 +148,33 @@ unsourced number.
 No published number changes: SRCNN has no publishable row.
 
 **The evaluation border also left**, for the opposite reason: it turned out to be specified
-after all, and we differ from it. The authors' demo package (`SRCNN_v1.zip`, retrieved
+after all, and we differed from it. The authors' demo package (`SRCNN_v1.zip`, retrieved
 2026-09-01, SHA-256 `bfa68ca613c1326a59e0c34353205a254ab2b67e34df7f04e28eef567980af30`)
 shaves **`scale` pixels per side** before computing PSNR — not a constant — and runs the
 network with **`same` padding and replicated borders** at test time, though it trains with
-`pad: 0`. This project uses `padding: valid` at inference and then `crop_border: 3`, so at ×3
-we score a region strictly *inside* theirs, and our constant agrees with `scale` only at ×3.
-The two differences are entangled — changing the border alone moves us further away, not
-closer — so the choice between reproducing their measurement and keeping a path that never
-scores invented border pixels is tracked as its own decision, not settled here (#207).
+`pad: 0`. This project used `padding: valid` at inference and then `crop_border: 3`, so at ×3
+it scored a region strictly *inside* theirs, and the constant agreed with `scale` only at ×3.
+
+The two differences were entangled — changing the border alone moves *away* from the authors,
+not toward them, because the valid-convolution loss stays underneath — so both are now
+adopted together:
+
+| | authors | ships now |
+|---|---|---|
+| inference padding | `same`, replicated border | `eval_padding: same`, `eval_padding_mode: replicate` |
+| training padding | `pad: 0` | `padding: 0`, unchanged |
+| border shaved before PSNR | `scale` px/side | `crop_border` derived from `scale` |
+
+The replicated border is re-derived at **every** convolution, as the authors' per-layer
+`imfilter` does; pre-padding the input once and convolving valid is a different function.
+`eval_padding` applies only outside training mode, so the model is deliberately not the same
+function in the two modes — which is what the authors' own setup is.
+
+The trade this makes is real and was decided rather than assumed: same-padded inference scores
+pixels whose receptive field includes invented (replicated) content. Keeping valid convolution
+never does, and is arguably more honest, but then the numbers are not comparable to the paper's
+on a metric where border handling is known to matter. Reproducing the paper won. Deleting the
+two `eval_padding` lines from the config restores valid convolution at train and test.
 
 #### What did *not* settle: SRResNet's PReLU
 
