@@ -10,14 +10,21 @@ image once and slicing its deterministic sub-images out at load time is far
 cheaper than re-decoding, and it decouples that cache from the sub-image
 grid (``subimg_size``, ``stride``): neither affects the raw bytes stored.
 
-**The whole image is degraded once and both sub-images are sliced from the
-result**, which is the order the authors' released ``demo_SR.m`` uses —
-``modcrop`` then ``imresize`` down then up, and only then patch extraction.
-Degrading an already-extracted patch instead resolves the bicubic kernel's
-edge taps against the patch border: at x3 the interior is bit-identical and
-the entire difference is a 4px border, 43% of a 33x33 patch. The degraded
-plane is cached separately by :mod:`~sisr.datasets.derived_cache`, whose key
-*does* carry ``scale``.
+**The training path still degrades each extracted patch, and that is a known
+fidelity gap held open deliberately.** The authors' released ``demo_SR.m``
+degrades the whole image first — ``modcrop``, ``imresize`` down, ``imresize``
+up — and only then extracts, which leaves a measurable difference in a 4px
+patch border at x3.
+
+Caching that whole-image plane is what :mod:`~sisr.datasets.derived_cache`
+exists for, and SRResNet uses it. **SRCNN deliberately does not.** Its
+formulation is pre-upsampled, so the degraded plane is HR-sized rather than
+1/scale^2 of it: caching it doubles the working set, and once that exceeds RAM
+a shuffled training loader becomes I/O-bound. Measured on a 12 GB box,
+real training loop: **21.60 it/s degrading per patch against 1.02 it/s reading a
+cached plane** — a 21x regression, because the working set went from 6.3 GB to
+12.6 GB. The correctness gain is real and the cost is worse; the trade is
+recorded on the issue rather than taken silently.
 :class:`ValidationDataset` generates LR pairs on the fly for full images.
 
 LR degradation uses MATLAB-compatible antialiased bicubic resizing (see
@@ -98,15 +105,14 @@ class TrainDataset(HRCachedTrainDataset):
     Every HR image is decoded once into an LMDB cache (uint8 RGB, whole) — see
     :mod:`~sisr.datasets.base` for why. Each ``__getitem__`` maps its flat index
     to a source image and a deterministic ``(top, left)`` grid position in O(1),
-    and slices the ``subimg_size`` square out of **both** whole-image planes at
-    that position — the degraded one already computed over the whole image, so
-    no kernel ever reaches past a patch edge.
+    slices the ``subimg_size`` square HR sub-image, and degrades it to LR.
     **The grid is derived from exactly one place** (:func:`_grid_dims`), so
     indices can never silently misalign.
 
-    Because the degradation now happens before extraction, ``subimg_size`` and
-    ``scale`` are no longer coupled: there is no per-patch sampling grid left to
-    shift, so ``33 % scale`` stops mattering.
+    ``subimg_size`` and ``scale`` stay coupled while the degradation is per
+    patch: ``33 % scale`` shifts each patch's own LR sampling grid, so x3 is
+    better behaved than x2 or x4. See the module docstring for why the fix that
+    would remove that coupling is not applied here.
 
     **The checksum keys only on the file manifest** (plus a format tag), not on
     ``subimg_size``/``stride``/``scale`` — none of those affect the bytes
@@ -148,7 +154,9 @@ class TrainDataset(HRCachedTrainDataset):
         super().__init__(
             img_dir,
             scale=scale,
-            derived_kind="bicubic",
+            # No derived plane: HR-sized, so caching it doubles the working set
+            # and makes shuffled training I/O-bound. Measured in the module docstring.
+            derived_kind=None,
             use_tqdm=use_tqdm,
             cache_dir=cache_dir,
             build_num_workers=build_num_workers,
@@ -191,11 +199,9 @@ class TrainDataset(HRCachedTrainDataset):
         Locates *idx*'s source image and grid position in O(1) via
         :attr:`_img_offsets`/:attr:`_img_n_cols`, slices the HR sub-image out
         of that image's cached raw bytes (via
-        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`) and the LR
-        sub-image out of the whole-image degraded plane (via
-        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_derived`) at the
-        same position. Both planes are modcropped identically, so the two
-        slices are aligned by construction.
+        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`), and derives
+        LR from it with :func:`_degrade` — numerically identical to computing
+        both at build time, just performed at load time instead.
 
         Args:
             idx (int): Zero-based sub-image index.
@@ -222,10 +228,7 @@ class TrainDataset(HRCachedTrainDataset):
                 top : top + self.sub_img_size, left : left + self.sub_img_size, :
             ].copy()
 
-        with self._read_derived(img_idx) as plane:
-            lr_subimg = plane[
-                top : top + self.sub_img_size, left : left + self.sub_img_size, :
-            ].copy()
+        lr_subimg = _degrade(hr_subimg, self.scale)
 
         return self._to_tensor(lr_subimg), self._to_tensor(hr_subimg)
 

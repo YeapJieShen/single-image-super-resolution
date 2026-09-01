@@ -411,21 +411,21 @@ def test_validation_untouched_when_already_divisible(tiny_rgb_image_dir: Path):
         assert lr.shape == hr.shape
 
 
-def test_train_lr_is_sliced_from_the_whole_image_degradation_not_degraded_per_patch(
+def test_train_lr_is_still_degraded_per_patch_and_that_is_deliberate(
     shared_srcnn_train_ds: TrainDataset,
 ):
-    """The authors' ``demo_SR.m`` degrades the image and *then* extracts.
+    """SRCNN keeps the per-patch degradation, against the authors' order, on purpose.
 
-    Ships its own mutation: the patch-wise order is computed here too, and the
-    test fails if the dataset returns that instead. Without it the assertion
-    would pass on either implementation wherever the two happen to agree.
+    Caching the whole-image plane is what fixes the fidelity gap and is what
+    SRResNet does. SRCNN is pre-upsampled, so that plane is HR-sized: caching it
+    took the working set from 6.3 GB to 12.6 GB on a 12 GB box and a real
+    training loop went from 21.60 it/s to 1.02 it/s. This test pins the trade so
+    the slow variant is not reintroduced by someone reading only the issue.
     """
     from sisr.datasets.derived_cache import derive
     from sisr.datasets.srcnn import _degrade
 
     ds = shared_srcnn_train_ds
-    # An interior patch: at the image corner the out-of-patch taps and the
-    # out-of-image taps coincide, so the two orders agree there.
     n_cols = ds._img_n_cols[0]
     idx = n_cols + 1
     row, col = divmod(idx - ds._img_offsets[0], n_cols)
@@ -434,44 +434,26 @@ def test_train_lr_is_sliced_from_the_whole_image_degradation_not_degraded_per_pa
 
     lr, hr = ds[idx]
     got = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+    hr_arr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
 
+    assert np.array_equal(got, _degrade(hr_arr, ds.scale)), "LR must be the patch's own degradation"
+
+    # And it genuinely differs from the authors' order, so the gap is real and open.
     whole = np.array(Image.open(ds.img_paths[0]).convert("RGB"))
     plane = derive(whole, "bicubic", ds.scale)
-    expected = plane[top : top + ds.sub_img_size, left : left + ds.sub_img_size]
-    assert np.array_equal(got, expected)
-
-    hr_arr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
-    patchwise = _degrade(hr_arr, ds.scale)
-    assert not np.array_equal(got, patchwise), (
-        "dataset still degrades the extracted patch — the bicubic kernel's edge "
-        "taps resolve against the patch border instead of the real neighbours"
-    )
+    assert not np.array_equal(
+        got, plane[top : top + ds.sub_img_size, left : left + ds.sub_img_size]
+    ), "if these ever match, the fidelity gap is closed and this test should go"
 
 
-def test_subimg_size_and_scale_are_no_longer_coupled(tmp_path: Path):
-    """``33 % scale`` mattered only because ``_degrade`` ran per patch, giving each
-    patch its own LR sampling grid. Degrading the whole image first removes the
-    per-patch grid, so a size indivisible by scale is no longer a special case."""
-    from sisr.datasets.derived_cache import derive
-
-    rng = np.random.default_rng(seed=21)
-    arr = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
-    for scale in (2, 3, 4):
-        # One directory per scale: the raw-HR cache hashes the manifest only, so
-        # all three would share a database and LMDB refuses a second handle.
-        img_dir = tmp_path / f"x{scale}"
-        img_dir.mkdir()
-        Image.fromarray(arr).save(img_dir / "a.png")
-        ds = TrainDataset(
-            img_dir=img_dir, subimg_size=33, stride=11, scale=scale, build_num_workers=1
-        )
-        n_cols = ds._img_n_cols[0]
-        idx = n_cols + 1
-        row, col = divmod(idx, n_cols)
-        top, left = row * ds.stride, col * ds.stride
-        lr, _ = ds[idx]
-        got = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
-        plane = derive(arr, "bicubic", scale)
-        assert np.array_equal(got, plane[top : top + 33, left : left + 33]), (
-            f"scale {scale}: 33 % {scale} == {33 % scale} must not change anything"
-        )
+def test_srcnn_train_dataset_builds_no_derived_cache(tmp_path: Path):
+    """The opt-out must be real: no second database, and a clear error if read."""
+    rng = np.random.default_rng(seed=23)
+    Image.fromarray(rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)).save(tmp_path / "a.png")
+    ds = TrainDataset(img_dir=tmp_path, subimg_size=33, stride=11, scale=3, build_num_workers=1)
+    assert ds._derived is None
+    with pytest.raises(RuntimeError, match="derived_kind=None"):
+        with ds._read_derived(0):
+            pass
+    dbs = {p.name.split("_")[0] for p in (tmp_path / ".lmdb_cache").iterdir() if p.is_dir()}
+    assert dbs == {"hr"}, f"expected only the raw-HR database, found {dbs}"
