@@ -2742,3 +2742,82 @@ def test_benchmark_means_are_tagged_by_the_grammar_owner(monkeypatch):
     }
     cb._flush_buffer(module)
     assert "psnr.Set5.Y" in logged, f"benchmark tags did not follow the grammar: {sorted(logged)}"
+
+
+# ---------------------------------------------------------------------------
+# SRProgressBar: full run name, and a configurable metric set
+# ---------------------------------------------------------------------------
+
+
+def _bar_trainer(version, pbar_metrics):
+    """Minimal stand-in: get_metrics reads only loggers and progress_bar_metrics."""
+    from types import SimpleNamespace
+
+    logger = SimpleNamespace(version=version, name="n", save_dir=".", group_separator="/")
+    return SimpleNamespace(loggers=[logger], progress_bar_metrics=dict(pbar_metrics))
+
+
+_BAR_METRICS = {
+    "loss/train": 0.0177,
+    "loss/train/d": 0.0217,
+    "loss/val": 0.0049,
+    "psnr/val/RGB": 24.50,
+    "ssim/val/RGB": 0.827,
+}
+
+
+def test_progress_bar_shows_the_whole_run_name():
+    """Lightning's get_standard_metrics truncates unconditionally --
+    `version = version[-4:]`, a rule written for integer-ish versions like
+    'version_10' -> '_10'. This project names runs after what they ARE, so
+    'vgg54-scaled' rendered as 'aled', and two runs differing anywhere but the
+    last four characters were indistinguishable in the bar."""
+    from sisr.training.callbacks import SRProgressBar
+
+    items = SRProgressBar().get_metrics(_bar_trainer("vgg54-scaled", _BAR_METRICS), None)
+    assert items["v_num"] == "vgg54-scaled"
+
+
+def test_progress_bar_default_shows_todays_metric_set():
+    """No shipped config may change what it displays."""
+    from sisr.training.callbacks import SRProgressBar
+
+    items = SRProgressBar().get_metrics(_bar_trainer("run", _BAR_METRICS), None)
+    assert set(items) == {"v_num", *_BAR_METRICS}
+
+
+def test_progress_bar_can_be_narrowed_to_psnr_and_ssim():
+    """The requested view: only what is being watched, plus which run it is."""
+    from sisr.training.callbacks import SRProgressBar
+
+    bar = SRProgressBar(metrics=["psnr", "ssim"])
+    items = bar.get_metrics(_bar_trainer("vgg54-scaled", _BAR_METRICS), None)
+    assert set(items) == {"v_num", "psnr/val/RGB", "ssim/val/RGB"}
+
+
+def test_progress_bar_can_drop_psnr_and_ssim_for_an_adversarial_run():
+    """On a GAN variant PSNR/SSIM get worse by design, so the losses are what
+    is worth watching -- the filter has to subtract, not only select."""
+    from sisr.training.callbacks import SRProgressBar
+
+    items = SRProgressBar(metrics=["loss"]).get_metrics(_bar_trainer("g", _BAR_METRICS), None)
+    assert set(items) == {"v_num", "loss/train", "loss/train/d", "loss/val"}
+
+
+def test_progress_bar_rejects_an_unknown_metric_family():
+    """A typo would silently show an empty bar, which reads as "nothing is
+    being logged" rather than "you asked for a family that does not exist"."""
+    from sisr.training.callbacks import SRProgressBar
+
+    SRProgressBar(metrics=["psnr", "ssim", "loss", "lpips", "dists"])  # all valid
+    with pytest.raises(ValueError, match="metrics"):
+        SRProgressBar(metrics=["psnr", "pnsr"])
+
+
+def test_progress_bar_keeps_v_num_even_when_it_is_filtered_out():
+    """v_num is not a metric family and must survive any selection -- knowing
+    which run you are watching is the reason the bar was wrong to begin with."""
+    from sisr.training.callbacks import SRProgressBar
+
+    items = SRProgressBar(metrics=["psnr"]).get_metrics(_bar_trainer("abc-def", _BAR_METRICS), None)
+    assert items["v_num"] == "abc-def"

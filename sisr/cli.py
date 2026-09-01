@@ -33,10 +33,12 @@ from typing import Any, Literal
 import torch
 from jsonargparse import set_parsing_settings
 from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import Callback, ProgressBar
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
 from .export import to_onnx
 from .training import SRDataModule, SREvalConfig, SRLightning, SRTrainingConfig
+from .training.callbacks import SRProgressBar
 
 # The only keys a checkpoint's hyper_parameters can restore. Legacy checkpoints also
 # carry 'model/*'/'processor'/'criterion', which were TensorBoard-only and never part
@@ -168,6 +170,63 @@ class SRLightningCLI(LightningCLI):
         # trainer_class. No caller does that, and forbidding it would mean restating
         # LightningCLI's whole signature here.
         super().__init__(*args, trainer_class=trainer_class, **kwargs)  # type: ignore[misc]
+
+    @staticmethod
+    def _with_default_progress_bar(
+        config_callbacks: list[Any] | None,
+        callbacks: list[Callback],
+        enable_progress_bar: bool = True,
+    ) -> list[Callback]:
+        """Append :class:`SRProgressBar` unless a progress bar is already configured.
+
+        Lightning installs its own bar when none is given, and that bar
+        truncates the run name to four characters. So the project's bar has to
+        be supplied by default or it fixes nothing -- but it must **not** be
+        supplied unconditionally: ``Trainer`` raises
+        ``MisconfigurationException`` for two progress bars, and
+        ``LightningCLI._instantiate_trainer`` merges ``trainer_defaults`` by
+        appending. Passing it through ``trainer_defaults`` would therefore turn
+        any config that names its own progress bar into a hard startup failure.
+
+        ``enable_progress_bar=False`` is the third way this can go wrong:
+        ``Trainer`` refuses a progress-bar callback outright when the bar is
+        disabled, so a default injected regardless would break every run that
+        turns it off -- which is what the existing suite caught.
+
+        Args:
+            config_callbacks: Callbacks declared in the config's ``trainer``
+                section, which may be ``None``.
+            callbacks: Callbacks Lightning assembled separately.
+            enable_progress_bar: The trainer's own setting. ``False`` means no
+                bar at all, so nothing is added.
+
+        Returns:
+            *callbacks*, with an ``SRProgressBar`` appended only when the bar
+            is enabled and neither list already holds one.
+        """
+        if not enable_progress_bar:
+            return callbacks
+        existing = [*(config_callbacks or []), *callbacks]
+        if any(isinstance(cb, ProgressBar) for cb in existing):
+            return callbacks
+        return [*callbacks, SRProgressBar()]
+
+    def _instantiate_trainer(self, config: dict[str, Any], callbacks: list[Callback]) -> Trainer:
+        """Build the trainer, defaulting the progress bar to this project's.
+
+        Args:
+            config: The parsed ``trainer`` config section.
+            callbacks: Callbacks Lightning assembled for this run.
+
+        Returns:
+            The constructed trainer.
+        """
+        callbacks = self._with_default_progress_bar(
+            config.get("callbacks"),
+            callbacks,
+            enable_progress_bar=config.get("enable_progress_bar", True) is not False,
+        )
+        return super()._instantiate_trainer(config, callbacks)
 
     def parse_arguments(self, parser: LightningArgumentParser, args: ArgsType) -> None:
         """Parse CLI arguments, turning a known jsonargparse crash into an actionable error.
