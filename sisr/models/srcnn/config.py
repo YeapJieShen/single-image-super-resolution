@@ -17,6 +17,16 @@ from sisr.processors.base import SRProcessor
 from sisr.training.config import SREvalConfig, SRTrainingConfig
 
 
+def _authors_layer_lrs() -> list[float | list[float]]:
+    """``[weight_lr, bias_lr]`` per conv, from ``base_lr`` x the prototxt's ``lr_mult``.
+
+    A function rather than a lambda so the element type is ``float |
+    list[float]`` -- ``list`` is invariant, so an inferred
+    ``list[list[float]]`` will not satisfy the field.
+    """
+    return [[1.0e-4, 1.0e-5], [1.0e-4, 1.0e-5], [1.0e-5, 1.0e-5]]
+
+
 @dataclass
 class SRCNNTrainingConfig(SRTrainingConfig):
     """SRCNN-paper-faithful training defaults.
@@ -25,7 +35,9 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     layer by pairing with ``YChannelProcessor``) and
     uses a per-layer learning rate of ``1e-4`` for the feature-extraction
     and non-linear-mapping layers and ``1e-5`` for the reconstruction layer
-    — i.e. the last layer learns 10× slower. Weight initialization follows
+    — i.e. the last layer learns 10× slower — and, per the authors'
+    released prototxt, trains **every bias at a tenth of the base rate**
+    independently of that per-layer weight schedule. Weight initialization follows
     the paper's Gaussian schedule (``N(0, 0.001)`` with zero biases); set
     ``init_strategy='default'`` to fall back to PyTorch's built-in init.
     Override any field in YAML to deviate.
@@ -37,8 +49,11 @@ class SRCNNTrainingConfig(SRTrainingConfig):
     single fixed factor, so there is no one paper-correct value to pin.
 
     Args:
-        layer_lrs: Per-``Conv2d`` LRs ``[1e-4, 1e-4, 1e-5]`` matching the
-            paper's recipe. Set to ``None`` to disable per-layer LRs.
+        layer_lrs: Per-``Conv2d`` ``[weight_lr, bias_lr]`` pairs matching
+            the authors' released ``SRCNN_net.prototxt``, whose two ``param``
+            blocks per layer carry ``lr_mult`` 1/0.1, 1/0.1 and 0.1/0.1
+            against ``base_lr: 0.0001``. conv3 reads the same either way;
+            conv1 and conv2 do not. Set to ``None`` to disable per-layer LRs.
         init_strategy: ``'paper'`` (default) triggers the Gaussian
             init via ``SRCNN.reset_parameters`` in
             ``SRLightning``'s constructor;
@@ -50,7 +65,7 @@ class SRCNNTrainingConfig(SRTrainingConfig):
             paper actually specifies. Override in YAML to deviate.
     """
 
-    layer_lrs: list[float] | None = field(default_factory=lambda: [1.0e-4, 1.0e-4, 1.0e-5])
+    layer_lrs: list[float | list[float]] | None = field(default_factory=_authors_layer_lrs)
     init_strategy: Literal["default", "paper"] = "paper"
     init_std: float = 0.001
 

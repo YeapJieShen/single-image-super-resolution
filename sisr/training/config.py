@@ -48,12 +48,18 @@ class SRTrainingConfig:
     """How to train the SR model — affects optimizer setup and weight init.
 
     Args:
-        layer_lrs: Absolute per-``Conv2d`` LRs, one per ``Conv2d`` in
+        layer_lrs: Absolute per-``Conv2d`` LRs, one entry per ``Conv2d`` in
             module-traversal order. ``None`` (default) uses the optimizer's
             base ``lr`` uniformly. Only valid where every trainable parameter
             lives in a ``Conv2d`` — no BatchNorm / PReLU;
             ``SRLightning.configure_optimizers`` raises ``ValueError``
-            otherwise. Applies to a layer's weight *and* bias together.
+            otherwise. An entry is either a **float**, applying to that
+            layer's weight *and* bias together, or a
+            ``[weight_lr, bias_lr]`` **pair** splitting them — which is what
+            a Caffe prototxt's two per-layer ``param`` blocks express, and
+            the only way to state a bias schedule that differs from its
+            layer's weight schedule. LRs are absolute either way, so there
+            is no base rate to be relative to.
 
         example_input_shape: One sample's shape *excluding* batch (e.g.
             ``(1, 33, 33)``). Sets ``example_input_array`` so TensorBoard can
@@ -108,7 +114,7 @@ class SRTrainingConfig:
             configuration, never assume.
     """
 
-    layer_lrs: list[float] | None = None
+    layer_lrs: list[float | list[float]] | None = None
     example_input_shape: tuple[int, ...] | None = None
     init_strategy: Literal["default", "paper"] = "default"
     init_mean: float = 0.0

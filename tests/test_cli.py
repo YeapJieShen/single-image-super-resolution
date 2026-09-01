@@ -201,8 +201,10 @@ def test_srcnn_config_resolves_in_process():
     assert isinstance(m.eval_config, SRCNNEvalConfig)
     assert m.eval_config.crop_border == 3  # inherited-default check
     assert m.eval_config.ssim_impl == "wang"  # inherited-default check
-    # Paper recipe: reconstruction layer learns 10x slower than the other two.
-    assert m.training_config.layer_lrs == [1.0e-4, 1.0e-4, 1.0e-5]
+    # The authors' prototxt: reconstruction weights learn 10x slower than the other
+    # two layers', and every bias learns 10x slower than the base rate. The nested
+    # form also proves jsonargparse resolves layer_lrs' float-or-pair union.
+    assert m.training_config.layer_lrs == [[1.0e-4, 1.0e-5], [1.0e-4, 1.0e-5], [1.0e-5, 1.0e-5]]
     # Top-level optimizer block linked from YAML.
     assert cli.config.optimizer.class_path == "torch.optim.SGD"
     # The removed model_colorspace field must not reappear.

@@ -220,6 +220,85 @@ def test_configure_optimizers_per_layer_lrs():
     assert lrs == [1e-4, 1e-4, 1e-5]
 
 
+def test_configure_optimizers_per_blob_lrs():
+    """A 2-element entry splits a Conv2d into separate weight and bias LRs.
+
+    The SRCNN authors' prototxt carries two ``param`` blocks per layer
+    (weights, then bias), so conv1/conv2 biases train at a tenth of their
+    weights' rate. One LR per Conv2d cannot express that.
+    """
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(
+            layer_lrs=[[1.0e-4, 1.0e-5], [1.0e-4, 1.0e-5], [1.0e-5, 1.0e-5]]
+        ),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4, momentum=0.9),
+    )
+    out = lit.configure_optimizers()
+    opt = out[0][0] if isinstance(out, tuple) else out
+
+    convs = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+    lr_of = {}
+    for group in opt.param_groups:
+        for param in group["params"]:
+            lr_of[id(param)] = group["lr"]
+
+    assert [lr_of[id(c.weight)] for c in convs] == [1e-4, 1e-4, 1e-5]
+    assert [lr_of[id(c.bias)] for c in convs] == [1e-5, 1e-5, 1e-5]
+
+
+def test_configure_optimizers_scalar_and_pair_entries_mix():
+    """A bare float still means 'weight and bias together', alongside pairs."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(layer_lrs=[1.0e-4, [1.0e-4, 1.0e-5], 1.0e-5]),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    out = lit.configure_optimizers()
+    opt = out[0][0] if isinstance(out, tuple) else out
+
+    convs = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+    lr_of = {id(p): g["lr"] for g in opt.param_groups for p in g["params"]}
+
+    assert [lr_of[id(c.weight)] for c in convs] == [1e-4, 1e-4, 1e-5]
+    assert [lr_of[id(c.bias)] for c in convs] == [1e-4, 1e-5, 1e-5]
+
+
+def test_configure_optimizers_per_blob_wrong_pair_length_raises():
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(layer_lrs=[[1e-4, 1e-5, 1e-6], 1e-4, 1e-5]),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    with pytest.raises(ValueError, match="exactly 2"):
+        lit.configure_optimizers()
+
+
+def test_configure_optimizers_per_blob_bias_lr_without_bias_raises():
+    """A bias LR aimed at a bias-free Conv2d is a config error, not a silent drop."""
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    convs = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+    convs[1].bias = None
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(layer_lrs=[1e-4, [1e-4, 1e-5], 1e-5]),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    with pytest.raises(ValueError, match="has no bias"):
+        lit.configure_optimizers()
+
+
 def test_configure_optimizers_per_layer_count_mismatch_raises():
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
