@@ -10,6 +10,14 @@ architecture builds it first. Decoding a DIV2K PNG costs ~109ms, while the
 work. The random crop itself is **not** cached (that would defeat crop
 randomness); it is drawn fresh, from the cached raw array, on every
 ``__getitem__`` call.
+
+**The whole image is downscaled once, and the pair is cropped from HR and LR
+together** — the order BasicSR, EDSR and DIV2K's own distributed LR archives
+all use. Downscaling an extracted crop instead resolves the bicubic kernel's
+edge taps against the crop border: measured on DIV2K, every crop's interior
+stays bit-identical while the 2px LR border — 30.6% of a 24x24 patch — differs
+by up to 22/255. The whole-image plane is cached by
+:mod:`~sisr.datasets.derived_cache`.
 :class:`ValidationDataset` serves full images cropped to a multiple of
 ``scale``, uncached (each is decoded once per epoch, no repetition).
 
@@ -33,18 +41,25 @@ class TrainDataset(HRCachedTrainDataset):
 
     Every HR image is decoded once into an LMDB cache (uint8 RGB, whole, with
     its ``(H, W)`` header) — see :mod:`~sisr.datasets.base` for why. Each
-    ``__getitem__`` reads those bytes, takes a fresh random ``hr_crop_size``
-    square crop, and bicubic-downsamples by ``scale`` for the LR input.
-    **Only the decode is memoized, never the crop** — crop randomness has to
-    survive the cache.
+    ``__getitem__`` draws a fresh random position in **LR** coordinates and
+    slices the pair out of the cached whole-image HR and LR planes at that
+    position — the LR one already downscaled, so no kernel ever reaches past a
+    crop edge. **Only the planes are memoized, never the crop** — crop
+    randomness has to survive the cache.
+
+    Drawing in LR coordinates makes every HR offset a multiple of ``scale``,
+    exactly as EDSR does. That is 16x fewer distinct positions at x4 than
+    unaligned offsets would give — 153,892 rather than 2,452,645 on a
+    2040x1356 image — and still ~123M across an 800-image training set.
 
     Unlike :class:`sisr.datasets.srcnn.TrainDataset` there is **no
     downsample+upsample round-trip**: the LR is not upsampled back, the model
     owns the x``scale`` upsampling, and the LR tensor is
     ``hr_crop_size // scale`` a side.
 
-    **The checksum keys only on the file manifest**, so changing
-    ``hr_crop_size``/``crops_per_image``/``scale`` never invalidates the cache.
+    **The raw-HR checksum keys only on the file manifest**, so changing
+    ``hr_crop_size``/``crops_per_image``/``scale`` never invalidates it. The
+    derived LR plane is keyed separately and *does* carry ``scale``.
     HR is always RGB; Y/YCbCr selection happens downstream.
 
     Reference:
@@ -89,7 +104,12 @@ class TrainDataset(HRCachedTrainDataset):
         self.crops_per_image = crops_per_image
         self.lr_size = hr_crop_size // scale
         super().__init__(
-            img_dir, use_tqdm=use_tqdm, cache_dir=cache_dir, build_num_workers=build_num_workers
+            img_dir,
+            scale=scale,
+            derived_kind="lr",
+            use_tqdm=use_tqdm,
+            cache_dir=cache_dir,
+            build_num_workers=build_num_workers,
         )
 
     def _build(self, ctx: LMDBCacheBuildContext) -> None:
@@ -100,31 +120,41 @@ class TrainDataset(HRCachedTrainDataset):
         return len(self.img_paths) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns a ``(lr_tensor, hr_tensor)`` pair where ``hr_tensor`` is a random crop.
+        """Returns a ``(lr_tensor, hr_tensor)`` pair cropped from the whole-image planes.
 
-        ``hr_tensor`` is a random ``hr_crop_size`` square crop and
-        ``lr_tensor`` is its bicubic downscale by ``scale`` (side
-        ``hr_crop_size // scale``). Both are ``float32`` in ``[0, 1]``
-        with shape ``(3, H, W)``.
+        A random position is drawn in LR coordinates; ``lr_tensor`` is the
+        ``hr_crop_size // scale`` square there and ``hr_tensor`` the
+        ``hr_crop_size`` square at ``scale`` times that position, so the two are
+        aligned by construction. Both are ``float32`` in ``[0, 1]`` with shape
+        ``(3, H, W)``.
+
+        Raises:
+            ValueError: If the image is smaller than ``hr_crop_size`` after the
+                modcrop the LR plane was derived under.
         """
         img_idx = idx % len(self.img_paths)
 
-        with self._read_hr(img_idx) as arr:
-            h, w = arr.shape[:2]
-            if w < self.hr_crop_size or h < self.hr_crop_size:
+        with self._read_derived(img_idx) as lr_plane:
+            lr_h, lr_w = lr_plane.shape[:2]
+            if lr_h < self.lr_size or lr_w < self.lr_size:
                 raise ValueError(
-                    f"Image {self.img_paths[img_idx].name} ({w}x{h}) is smaller than "
-                    f"hr_crop_size {self.hr_crop_size}."
+                    f"Image {self.img_paths[img_idx].name} is {lr_w * self.scale}x"
+                    f"{lr_h * self.scale} after modcrop, smaller than hr_crop_size "
+                    f"{self.hr_crop_size}."
                 )
-            top = random.randint(0, h - self.hr_crop_size)
-            left = random.randint(0, w - self.hr_crop_size)
-            hr_arr = arr[top : top + self.hr_crop_size, left : left + self.hr_crop_size, :].copy()
+            top = random.randint(0, lr_h - self.lr_size)
+            left = random.randint(0, lr_w - self.lr_size)
+            lr_arr = lr_plane[top : top + self.lr_size, left : left + self.lr_size, :].copy()
 
-        lr_arr = resize(hr_arr, (self.lr_size, self.lr_size))
-        lr_tensor = self._to_tensor(lr_arr)
-        hr_tensor = self._to_tensor(hr_arr)
+        hr_top, hr_left = top * self.scale, left * self.scale
+        with self._read_hr(img_idx) as arr:
+            hr_arr = arr[
+                hr_top : hr_top + self.hr_crop_size,
+                hr_left : hr_left + self.hr_crop_size,
+                :,
+            ].copy()
 
-        return lr_tensor, hr_tensor
+        return self._to_tensor(lr_arr), self._to_tensor(hr_arr)
 
 
 class ValidationDataset(SRDataset):

@@ -23,6 +23,7 @@ import torch
 from PIL import Image
 
 from ..utils.cache import LMDBCache, LMDBCacheBuildContext
+from . import derived_cache
 from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
 
 
@@ -116,11 +117,25 @@ class HRCachedTrainDataset(SRDataset):
     SRResNet's train datasets need identically — so the two cannot drift on
     it (e.g. two different build progress-bar labels for what is, by design,
     one shared cache). A subclass supplies only its indexing scheme (grid vs
-    random crop, via :attr:`_img_sizes`) and its read-time degradation, built
-    on :meth:`_read_hr`.
+    random crop, via :attr:`_img_sizes`).
+
+    It owns **two** caches. The raw-HR one is shared verbatim across
+    architectures and scales. The derived-plane one
+    (:mod:`~sisr.datasets.derived_cache`) is per ``(kind, scale)`` and holds the
+    whole image already degraded, so a crop taken from it matches what the
+    reference pipelines produce — degrading the crop instead resolves the
+    bicubic kernel's edge taps against the crop border. Read them with
+    :meth:`_read_hr` and :meth:`_read_derived`.
 
     Args:
         img_dir: Directory of HR images.
+        scale: Upscaling factor the derived plane is built for.
+        derived_kind: Which plane to derive — see
+            :data:`~sisr.datasets.derived_cache.KINDS` — or ``None`` to build
+            no derived cache at all. ``None`` is not a convenience: a plane
+            that pushes the working set past RAM makes shuffled training
+            I/O-bound, which is measurably far worse than the per-item work
+            it removes. See :mod:`sisr.datasets.srcnn`.
         use_tqdm: Whether to display a progress bar during the LMDB build.
         cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
         build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
@@ -135,6 +150,8 @@ class HRCachedTrainDataset(SRDataset):
     def __init__(
         self,
         img_dir: str | Path,
+        scale: int,
+        derived_kind: str | None,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
@@ -144,6 +161,7 @@ class HRCachedTrainDataset(SRDataset):
         self._index_images(img_dir)
         self.build_num_workers = build_num_workers
         self._img_sizes = self._collect_sizes()
+        self._derived_kind = derived_kind
 
         cache_dir = Path(cache_dir) if cache_dir else self.img_dir / ".lmdb_cache"
         self._cache = LMDBCache(
@@ -155,6 +173,30 @@ class HRCachedTrainDataset(SRDataset):
             metadata={"format": FORMAT_TAG},
             build_fn=self._build,
             use_tqdm=use_tqdm,
+        )
+        # A sibling database in the same directory, not a second value in the one
+        # above: that cache's checksum deliberately ignores every derivation
+        # parameter, so a scale-dependent plane stored there would never be
+        # invalidated by a scale change.
+        self._derived = (
+            None
+            if derived_kind is None
+            else LMDBCache(
+                cache_dir=cache_dir,
+                name=derived_cache.cache_name(derived_kind, scale),
+                checksum=derived_cache.compute_checksum(self.img_paths, derived_kind, scale),
+                length=len(self.img_paths),
+                map_size=derived_cache.estimate_map_size(self._img_sizes, derived_kind, scale),
+                metadata={"format": derived_cache.cache_name(derived_kind, scale)},
+                build_fn=lambda ctx: ctx.parallel_build(
+                    items=self.img_paths,
+                    process_fn=derived_cache.process_derived_image,
+                    process_args=[(i, derived_kind, scale) for i in range(len(self.img_paths))],
+                    num_workers=self.build_num_workers,
+                    desc=f"Building {derived_kind} cache (x{scale})",
+                ),
+                use_tqdm=use_tqdm,
+            )
         )
 
     def _compute_checksum(self) -> str:
@@ -226,3 +268,30 @@ class HRCachedTrainDataset(SRDataset):
                 raise KeyError(key)
             h, w = HEADER.unpack_from(buf, 0)
             yield np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
+
+    @contextmanager
+    def _read_derived(self, img_idx: int) -> Iterator[np.ndarray]:
+        """Yields the cached derived plane at ``img_idx`` as an ``(H, W, 3)`` uint8 view.
+
+        Same zero-copy contract as :meth:`_read_hr` — the view is valid only
+        inside the ``with`` block. The plane was derived from the **whole**
+        image, so a slice of it is what the reference pipelines produce and a
+        degraded slice of :meth:`_read_hr` is not.
+
+        Raises:
+            KeyError: If the backing LMDB entry is missing (a corrupt or
+                incomplete cache).
+        """
+        if self._derived is None:
+            raise RuntimeError(
+                f"{type(self).__name__} was built with derived_kind=None, so there is "
+                f"no derived plane to read. Either pass a kind or derive at read time."
+            )
+        key = f"{self._derived_kind}_{img_idx:08d}"
+        with self._derived.get_buffer(key) as buf:
+            if buf is None:
+                raise KeyError(key)
+            h, w = derived_cache.HEADER.unpack_from(buf, 0)
+            yield np.frombuffer(buf, dtype=np.uint8, offset=derived_cache.HEADER.size).reshape(
+                h, w, 3
+            )

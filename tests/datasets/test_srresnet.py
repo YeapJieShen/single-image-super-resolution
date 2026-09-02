@@ -29,6 +29,17 @@ def varied_size_rgb_image_dir(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _locate(whole: np.ndarray, crop: np.ndarray, size: int) -> tuple[int, int]:
+    """Finds the (top, left) a crop was taken from. The draw is random, so the
+    test recovers the position rather than pinning the RNG."""
+    h, w = whole.shape[:2]
+    for top in range(0, h - size + 1):
+        for left in range(0, w - size + 1):
+            if (whole[top : top + size, left : left + size] == crop).all():
+                return top, left
+    raise AssertionError("crop not found in source image")
+
+
 def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     """LR must be the MATLAB-compatible bicubic downscale of the SAME HR crop
     the item returned — not merely a (3, h/scale, w/scale) tensor in [0, 1].
@@ -50,13 +61,27 @@ def test_train_dataset_getitem_lr_is_downscaled_hr(tiny_rgb_image_dir: Path):
     assert 0.0 <= lr.min() <= lr.max() <= 1.0
     assert 0.0 <= hr.min() <= hr.max() <= 1.0
 
-    # Reference: recover the HR crop as uint8 HWC and re-run the dataset's own
-    # resize primitive (MATLAB-compatible bicubic).
+    # Reference: the whole image downscaled once, sliced at the pair's own
+    # position -- the order BasicSR, EDSR and DIV2K's distributed LR all use.
+    # The position is recovered by matching the HR crop, since the draw is random.
+    from sisr.datasets.derived_cache import derive
+
     hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
-    lr_size = 16 // 4
-    lr_expected_arr = resize(hr_uint8, (lr_size, lr_size))
-    lr_expected = torch.from_numpy(lr_expected_arr).permute(2, 0, 1).float().div(255.0)
-    torch.testing.assert_close(lr, lr_expected, atol=1e-6, rtol=0)
+    whole = np.array(Image.open(ds.img_paths[0]).convert("RGB"))
+    plane = derive(whole, "lr", 4)
+    top, left = _locate(whole, hr_uint8, 16)
+    assert top % 4 == 0 and left % 4 == 0, "HR offsets must be scale-aligned"
+
+    expected = plane[top // 4 : top // 4 + 4, left // 4 : left // 4 + 4]
+    got = (lr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+    assert np.array_equal(got, expected)
+
+    # The mutation: downscaling the extracted crop is the order this replaced,
+    # and it must not be what came back.
+    assert not np.array_equal(got, resize(np.ascontiguousarray(hr_uint8), (4, 4))), (
+        "dataset still downscales the extracted crop -- the bicubic kernel's edge "
+        "taps resolve against the crop border instead of the real neighbours"
+    )
 
 
 def test_train_dataset_len_scales_with_crops_per_image(tiny_rgb_image_dir: Path):
@@ -326,3 +351,16 @@ def test_srresnet_validation_skips_non_image_files(tiny_rgb_image_dir: Path):
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert len(ds) == 3
     assert all(p.suffix == ".png" for p in ds.img_paths)
+
+
+def test_train_crop_offsets_are_always_scale_aligned(tiny_rgb_image_dir: Path):
+    """EDSR draws the offset in LR coordinates, which makes every HR offset a
+    multiple of scale. Nothing else keeps the two planes aligned: an unaligned
+    HR offset has no corresponding LR pixel to pair with."""
+    ds = TrainDataset(img_dir=tiny_rgb_image_dir, scale=4, hr_crop_size=16, crops_per_image=8)
+    whole = np.array(Image.open(ds.img_paths[0]).convert("RGB"))
+    for idx in range(0, len(ds), len(ds.img_paths)):
+        _, hr = ds[idx]
+        hr_uint8 = (hr.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+        top, left = _locate(whole, hr_uint8, 16)
+        assert top % 4 == 0 and left % 4 == 0, f"offset ({top}, {left}) is not scale-aligned"
