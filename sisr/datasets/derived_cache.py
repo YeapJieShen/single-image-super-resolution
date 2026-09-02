@@ -16,6 +16,15 @@ So the derived plane gets its own database, whose *name* and *checksum* both
 carry kind, scale and :data:`IMRESIZE_VERSION`. A stale one is unreachable
 rather than silently wrong.
 
+**Sizing matters more than it looks.** A shuffling training loader touches the
+whole cache, so what governs throughput is whether the raw-HR cache *plus* this
+plane fits in page cache. ``'lr'`` costs ``1/scale**2`` of the HR pixels and is
+negligible; ``'bicubic'`` is HR-sized and roughly doubles the working set.
+Crossing available RAM is a step change, not a gradient — measured at a **21x**
+throughput loss on the far side, with the GPU idle and the loop I/O-bound. Size
+the box against the dataset before choosing ``'bicubic'``; see
+:mod:`sisr.datasets.srcnn`.
+
 Deliberately torch-free, for the same reason :mod:`~sisr.datasets.hr_cache` is:
 :func:`process_derived_image` is the function pickled to ``ProcessPoolExecutor``
 build workers, and a spawned worker re-imports *its own defining module*.
