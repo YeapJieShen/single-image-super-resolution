@@ -72,6 +72,7 @@ def test_sr_eval_config_field_names():
         "ssim_impl",
         "perceptual_metrics",
         "lpips_net",
+        "quantize_uint8",
     }
 
 

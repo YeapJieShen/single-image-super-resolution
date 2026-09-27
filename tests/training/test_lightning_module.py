@@ -973,6 +973,7 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
         "ssim_impl": "wang",
         "perceptual_metrics": [],
         "lpips_net": "alex",
+        "quantize_uint8": False,
     }
     assert isinstance(lit.hparams["training_config"], dict)
     assert not any("/" in k for k in lit.hparams)

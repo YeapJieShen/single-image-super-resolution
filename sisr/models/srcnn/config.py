@@ -113,7 +113,11 @@ class SRCNNEvalConfig(SREvalConfig):
         psnr_channels: Overrides the base default to ``['RGB', 'Y']`` —
             ``'Y'`` is the paper's own metric; ``'RGB'`` is a supplementary
             aggregate.
+        quantize_uint8: Overrides the base default to ``True`` -- Dong et
+            al.'s demo_SR.m quantizes to uint8 before scoring PSNR; see
+            issue #276.
     """
 
     crop_border: int | None = None
     psnr_channels: list[str] = field(default_factory=lambda: ["RGB", "Y"])
+    quantize_uint8: bool = True

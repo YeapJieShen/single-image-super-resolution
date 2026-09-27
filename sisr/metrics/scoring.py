@@ -45,6 +45,19 @@ if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
 __all__ = ["SRScorer", "Scores", "metric_tag"]
 
 
+def _quantize_uint8(x: torch.Tensor) -> torch.Tensor:
+    """Round to the nearest representable 8-bit level, ties away from zero.
+
+    Mirrors Dong et al.'s demo_SR.m, which rounds Y (and the reconstruction)
+    to uint8 before scoring PSNR -- MATLAB's `round` ties away from zero, not
+    torch.round's ties-to-even (same convention as
+    sisr.utils.imresize._round_half_away_from_zero, on the degradation side).
+    Assumes x is already in [0, 1] (true for every tensor score() scores).
+    """
+    scaled = x.clamp(0.0, 1.0) * 255.0
+    return torch.floor(scaled + 0.5) / 255.0
+
+
 def metric_tag(family: str, scope: str, key: str) -> str:
     """Build a metric tag: ``{family}/{scope}/{key}``.
 
@@ -326,6 +339,12 @@ class SRScorer:
         """
         return perceptual_score(name, sr, hr, lpips_net=self.eval_config.lpips_net)
 
+    def _psnr_pair(self, sr: torch.Tensor, hr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(sr, hr) as `psnr()` should see them -- quantized iff the config asks for it."""
+        if not self.eval_config.quantize_uint8:
+            return sr, hr
+        return _quantize_uint8(sr), _quantize_uint8(hr)
+
     def score(self, sr_rgb: torch.Tensor, hr_rgb: torch.Tensor, *, crop: bool = True) -> Scores:
         """Score one aligned pair across every metric the config requests.
 
@@ -344,7 +363,7 @@ class SRScorer:
 
         tensors = self.metric_tensors(sr_rgb, hr_rgb)
         return Scores(
-            psnr={k: self.psnr(*tensors[k]) for k in self.eval_config.psnr_keys},
+            psnr={k: self.psnr(*self._psnr_pair(*tensors[k])) for k in self.eval_config.psnr_keys},
             ssim={k: self.ssim(*tensors[k]) for k in self.eval_config.ssim_keys},
             perceptual={
                 name: self.perceptual(name, sr_rgb, hr_rgb)

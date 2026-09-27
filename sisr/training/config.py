@@ -315,6 +315,17 @@ class SREvalConfig:
             exactly as an SSIM figure is comparable only within one
             ``ssim_impl``. Recorded in ``hparams`` and in every artifact's
             ``sisr_meta``, so any number can be traced back. Ignored by DISTS.
+
+        quantize_uint8: When True, round SR and HR to the nearest
+            representable 8-bit level before computing **PSNR only** (never
+            SSIM) -- ``round(x * 255) / 255``, ties away from zero. Matches
+            Dong et al.'s released ``demo_SR.m``, which quantizes Y and the
+            reconstruction to ``uint8`` before scoring PSNR; see issue #276.
+            Defaults to ``False``. ``SRCNNEvalConfig`` overrides this to
+            ``True``, since the quantization step is part of the SRCNN
+            paper's reproduced protocol, not this project's own eval
+            convention (which every other architecture's default config
+            leaves off).
     """
 
     crop_border: int | None = 0
@@ -324,6 +335,7 @@ class SREvalConfig:
     ssim_impl: Literal["wang", "daala"] = "wang"
     perceptual_metrics: list[str] = field(default_factory=list)
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
+    quantize_uint8: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
