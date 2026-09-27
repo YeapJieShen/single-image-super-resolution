@@ -498,11 +498,16 @@ class SRGANLightning(SRLightning):
         # the conversion is stated once, against this run's actual numbers.
         max_steps = self.trainer.max_steps
         if max_steps and max_steps > 0:
+            k = self.training_config.d_steps_per_g_step
+            # ceiling: smallest N with N + N//k >= max_steps
+            n_batches = -(-max_steps * k // (k + 1))
             rank_zero_info(
-                f"SRGAN takes 2 optimizer steps per batch, so max_steps={max_steps} is "
-                f"{max_steps // 2} batches. val_check_interval, every_n_batches and the "
-                f"hand-stepped scheduler milestones all count batches; max_steps and "
-                f"every_n_train_steps count optimizer steps."
+                f"SRGAN takes a discriminator step every batch and a generator "
+                f"step every {k} batch(es) (d_steps_per_g_step={k}), so "
+                f"max_steps={max_steps} is {n_batches} batches. val_check_interval, "
+                f"every_n_batches and the hand-stepped scheduler milestones all "
+                f"count batches; max_steps and every_n_train_steps count "
+                f"optimizer steps."
             )
 
         if self.trainer.world_size > 1:

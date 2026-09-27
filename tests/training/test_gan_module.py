@@ -6,6 +6,7 @@ curves keep moving, and the model trains wrongly. So each test drives a real
 whether a call happened.
 """
 
+import logging
 from types import SimpleNamespace
 
 import lightning
@@ -466,6 +467,35 @@ def test_global_step_counts_optimizer_steps_not_batches(k, n_batches, expected):
     trainer = fit_gan(build_gan_module(k=k), n_batches=n_batches)
 
     assert trainer.global_step == expected
+
+
+@pytest.mark.parametrize(
+    ("k", "max_steps", "expected_batches"),
+    [
+        # Multiples of k+1 where floor and ceiling agree
+        (1, 40, 20),
+        (2, 30, 20),
+        (3, 40, 30),
+        # Gap cases: max_steps not a multiple of k+1, but exact inversions exist
+        # (smallest N with N + N//k >= max_steps)
+        (1, 41, 21),
+        (2, 31, 21),
+        (2, 32, 22),
+        (3, 41, 31),
+        (3, 43, 33),
+    ],
+)
+def test_on_fit_start_logs_the_true_batch_count_for_any_k(caplog, k, max_steps, expected_batches):
+    """The logged batch count is the number of batches the run will actually
+    take for any k and any max_steps (#278). This inverts N + N // k = max_steps
+    for the smallest N that reaches max_steps."""
+    module = build_gan_module(k=k)
+    module.trainer = SimpleNamespace(world_size=1, max_steps=max_steps)
+
+    with caplog.at_level(logging.INFO):
+        module.on_fit_start()
+
+    assert f"is {expected_batches} batches" in caplog.text, caplog.text
 
 
 @_ignore_cpu_fit_warnings
