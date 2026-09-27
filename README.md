@@ -87,6 +87,11 @@ means writing a network and a config dataclass, not a new Lightning module. See
 
 SRGAN's network *is* SRResNet — only how it is trained differs. See [SRGAN](#srgan).
 
+**Training SRCNN needs ~16 GB of host RAM** (a ~12.6 GB working set for DIV2K-800);
+below that a shuffling loader goes I/O-bound and training silently slows by an order of
+magnitude, with no error. See the measurement in
+[`sisr/datasets/srcnn.py`](sisr/datasets/srcnn.py)'s module docstring.
+
 ## Losses
 
 The criterion is wired from YAML like everything else, and defaults to
@@ -202,14 +207,15 @@ templates:
 
 | Counted in global steps | Counted in batches |
 |---|---|
-| `trainer.max_steps`, `every_n_train_steps`, the `{step}` in checkpoint filenames | `val_check_interval`, `log_every_n_steps`, LR-scheduler milestones |
+| `trainer.max_steps`, `every_n_train_steps` | `val_check_interval`, `log_every_n_steps`, the `{step}` in checkpoint filenames, LR-scheduler milestones |
 
 `every_n_train_steps` needs an even value to fire at its stated cadence, since
 `global_step` only takes even values here — an odd one fires at twice its nominal
-period (mechanics in the template's comment).
+period (mechanics in [the configuration reference](docs/configuration.md)).
 
-TensorBoard's default x-axis is the batch counter, so a curve and the checkpoint pulled
-off it are a factor of 2 apart.
+TensorBoard's default x-axis is the batch counter, and `SRCheckpoint` stamps checkpoint
+filenames from that same counter rather than from `global_step`, so a curve and the
+checkpoint pulled off it agree to within one step, not a factor of 2.
 
 **PSNR and SSIM get worse by design.** An adversarial objective buys perceptual detail by
 spending distortion, which is what those two measure. The template's checkpoints are

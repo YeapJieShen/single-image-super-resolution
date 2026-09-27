@@ -215,7 +215,7 @@ Benchmark numbers only mean something if the inputs and the metrics match the pa
 both are pinned:
 
 - **LR generation** uses a vendored MATLAB-compatible `imresize`
-  ([`sisr/utils/imresize.py`](sisr/utils/imresize.py), MIT, attribution in the file header) rather than
+  ([`sisr/utils/imresize.py`](../sisr/utils/imresize.py), MIT, attribution in the file header) rather than
   OpenCV's bicubic. The two differ in ways that move PSNR: MATLAB antialiases by widening
   the kernel on downscale, and uses `a = -0.5` where OpenCV uses `a = -0.75`. Downscaling
   is verified byte-identical against the MATLAB-generated reference pairs distributed by
@@ -232,17 +232,17 @@ both are pinned:
   gaussian sigma scales with image height (`_h*(1.5/256)`) rather than staying fixed.
   The same image therefore scores differently under the two conventions, and a
   benchmark set's aggregate partly reflects the pixel dimensions of its images, not
-  only reconstruction quality. [`sisr/metrics/ssim.py`](sisr/metrics/ssim.py) ports daala's method,
+  only reconstruction quality. [`sisr/metrics/ssim.py`](../sisr/metrics/ssim.py) ports daala's method,
   verified against daala's own compiled C reference on 133 cases, and
   `SREvalConfig.ssim_impl` (`'wang'` or `'daala'`, see
-  [`sisr/training/config.py`](sisr/training/config.py)) selects between them —
+  [`sisr/training/config.py`](../sisr/training/config.py)) selects between them —
   `'wang'` is the base default, and
-  [`SRResNetEvalConfig`](sisr/models/srresnet/config.py) overrides it to `'daala'`
+  [`SRResNetEvalConfig`](../sisr/models/srresnet/config.py) overrides it to `'daala'`
   because that is the convention its paper used; SRCNN keeps `'wang'`, the field
   standard. The switch is **in place**: `ssim/val/RGB` and `ssim/val/Y` name the
   metric identically either way, and checkpoint filenames
-  (`sr-{step}-ssim_val_RGB={value:.4f}.ckpt`, built by
-  [`SRCheckpoint`](sisr/training/callbacks.py)) carry only the bare number — so
+  (`{prefix}_s{step}.ckpt`, built by
+  [`SRCheckpoint`](../sisr/training/callbacks.py)) carry no metric value at all — so
   neither the tag nor the filename reveals which convention produced a given value.
   It is recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
   SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
@@ -252,10 +252,10 @@ both are pinned:
   the discipline is the same as SSIM's. `SREvalConfig.lpips_net` selects `'alex'` (the
   default, and what the SR literature usually reports), `'vgg'` or `'squeeze'`; these
   are three different learned networks, not three reductions of one number, so they do
-  not agree on the same image. As with `ssim_impl`, the tag (`lpips/val`) and the
-  checkpoint filename carry the bare value and nothing about how it was produced — the
-  backbone is recorded in `hparams` and in every artifact's `sisr_meta`. DISTS has no
-  such knob.
+  not agree on the same image. As with `ssim_impl`, the tag (`lpips/val`) carries the
+  bare value and the checkpoint filename carries none, so neither says how it was
+  produced — the backbone is recorded in `hparams` and in every artifact's
+  `sisr_meta`. DISTS has no such knob.
 - **These are not idiosyncrasies of this project — two peer-reviewed surveys document
   the same field-wide inconsistencies.** Keleş, Yılmaz, Tekalp, Korkmaz and Doğan,
   ["On the Computation of PSNR for a Set of Images or Video"](https://arxiv.org/abs/2104.14868)
@@ -264,11 +264,12 @@ both are pinned:
   per-image PSNR values versus a single PSNR from pooled MSE — with the two diverging by
   up to ~2.5 dB on the same data. This project uses the former (their convention (a), not
   MSE-pooling): PSNR is computed one image at a time and the per-image values are then
-  averaged (`sisr/training/callbacks.py:365-370` computes each image's PSNR, `:440-442`
-  takes the arithmetic mean over them), independently confirmed by
-  [`SRLightning._mean_psnr`](sisr/training/lightning_module.py)
-  (`sisr/training/lightning_module.py:504-515`), whose own docstring names and rejects
-  MSE-pooling as the alternative. Wang, Chen and Hoi's
+  averaged ([`sisr/metrics/scoring.py`](../sisr/metrics/scoring.py)'s `SRScorer.psnr`
+  computes each image's PSNR per-image before any mean is taken;
+  `sisr/training/callbacks.py`'s `_flush_buffer` takes the arithmetic mean over a
+  benchmark set's buffered per-image scores), independently confirmed by
+  `SRScorer.psnr`'s own docstring, which names and rejects MSE-pooling as the
+  alternative. Wang, Chen and Hoi's
   ["Deep Learning for Image Super-resolution: A Survey"](https://arxiv.org/abs/1902.06068)
   (IEEE TPAMI 2020, arXiv:1902.06068, §II-D "Operating Channels") likewise finds no
   accepted best practice for which color space or channels to score SR on, with reported
@@ -280,7 +281,7 @@ both are pinned:
   Super-Resolution" (CVPRW 2017), downloaded from
   `https://cv.snu.ac.kr/research/EDSR/benchmark.tar`, SHA-256
   `80c21c333bbf6ceb5308b7243761f8284478274413a97b96f1d63e9045fd93e8` (recorded and checked
-  in [`tests/utils/test_imresize.py`](tests/utils/test_imresize.py)). This project's Set14 is the full
+  in [`tests/utils/test_imresize.py`](../tests/utils/test_imresize.py)). This project's Set14 is the full
   14-image variant from that distribution — published SR papers' "Set14" numbers have been
   reported over 11-, 12- and 14-image subsets depending on source, so this count is worth
   stating explicitly for anyone comparing numbers against this project's own.
@@ -291,10 +292,17 @@ both are pinned:
   leg only. SRCNN's degradation is bicubic-down *then* bicubic-up, so the second leg is
   verified against `Bicubic_up` references generated in MATLAB from those same LR images —
   the exact expression, sizes and directory layout are recorded in
-  [`tests/utils/test_imresize.py`](tests/utils/test_imresize.py)'s module docstring, so the
+  [`tests/utils/test_imresize.py`](../tests/utils/test_imresize.py)'s module docstring, so the
   data can be regenerated rather than trusted. Byte-equality currently holds on both legs,
   21 cases, none skipped. The tests skip cleanly when the reference data is absent, which
   keeps CI hermetic — **a skip there means a leg was not exercised, not that it passed**.
+- **The training datasets' own degradation order was independently checked against two
+  external reference sets.** Both train datasets degrade the whole HR image and only
+  then extract sub-images/patches, matching SRCNN's released `demo_SR.m` and the
+  field's reference implementations (BasicSR, EDSR, DIV2K's own distributed LR).
+  This is verified byte-exact against 357/357 LR images (Set5/Set14/B100 at x2, x3, x4)
+  of the MATLAB benchmark set referenced above and against 800/800 of DIV2K's own
+  distributed LR images.
 - **`pyiqa` (IQA-PyTorch) does not default to these conventions.** Its PSNR metric
   defaults to full RGB (`test_y_channel=False`), and its SSIM defaults to Y-channel but in
   full-range YIQ (`color_space='yiq'`) — not the studio-range BT.601 YCbCr that MATLAB's

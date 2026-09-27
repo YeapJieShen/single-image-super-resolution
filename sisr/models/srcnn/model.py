@@ -21,7 +21,7 @@ class SRCNN(SRModel):
     Args:
         num_channels: Input/output channel count (e.g. 3 for RGB, 1 for Y).
         num_filters: Filter count per conv layer, as a list or tuple (e.g.
-            ``(64, 32, 1)`` for the original architecture). Stored as a tuple.
+            ``(64, 32)`` for the original architecture). Stored as a tuple.
         kernel_sizes: Kernel size per conv layer, as a list or tuple (e.g.
             ``(9, 1, 5)`` for the original architecture). Stored as a tuple.
         padding: ``'valid'``, ``'same'``, or an explicit pixel count.

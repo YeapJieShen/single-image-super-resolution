@@ -51,6 +51,7 @@ The processor is the colorspace adapter between the data and the network:
 | `RGBProcessor` | RGB in `[0, 1]` | pre-2026-08-02 SRResNet runs |
 | `RGBSignedOutputProcessor` | LR `[0, 1]` in, HR/target `[-1, 1]` | SRResNet, SRGAN |
 | `YChannelProcessor` | Y channel only | SRCNN |
+| `YCbCrProcessor` | YCbCr in `[0, 1]` | no shipped architecture yet — for a 3-channel non-RGB model |
 
 `RGBSignedOutputProcessor` is the range Ledig et al. use (§3.2). **Changing the
 processor renumbers what the network is trained on**, and under SRGAN it also
@@ -256,7 +257,7 @@ So the units differ, and you must read this before changing any of them:
 `_batches_that_stepped` is also the **default x-axis every logged metric is plotted
 against**, which is why checkpoints are stamped with it: a saved file exists to be
 located on a curve, and one named in optimizer steps cannot be. So
-`sr-weights-10000.safetensors` is the state at TensorBoard x=10000 under every
+`SRResNet_x4_RGB_16B64F_s10000.safetensors` is the state at TensorBoard x=10000 under every
 paradigm. The artifact's own metadata records **both** counters under distinct names —
 `global_step` keeps meaning the optimizer count, `batch_step` is the axis above — so a
 reader that only knows the older field still reads a true value.
@@ -361,6 +362,7 @@ does not (5 → still every 5).
 | `SRCheckpoint` | Resumable `.ckpt`. |
 | `SRWeightsCheckpoint` | Distributable, optimizer-free `.safetensors` weights — roughly a third the size, and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
 | `GradNormLogger` | Logs `diag/grad_norm` every `every_n_batches`. |
+| `SRProgressBar` | Progress bar showing the full run name and only the metric families asked for. |
 | `LearningRateMonitor` | Lightning's, logging per step. |
 
 Our own cadence arguments are named `every_n_batches` and `every_n_val_runs`, following
