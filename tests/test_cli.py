@@ -7,6 +7,7 @@ installed ``sisr`` console script itself is smoke-tested in ``build.yml`` instea
 (a packaging concern, not something every test run needs to re-pay for).
 """
 
+import copy
 import sys
 import warnings
 from pathlib import Path
@@ -890,7 +891,13 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
         # filter makes fatal -- and only when no earlier test has seeded the
         # process, so the test passed in a full run and failed on its own.
         "seed_everything": 42,
-        "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
+        # momentum=0.9 is load-bearing: it gives every optimizer's `state` dict a
+        # non-empty momentum_buffer, which the resume test's vacuity guard requires
+        # (see the `assert all(o["state"] ...)` in _assert_resume_restored_step_and_weights).
+        "optimizer": {
+            "class_path": "torch.optim.SGD",
+            "init_args": {"lr": 1.0e-4, "momentum": 0.9},
+        },
         "data": {
             "train_dataset": {
                 "class_path": "sisr.datasets.srcnn.TrainDataset",
@@ -1197,20 +1204,129 @@ def test_reconstruct_ckpt_hparams_passes_through_current_nested_format():
     assert _reconstruct_ckpt_hparams(nested) == nested
 
 
+def _capture_on_train_start(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Patch ``SRLightning.on_train_start`` to record restored state, before any
+    further training runs in the resumed ``fit``.
+
+    ``on_train_start`` fires after both weight restore and
+    ``restore_training_state()`` (optimizers, schedulers, ``global_step``) have
+    already run, so it observes the restored state directly rather than a
+    from-scratch run's downstream effect after further steps.
+
+    Returns:
+        dict with keys ``"global_step"`` (int), ``"state_dict"`` (model
+        weights), ``"optimizers"`` (list of optimizer state dicts), and
+        ``"lr_schedulers"`` (list of scheduler state dicts).
+    """
+    from sisr.training.lightning_module import SRLightning
+
+    restored: dict[str, object] = {}
+    original = SRLightning.on_train_start
+
+    def capture(self):
+        restored["global_step"] = self.trainer.global_step
+        restored["state_dict"] = copy.deepcopy(self.state_dict())
+        restored["optimizers"] = [copy.deepcopy(o.state_dict()) for o in self.trainer.optimizers]
+        restored["lr_schedulers"] = [
+            copy.deepcopy(c.scheduler.state_dict()) for c in self.trainer.lr_scheduler_configs
+        ]
+        return original(self)
+
+    monkeypatch.setattr(SRLightning, "on_train_start", capture)
+    return restored
+
+
+def _assert_resume_restored_step_and_weights(
+    restored: dict[str, object], raw_checkpoint: dict, ckpt_step: int
+) -> None:
+    """Shared assertions for both the SRCNN and SRGAN resume tests.
+
+    Verifies that resume restores global_step, model weights, optimizer state,
+    and scheduler state from the checkpoint. A resume that restarts from scratch
+    (ignoring any of these) fails one or more assertions.
+
+    Args:
+        restored: The dict ``_capture_on_train_start`` returned.
+        raw_checkpoint: ``torch.load(ckpt_path, weights_only=True, ...)`` of the
+            checkpoint the resumed ``fit`` was given.
+        ckpt_step: The checkpoint's own ``global_step`` (``raw_checkpoint["global_step"]``).
+    """
+    assert restored["global_step"] == ckpt_step, (
+        f"resume must restore Trainer.global_step from the checkpoint "
+        f"({ckpt_step}), not reset it -- got {restored['global_step']}."
+    )
+    saved_state_dict = raw_checkpoint["state_dict"]
+    for key, value in saved_state_dict.items():
+        assert torch.equal(restored["state_dict"][key], value), (
+            f"{key} differs from the checkpoint's saved value at the start of the "
+            f"resumed fit -- resume must reload weights, not reinitialise them."
+        )
+    saved_optimizers = raw_checkpoint["optimizer_states"]
+    restored_optimizers = restored["optimizers"]
+    assert len(restored_optimizers) == len(saved_optimizers), (
+        f"optimizer count mismatch: checkpoint has {len(saved_optimizers)}, "
+        f"restored has {len(restored_optimizers)}."
+    )
+    assert all(o["state"] for o in saved_optimizers), (
+        "checkpoint optimizer state is empty; fixture must give every optimizer "
+        "non-empty state (momentum) or the optimizer check is vacuous."
+    )
+    for i, (saved_opt, restored_opt) in enumerate(
+        zip(saved_optimizers, restored_optimizers, strict=True)
+    ):
+        torch.testing.assert_close(
+            restored_opt,
+            saved_opt,
+            rtol=0,
+            atol=0,
+            msg=f"optimizer {i} differs from checkpoint state",
+        )
+    saved_lr_schedulers = raw_checkpoint["lr_schedulers"]
+    restored_lr_schedulers = restored["lr_schedulers"]
+    assert len(restored_lr_schedulers) == len(saved_lr_schedulers), (
+        f"lr_scheduler count mismatch: checkpoint has {len(saved_lr_schedulers)}, "
+        f"restored has {len(restored_lr_schedulers)}."
+    )
+    assert all(s["last_epoch"] > 0 for s in saved_lr_schedulers), (
+        "checkpoint scheduler is at last_epoch=0 (never stepped); fixture must "
+        "step every scheduler at least once or the scheduler check is vacuous."
+    )
+    for i, (saved_sched, restored_sched) in enumerate(
+        zip(saved_lr_schedulers, restored_lr_schedulers, strict=True)
+    ):
+        torch.testing.assert_close(
+            restored_sched,
+            saved_sched,
+            rtol=0,
+            atol=0,
+            msg=f"lr_scheduler {i} differs from checkpoint state",
+        )
+
+
 # Resuming into the same checkpoint dirpath the first fit call already populated
 # is exactly what a real resume does in production and is harmless here — silence
 # the resulting benign UserWarning rather than route the resumed run to a second
 # dirpath, which would be less faithful to how --ckpt_path resume is actually used.
 @pytest.mark.filterwarnings("ignore:Checkpoint directory .* exists and is not empty.:UserWarning")
 def test_fit_resume_via_ckpt_path_is_not_just_validate_test(
-    tiny_rgb_image_dir: Path, tmp_path: Path
+    tiny_rgb_image_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Regression: ``fit --ckpt_path`` (resume) shares the same broken code path as
     ``validate``/``test``/``export`` — ``_parse_ckpt_path`` runs unconditionally for
     every subcommand — and this project runs 1M-step jobs that resume from
     checkpoints, so resume specifically must keep working, not just fresh eval runs.
+
+    Beyond "does not raise": asserts the restored ``Trainer.global_step`` reflects
+    the checkpoint's own step (not reset to 0), that every weight is
+    byte-identical to the checkpoint's saved ``state_dict``, and that optimizer
+    state is restored at the moment training resumes (SRCNN has no scheduler)
+    -- so a resume that silently restarts from scratch (fresh loop/step state,
+    or a reinitialised model) fails this test instead of passing it merely
+    because the CLI call didn't raise.
     """
     config_path, ckpt_path = _build_srcnn_checkpoint(tiny_rgb_image_dir, tmp_path)
+    raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
+    ckpt_step = raw["global_step"]
 
     # A fresh cache_dir for the resumed run: reusing the first run's LMDB cache_dir
     # from a second Trainer in the same process trips a Windows file-lock/rebuild
@@ -1223,18 +1339,191 @@ def test_fit_resume_via_ckpt_path_is_not_just_validate_test(
     resume_config_path = tmp_path / "config_resume.yaml"
     resume_config_path.write_text(yaml.safe_dump(resume_config))
 
-    # Must not raise; --trainer.max_steps=2 forces the resumed run past the
-    # checkpoint's already-reached step 1, proving training actually continues.
-    _run_cli(
+    restored = _capture_on_train_start(monkeypatch)
+
+    # --trainer.max_steps=ckpt_step + 1 forces the resumed run past the
+    # checkpoint's already-reached step, proving training actually continues.
+    cli = _run_cli(
         [
             "fit",
             "--config",
             str(resume_config_path),
             "--ckpt_path",
             str(ckpt_path),
-            "--trainer.max_steps=2",
+            f"--trainer.max_steps={ckpt_step + 1}",
         ]
     )
+
+    _assert_resume_restored_step_and_weights(restored, raw, ckpt_step)
+    assert cli.trainer.global_step > ckpt_step
+
+
+def _build_srgan_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """Run a real SRGAN fit to global_step=4 and return (config_path, ckpt_path).
+
+    Covers the resume path SRCNN/SRResNet cannot: two optimizers (generator,
+    discriminator) and their own hand-stepped schedulers under manual
+    optimization (``SRGANLightning.automatic_optimization = False``).
+    ``criterion`` is plain ``MSELoss`` (never ``VGG19FeatureLoss``) so this stays
+    offline, and ``training_config.init_from=None`` so no pretrained artifact is
+    required. ``discriminator.hr_input_size=16`` matches ``hr_crop_size`` (must
+    be a positive multiple of 16 -- ``SRDiscriminator``'s own constraint) and
+    fits inside the 36x36 fixture images. ``drop_last=True`` on the train loader
+    is load-bearing: with 3 fixture images and batch_size=2, an undropped
+    trailing size-1 batch reaches the discriminator's final BatchNorm at
+    ``(1, 512, 1, 1)`` and raises "Expected more than 1 value per channel" --
+    unrelated to this test's regression, so sidestepped by never producing that
+    batch, exactly like the LMDB cache_dir side-step in the SRCNN helper above.
+    """
+    ckpt_dir = tmp_path / "checkpoints"
+    config = {
+        "model": {
+            "class_path": "sisr.training.SRGANLightning",
+            "init_args": {
+                "model": {
+                    "class_path": "sisr.models.srresnet.SRResNet",
+                    "init_args": {
+                        "scale": 2,
+                        "in_out_channels": 3,
+                        "hidden_channel": 4,
+                        "kernel_sizes": [3, 3, 3],
+                        "num_residual_blocks": 1,
+                        "padding": "same",
+                    },
+                },
+                "processor": {"class_path": "sisr.processors.RGBSignedOutputProcessor"},
+                "discriminator": {
+                    "class_path": "sisr.models.srgan.SRDiscriminator",
+                    "init_args": {"in_channels": 3, "hr_input_size": 16},
+                },
+                "training_config": {
+                    "class_path": "sisr.models.srgan.SRGANTrainingConfig",
+                    "init_args": {"scale": 2, "init_from": None},
+                },
+                "eval_config": {"class_path": "sisr.models.srgan.SRGANEvalConfig"},
+                "discriminator_optimizer": {
+                    "class_path": "torch.optim.SGD",
+                    "init_args": {"lr": 1.0e-4, "momentum": 0.9},
+                },
+                "discriminator_lr_scheduler": {
+                    "class_path": "torch.optim.lr_scheduler.StepLR",
+                    "init_args": {"step_size": 1, "gamma": 0.5},
+                },
+            },
+        },
+        "seed_everything": 42,
+        "optimizer": {
+            "class_path": "torch.optim.SGD",
+            "init_args": {"lr": 1.0e-4, "momentum": 0.9},
+        },
+        "lr_scheduler": {
+            "class_path": "torch.optim.lr_scheduler.StepLR",
+            "init_args": {"step_size": 1, "gamma": 0.5},
+        },
+        "data": {
+            "train_dataset": {
+                "class_path": "sisr.datasets.srresnet.TrainDataset",
+                "init_args": {
+                    "img_dir": str(tiny_rgb_image_dir),
+                    "scale": 2,
+                    "hr_crop_size": 16,
+                    "use_tqdm": False,
+                    "cache_dir": str(tmp_path / ".lmdb_cache"),
+                },
+            },
+            "val_dataset": {
+                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
+            },
+            "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0, "drop_last": True},
+            "val_dataloader_kwargs": {"batch_size": 1, "num_workers": 0},
+        },
+        "trainer": {
+            # -1, not 1: SRGAN takes 2 optimizer steps per batch (d then g), so
+            # max_steps (not max_epochs) must be the only stop condition, or a
+            # resumed run that legitimately needs a second batch hits
+            # `max_epochs` first and never advances past the checkpoint's step.
+            # max_steps=4 ensures the checkpoint's LR schedulers are at last_epoch=1,
+            # not fresh (last_epoch=0), so the resume test can verify scheduler state
+            # was actually restored.
+            "max_epochs": -1,
+            "max_steps": 4,
+            "limit_train_batches": 2,
+            "limit_val_batches": 1,
+            "num_sanity_val_steps": 0,
+            "accelerator": "cpu",
+            "devices": 1,
+            "logger": False,
+            "enable_progress_bar": False,
+            "enable_model_summary": False,
+            "default_root_dir": str(tmp_path),
+            "callbacks": [
+                {
+                    "class_path": "lightning.pytorch.callbacks.ModelCheckpoint",
+                    "init_args": {
+                        "dirpath": str(ckpt_dir),
+                        "filename": "sr-test",
+                        "every_n_train_steps": 1,
+                        "save_top_k": -1,
+                    },
+                }
+            ],
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    _run_cli(["fit", "--config", str(config_path)])
+
+    ckpt_files = sorted(ckpt_dir.glob("*.ckpt"))
+    assert ckpt_files, "fit did not write a checkpoint"
+    return config_path, ckpt_files[-1]
+
+
+@pytest.mark.filterwarnings("ignore:Checkpoint directory .* exists and is not empty.:UserWarning")
+@pytest.mark.filterwarnings("ignore:Using ModelCheckpoint with manual optimization.*:UserWarning")
+def test_srgan_fit_resume_via_ckpt_path_restores_step_and_weights(
+    tiny_rgb_image_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: the SRCNN resume test above cannot catch a bug specific to
+    manual optimization's resume path -- two optimizers (generator,
+    discriminator) and their hand-stepped schedulers (``SRGANLightning`` sets
+    ``automatic_optimization = False`` and steps schedulers itself in
+    ``on_train_batch_end``, see gan_module.py) -- since it never exercises that
+    path at all.
+
+    Asserts the same properties as the SRCNN test: restored ``global_step``,
+    model weights, optimizer states (including momentum buffers), and scheduler
+    states all match the checkpoint. A resume that ignores optimizers or
+    schedulers (e.g., a refactor that only restores ``restore_model``) fails
+    the assertions.
+    """
+    config_path, ckpt_path = _build_srgan_checkpoint(tiny_rgb_image_dir, tmp_path)
+    raw = torch.load(ckpt_path, weights_only=True, map_location="cpu")
+    ckpt_step = raw["global_step"]
+
+    resume_config = yaml.safe_load(config_path.read_text())
+    resume_config["data"]["train_dataset"]["init_args"]["cache_dir"] = str(
+        tmp_path / ".lmdb_cache_resume"
+    )
+    resume_config_path = tmp_path / "config_resume.yaml"
+    resume_config_path.write_text(yaml.safe_dump(resume_config))
+
+    restored = _capture_on_train_start(monkeypatch)
+
+    cli = _run_cli(
+        [
+            "fit",
+            "--config",
+            str(resume_config_path),
+            "--ckpt_path",
+            str(ckpt_path),
+            f"--trainer.max_steps={ckpt_step + 1}",
+        ]
+    )
+
+    _assert_resume_restored_step_and_weights(restored, raw, ckpt_step)
+    assert cli.trainer.global_step > ckpt_step
 
 
 def test_ckpt_path_reload_survives_subclass_mode(tmp_path, monkeypatch):
