@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import lightning
+import numpy as np
 import pytest
 import torch
 import torch._dynamo
@@ -999,20 +1000,84 @@ def test_forward_lr_matches_forward_sr_sr_component(srcnn_rgb_lit: SRLightning, 
 
 
 def test_predict_step_matches_forward_lr_rgb_path(srcnn_rgb_lit: SRLightning):
+    """predict_step composes _predict_upsample -> _forward_lr; kept in
+    sync with real predict_step behavior after #279 (previously
+    predict_step == _forward_lr(lr) directly, with no upsample)."""
     lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(0))
-    _, expected_sr = srcnn_rgb_lit._forward_lr(lr)
+    _, expected_sr = srcnn_rgb_lit._forward_lr(srcnn_rgb_lit._predict_upsample(lr))
     out = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    torch.testing.assert_close(out, expected_sr)
+
+
+@pytest.mark.parametrize("scale", [2, 3])
+def test_predict_step_pre_upsampled_contract_upscales_to_scale_x_input(scale: int):
+    """Regression for #279: PredictDataset serves raw, native-resolution LR
+    with no HR to derive an upsample from. predict_step must bicubic-upsample
+    it to scale x its size before a 'pre_upsampled'-contract model sees it —
+    previously the raw batch went straight into the model and the output was
+    never larger than the input, no matter what scale the model was trained
+    for. eval_padding='same' + .eval() isolates the upsample: with same
+    padding active at eval time the model's own conv stack doesn't change
+    H/W, so the only way the output can be exactly scale x the input is if
+    the upsample actually ran."""
+    model = SRCNN(
+        num_channels=3,
+        num_filters=(4, 4),
+        kernel_sizes=(3, 1, 3),
+        padding=0,
+        eval_padding="same",
+    )
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=scale),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lit.eval()
+    lr = torch.rand(1, 3, 10, 12, generator=torch.Generator().manual_seed(0))
+
+    out = lit.predict_step(lr, batch_idx=0)
+
+    assert out.shape == (1, 3, 10 * scale, 12 * scale)
+
+
+def test_predict_step_pre_upsampled_upsample_matches_direct_imresize_call(
+    srcnn_rgb_lit: SRLightning,
+):
+    """The predict-time upsample must be pixel-identical to the one that
+    builds training/validation LR (sisr.utils.imresize.resize), not merely
+    produce the right shape -- a different resize implementation (e.g.
+    torch.nn.functional.interpolate) could match the size with the wrong
+    pixels. Feeds a uint8-quantized LR image (not raw torch.rand floats) so
+    the float<->uint8 round trip in both the fixture and the code under test
+    is exact, not lossy through independent rounding."""
+    from sisr.utils.imresize import resize
+
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 256, size=(20, 24, 3), dtype=np.uint8)
+    lr = torch.from_numpy(arr).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
+
+    expected_up = resize(arr, (40, 48))  # srcnn_rgb_lit fixture: scale=2
+    expected_up_t = torch.from_numpy(expected_up).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
+    _, expected_sr = srcnn_rgb_lit._forward_lr(expected_up_t)
+
+    out = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+
     torch.testing.assert_close(out, expected_sr)
 
 
 def test_predict_step_y_channel_reconstructs_rgb(srcnn_y_lit: SRLightning):
     """Y-channel model output is 1-channel; predict_step must still return
-    RGB — the processor.reconstruct step stitches back bicubic LR Cb/Cr.
-    srcnn_y_lit uses 'valid' padding (33 -> 21), so the size check locks that
-    same shrinkage; the channel check is the actual regression guard."""
+    RGB -- the processor.reconstruct step stitches back bicubic LR Cb/Cr.
+    srcnn_y_lit's scale=2 upsamples 33 -> 66 before the model
+    (input_contract='pre_upsampled'); its 'valid' padding kernels
+    (9, 1, 5) then shrink 66 -> 54. The channel check is the actual
+    regression guard; the shape locks the post-#279 upsample + shrinkage
+    math."""
     lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(1))
     out = srcnn_y_lit.predict_step(lr, batch_idx=0)
-    assert out.shape == (2, 3, 21, 21)
+    assert out.shape == (2, 3, 54, 54)
 
 
 def test_predict_step_srresnet_upsamples_by_scale():
