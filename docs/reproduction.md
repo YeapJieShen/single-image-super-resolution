@@ -275,8 +275,8 @@ both are pinned:
   results differing by up to 44 dB depending on the choice — the same studio-range-vs-full
   and Y-vs-RGB distinctions this project names and pins above.
 - **Benchmark images are the EDSR authors' own benchmark distribution.** The Set5/Set14/
-  BSD100/Urban100 HR images and MATLAB-`imresize`-generated LR pairs behind every PSNR/SSIM
-  figure in this project come from Lim et al., "Enhanced Deep Residual Networks for Single
+  BSD100 HR images and MATLAB-`imresize`-generated LR pairs behind PSNR/SSIM
+  figures published in this project come from Lim et al., "Enhanced Deep Residual Networks for Single
   Image Super-Resolution" (CVPRW 2017), downloaded from
   `https://cv.snu.ac.kr/research/EDSR/benchmark.tar`, SHA-256
   `80c21c333bbf6ceb5308b7243761f8284478274413a97b96f1d63e9045fd93e8` (recorded and checked
@@ -284,8 +284,10 @@ both are pinned:
   14-image variant from that distribution — published SR papers' "Set14" numbers have been
   reported over 11-, 12- and 14-image subsets depending on source, so this count is worth
   stating explicitly for anyone comparing numbers against this project's own. Urban100
-  (Huang et al., CVPR 2015) was added in PR #281; byte-equality testing confirmed 300/300
-  LR pairs (100 images at X2/X3/X4) regenerated from the archive match the MATLAB originals.
+  (Huang et al., CVPR 2015) was added in issue #281; byte-equality testing confirmed 300/300
+  LR pairs (100 images at X2/X3/X4) regenerated from the archive match the MATLAB originals, and
+  it is wired into the validation/test datasets in the templates, but no published PSNR/SSIM
+  figures are reported over it yet.
   **Manga109 is not used**, so no figure here is over it — a table that reports it is
   measuring something this project has not measured.
 - **The upscale leg has its own reference data, generated rather than downloaded.** The

@@ -361,7 +361,7 @@ conclusion in either direction.
 |---|---|
 | Source code | Yes — MIT. |
 | Training data (DIV2K) | **No.** Fetched by the user; `data/` is not tracked. |
-| Benchmark data (Set5, Set14, BSD100, Urban100) | **No.** Fetched by the user from the EDSR authors' archive, whose SHA-256 is pinned under [Comparability](docs/reproduction.md#comparability) so the copy can be checked without being shipped. |
+| Benchmark data (Set5, Set14, BSD100, Urban100) | **No.** Fetched by the user from the EDSR authors' archive, whose SHA-256 is pinned under [Comparability](docs/reproduction.md#comparability) so the copy can be checked without being shipped. Urban100 is fetched via [`tests/reference/fetch_urban100.py`](tests/reference/fetch_urban100.py). |
 | Generated LR / `Bicubic_up` reference pairs | **No** — they are derivatives of the above and inherit whatever those carry. |
 | Trained weights | Not yet. MIT when released, under the caveat above. |
 | Benchmark output images (SR reconstructions) | Not yet, and **not without a per-set check first**. |

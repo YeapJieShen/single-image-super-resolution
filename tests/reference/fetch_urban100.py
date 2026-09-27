@@ -21,6 +21,12 @@ Populates data/reference/Urban100/{HR,LR_bicubic/{X2,X3,X4}} (for byte-equality
 testing) and data/Urban100_HR (for validation/test datasets), using the same
 layout Set5/Set14/B100 already use. Idempotent: does nothing and exits 0 if
 both directories already look populated.
+
+Note: the daala_c_reference test (tests/metrics/test_ssim.py::test_real_image_
+matches_daala_c_reference) expects Set5/Set14/BSD100 data in data/reference/ and
+will fail with an AssertionError if only Urban100 is present. This is expected
+when fetching Urban100 in isolation — fetch all reference sets separately if you
+plan to run the full test suite.
 """
 
 import hashlib
