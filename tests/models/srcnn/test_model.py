@@ -93,6 +93,35 @@ def test_check_architecture_empty_tuple_raises():
         SRCNN(num_channels=3, num_filters=(), kernel_sizes=())
 
 
+@pytest.mark.parametrize(
+    "kernel_sizes,even_kernel_list",
+    [
+        ((9, 1, 4), "[4]"),  # even in last position
+        ((4, 1, 5), "[4]"),  # even in first position
+        ((9, 2, 5), "[2]"),  # even in middle position
+        ((9, 1, 6), "[6]"),  # different even value
+        ((4, 2, 5), "[4, 2]"),  # multiple evens
+    ],
+    ids=["even-last", "even-first", "even-middle", "even-different-value", "multiple-evens"],
+)
+def test_check_architecture_rejects_even_kernel_size(kernel_sizes, even_kernel_list):
+    """An even kernel has no symmetric center under valid convolution;
+    left unchecked, center_crop's round-half-to-even offset would silently
+    misalign HR/SR (issue #277). The error message must name which kernels
+    are even."""
+    with pytest.raises(ValueError, match="odd kernel") as excinfo:
+        SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=kernel_sizes)
+    # Verify the message lists the even kernel size(s).
+    assert even_kernel_list in str(excinfo.value)
+
+
+def test_check_architecture_accepts_all_odd_kernel_sizes():
+    """Odd-kernel configs, including the shipped (9, 1, 5), must keep
+    constructing without error after the even-kernel check lands."""
+    SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5))
+    SRCNN(num_channels=3, num_filters=(64, 32, 16), kernel_sizes=(9, 1, 3, 5))
+
+
 def test_hparams_property_round_trips():
     model = SRCNN(
         num_channels=3,
@@ -309,7 +338,7 @@ def test_eval_padding_rejects_anything_but_same(bad):
 
 
 def test_eval_padding_rejects_an_even_kernel():
-    """`same` is not expressible for an even kernel without an asymmetric pad."""
+    """Even kernels are rejected unconditionally by _check_architecture."""
     with pytest.raises(ValueError, match="odd kernel"):
         SRCNN(
             num_channels=1,
