@@ -13,6 +13,8 @@ optimizer:
     lr: 1.0e-4
 
 # The generator's schedule. The discriminator's mirrors it so both decay together.
+# SRGANLightning steps schedulers by hand once per batch (manual optimization
+# skips Lightning's own per-epoch default) -- milestones are counted in BATCHES.
 lr_scheduler:
   class_path: torch.optim.lr_scheduler.MultiStepLR
   init_args:
