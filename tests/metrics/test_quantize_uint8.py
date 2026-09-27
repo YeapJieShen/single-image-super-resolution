@@ -10,13 +10,11 @@ from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNNEvalConfig
 from sisr.training.config import SREvalConfig
 
-# Neither tensor sits on a uint8 grid line (hr*255 = [128.01, 76.755,
-# 178.245], sr*255 = [129.7695, 74.5875, 180.4125]) so quantizing changes
-# both. Quantized levels (ties away from zero): hr -> [128, 77, 178],
-# sr -> [130, 75, 180]. FLOAT_PSNR/QUANTIZED_PSNR were computed once via
-# torchmetrics.functional.image.peak_signal_noise_ratio directly on these
-# tensors (and their quantized versions) -- an independent calculation, not
-# a derivation mirroring the code under test.
+# General PSNR fixture: neither value sits on a uint8 grid line.
+# hr*255 = [128.01, 76.755, 178.245], sr*255 = [129.7695, 74.5875, 180.4125],
+# so quantizing changes both. Quantized levels (ties away from zero):
+# hr -> [128, 77, 178], sr -> [130, 75, 180].
+# Values computed via torchmetrics.functional.image.peak_signal_noise_ratio.
 HR = torch.tensor([[[[0.502, 0.301, 0.699]]]])
 SR = torch.tensor([[[[0.5089, 0.2925, 0.7075]]]])
 FLOAT_PSNR = 41.93571091
@@ -87,3 +85,47 @@ def test_quantize_uint8_does_not_affect_ssim():
     ssim_off = _ssim_scorer(False).score(SSIM_SR, SSIM_HR).ssim["RGB"].item()
     ssim_on = _ssim_scorer(True).score(SSIM_SR, SSIM_HR).ssim["RGB"].item()
     assert ssim_on == ssim_off
+
+
+def test_quantize_uint8_ties_away_from_zero():
+    """Mutations M3 (ties-to-even) and M8 (ties half-down) both fail this.
+
+    A tie occurs when x*255 = k + 0.5 for integer k. This fixture has one tie
+    (hr) and one non-tie (sr) so both M3 and M8 diverge from the correct
+    ties-away-from-zero convention in the same way.
+
+    Fixture (in float64 for exact ties/non-ties):
+      hr = 126.5/255  ⟹  hr*255 = 126.5 (tie)
+      sr = 129.0/255  ⟹  sr*255 = 129.0 (non-tie, integer)
+
+    Correct rounding (ties away from zero):
+      hr*255 = 126.5  ⟹ rounds away from zero to 127
+      sr*255 = 129.0  ⟹ rounds to 129
+      MSE = ((129 - 127)/255)² = (2/255)²
+      ⟹ PSNR = 20*log10(255/2) = 42.110204 dB
+
+    M3 (ties-to-even: torch.round):
+      hr*255 = 126.5  ⟹ rounds to 126 (nearest even)
+      sr*255 = 129.0  ⟹ rounds to 129
+      MSE = ((129 - 126)/255)² = (3/255)²
+      ⟹ PSNR = 20*log10(255/3) = 38.588379 dB (wrong)
+
+    M8 (ties half-down: torch.ceil(x*255 - 0.5)):
+      hr*255 = 126.5  ⟹ rounds down to 126
+      sr*255 = 129.0  ⟹ rounds to 129
+      MSE = ((129 - 126)/255)² = (3/255)²
+      ⟹ PSNR = 20*log10(255/3) = 38.588379 dB (same wrong result as M3)
+    """
+    # Fixture in float64 so 126.5/255 and 129.0/255 are exact
+    hr_tie = torch.tensor([[[[126.5 / 255.0]]]], dtype=torch.float64)
+    sr_nontie = torch.tensor([[[[129.0 / 255.0]]]], dtype=torch.float64)
+
+    # Correct rounding (away from zero): 127 - 129 -> MSE=(2/255)² -> PSNR=42.11 dB
+    expected_psnr_correct = 42.110204
+
+    scored_on = _psnr_scorer(True).score(sr_nontie, hr_tie).psnr["RGB"].item()
+
+    # With quantization via ties-away-from-zero, we expect 42.11 dB.
+    # Both M3 (ties-to-even) and M8 (ties half-down) would give 38.59 dB,
+    # so either mutation fails this assertion.
+    assert scored_on == pytest.approx(expected_psnr_correct, abs=1e-4)

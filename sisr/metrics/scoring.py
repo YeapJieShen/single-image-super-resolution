@@ -35,7 +35,7 @@ import torchmetrics.functional.image
 
 from ..colorspace import rgb_to_ycbcr_studio
 from .perceptual import perceptual_score
-from .ssim import daala_ssim
+from .ssim import daala_ssim, quantize_u8
 
 if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
     # runtime import would make this package depend on `sisr.training` — which
@@ -53,9 +53,11 @@ def _quantize_uint8(x: torch.Tensor) -> torch.Tensor:
     torch.round's ties-to-even (same convention as
     sisr.utils.imresize._round_half_away_from_zero, on the degradation side).
     Assumes x is already in [0, 1] (true for every tensor score() scores).
+
+    Reuses :func:`quantize_u8` from ``ssim``, which handles the clamping and
+    rounding in float64 to avoid precision loss on ties.
     """
-    scaled = x.clamp(0.0, 1.0) * 255.0
-    return torch.floor(scaled + 0.5) / 255.0
+    return quantize_u8(x) / 255.0
 
 
 def metric_tag(family: str, scope: str, key: str) -> str:
