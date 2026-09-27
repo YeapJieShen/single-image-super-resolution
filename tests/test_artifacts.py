@@ -1,5 +1,7 @@
 """The distributable artifact's own contract: header encoding, refusal, drift."""
 
+import functools
+import importlib
 import json
 
 import pytest
@@ -7,6 +9,11 @@ import safetensors.torch
 import torch
 
 from sisr import artifacts
+from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
+from sisr.models.srresnet import SRResNet, SRResNetEvalConfig, SRResNetTrainingConfig
+from sisr.processors import RGBSignedOutputProcessor, YChannelProcessor
+from sisr.training import SRLightning
+from sisr.training.metadata import build_metadata
 
 _META = {
     "format": "sisr-meta-v2",
@@ -153,3 +160,47 @@ def test_stem_omits_an_absent_part_rather_than_rendering_it():
         "io": {"scale": 2, "output_colorspace": "Y"},
     }
     assert artifacts.stem(meta) == "Thing_x2_Y"
+
+
+def _srcnn_module() -> SRLightning:
+    return SRLightning(
+        model=SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(5, 1, 3), padding=0),
+        processor=YChannelProcessor(),
+        training_config=SRCNNTrainingConfig(scale=3),
+        eval_config=SRCNNEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+def _srresnet_module() -> SRLightning:
+    return SRLightning(
+        model=SRResNet(scale=4, hidden_channel=8, num_residual_blocks=1, kernel_sizes=(5, 3, 5)),
+        processor=RGBSignedOutputProcessor(),
+        training_config=SRResNetTrainingConfig(),
+        eval_config=SRResNetEvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+
+
+@pytest.mark.parametrize(
+    "make_module", [_srcnn_module, _srresnet_module], ids=["SRCNN", "SRResNet"]
+)
+def test_header_model_entry_rebuilds_the_model_it_describes(tmp_path, make_module):
+    """The header records the model as ``{class_path, init_args}`` -- the
+    constructor's own shape -- so feeding it back must rebuild the same model.
+
+    The metadata builder writes sequence hparams as lists (JSON has no tuple),
+    and a constructor that accepted only tuples refused its own header.
+    """
+    module = make_module()
+    model = module.model
+    path = tmp_path / f"m{artifacts.SUFFIX}"
+    artifacts.save(path, model.state_dict(), build_metadata(module))
+
+    tensors, meta = artifacts.load(path)
+    module_path, _, name = meta["model"]["class_path"].rpartition(".")
+    cls = getattr(importlib.import_module(module_path), name)
+    rebuilt = cls(**meta["model"]["init_args"])
+
+    assert rebuilt.hparams == model.hparams
+    rebuilt.load_state_dict(tensors, strict=True)

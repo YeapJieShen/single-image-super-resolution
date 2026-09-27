@@ -86,6 +86,15 @@ def test_check_architecture_wrong_kernel_sizes_length_raises():
         SRResNet(scale=2, kernel_sizes=(9, 3))
 
 
+@pytest.mark.parametrize("value", ["939", 9], ids=["str", "int"])
+def test_check_architecture_non_sequence_kernel_sizes_raises(value):
+    """A list is accepted (it is what a JSON header holds), but a str or a scalar
+    must still fail as a ValueError naming the parameter, not a TypeError from
+    comparing a character or iterating an int."""
+    with pytest.raises(ValueError, match="kernel_sizes"):
+        SRResNet(scale=2, kernel_sizes=value)
+
+
 def test_check_architecture_nonpositive_num_residual_blocks_raises():
     """num_residual_blocks <= 0 must raise a clear ValueError instead of
     silently building an empty residual Sequential."""

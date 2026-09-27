@@ -5,11 +5,12 @@ Adversarial Network (https://arxiv.org/pdf/1609.04802).
 """
 
 import math
+from collections.abc import Sequence
 from typing import ClassVar, Literal
 
 import torch
 
-from sisr.models.base import SRModel
+from sisr.models.base import SRModel, as_int_tuple
 
 
 class SRResidualBlock(torch.nn.Module):
@@ -113,7 +114,8 @@ class SRResNet(SRModel):
         scale: Upscaling factor. Must be a power of 2.
         in_out_channels: Input/output channel count (e.g. 3 for RGB).
         hidden_channel: Feature channel count used in the residual/upsample blocks.
-        kernel_sizes: Kernel sizes for the head, residual, and tail conv layers.
+        kernel_sizes: Kernel sizes for the head, residual, and tail conv layers,
+            as a list or tuple. Stored as a tuple.
         num_residual_blocks: Number of residual blocks in the network.
         padding: Padding for the conv layers, applied to **every** convolution
             including the upsample block's. Must be shape-preserving --
@@ -129,12 +131,13 @@ class SRResNet(SRModel):
         scale: int,
         in_out_channels: int = 3,
         hidden_channel: int = 64,
-        kernel_sizes: tuple[int, ...] = (9, 3, 9),
+        kernel_sizes: Sequence[int] = (9, 3, 9),
         num_residual_blocks: int = 16,
         padding: str | int = "same",
     ):
         super().__init__()
 
+        kernel_sizes = as_int_tuple("kernel_sizes", kernel_sizes)
         self._check_scale(scale)
         self._check_architecture(kernel_sizes, num_residual_blocks)
         self._check_padding(padding, kernel_sizes)
@@ -241,8 +244,6 @@ class SRResNet(SRModel):
 
     def _check_architecture(self, kernel_sizes: tuple[int, ...], num_residual_blocks: int) -> None:
         """Validates kernel_sizes (length-3, positive ints) and num_residual_blocks (positive)."""
-        if not isinstance(kernel_sizes, tuple):
-            raise ValueError(f"kernel_sizes must be a tuple. Got {type(kernel_sizes)}.")
         if len(kernel_sizes) != 3:
             raise ValueError(
                 f"kernel_sizes must have exactly 3 elements for the head, residual, "

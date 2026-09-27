@@ -4,11 +4,12 @@ Reference: Image Super-Resolution Using Deep Convolutional Networks
 (https://arxiv.org/pdf/1501.00092).
 """
 
+from collections.abc import Sequence
 from typing import Any, ClassVar, Literal
 
 import torch
 
-from sisr.models.base import SRModel
+from sisr.models.base import SRModel, as_int_tuple
 
 
 class SRCNN(SRModel):
@@ -19,10 +20,10 @@ class SRCNN(SRModel):
 
     Args:
         num_channels: Input/output channel count (e.g. 3 for RGB, 1 for Y).
-        num_filters: Filter count per conv layer (e.g. ``(64, 32, 1)`` for
-            the original architecture).
-        kernel_sizes: Kernel size per conv layer (e.g. ``(9, 1, 5)`` for the
-            original architecture).
+        num_filters: Filter count per conv layer, as a list or tuple (e.g.
+            ``(64, 32, 1)`` for the original architecture). Stored as a tuple.
+        kernel_sizes: Kernel size per conv layer, as a list or tuple (e.g.
+            ``(9, 1, 5)`` for the original architecture). Stored as a tuple.
         padding: ``'valid'``, ``'same'``, or an explicit pixel count.
             Defaults to ``'valid'``.
         eval_padding: Padding to use outside training mode, or ``None``
@@ -41,14 +42,16 @@ class SRCNN(SRModel):
     def __init__(
         self,
         num_channels: int,
-        num_filters: tuple[int, ...],
-        kernel_sizes: tuple[int, ...],
+        num_filters: Sequence[int],
+        kernel_sizes: Sequence[int],
         padding: str | int = "valid",
         eval_padding: Literal["same"] | None = None,
         eval_padding_mode: str = "replicate",
     ):
         super().__init__()
 
+        num_filters = as_int_tuple("num_filters", num_filters)
+        kernel_sizes = as_int_tuple("kernel_sizes", kernel_sizes)
         self._check_architecture(num_filters, kernel_sizes)
         if eval_padding is not None:
             if eval_padding != "same":
@@ -104,13 +107,11 @@ class SRCNN(SRModel):
     def _check_architecture(
         self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]
     ) -> None:
-        """Validates num_filters/kernel_sizes are same-length positive-int tuples."""
+        """Validates num_filters/kernel_sizes lengths agree and their values are positive."""
         for i, name in zip(
             [num_filters, kernel_sizes], ["num_filters", "kernel_sizes"], strict=False
         ):
-            if not isinstance(i, tuple):
-                raise ValueError(f"{name} must be tuples. Got {type(i)}.")
-            elif len(i) == 0:
+            if len(i) == 0:
                 raise ValueError(f"{name} cannot be empty. Got {i}.")
             elif len(i) < 3:
                 if len(i) < 2 and name == "num_filters":
