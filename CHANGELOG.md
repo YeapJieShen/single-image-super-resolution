@@ -77,6 +77,9 @@ notice.
 - **LR-only prediction path** — `PredictDataset`, `predict_step`, and `SRPredictionWriter`.
 - **LMDB HR caching** shared by both architectures, with an advisory build lock so
   concurrent builds do not duplicate work.
+- **`SRProgressBar`** — a progress bar showing the whole run name and only the metric
+  families asked for, instead of Lightning's truncated version string and every
+  `prog_bar=True` metric regardless of relevance.
 
 ### Changed
 
@@ -126,6 +129,15 @@ Three of these break existing setups. Nothing is released yet, so they break no 
 - **Google-style docstrings are enforced** via ruff's pydocstyle rules.
 - **`torchmetrics>=1.9` floor** (was `>=1.4`) — the version DISTS was verified present in
   on this project. Lowering it means testing the lower version, not guessing.
+- **Every metric tag routes through one grammar's declared owner** instead of being
+  assembled ad hoc at each call site.
+- **Scale resolution is one code path, and it always returns an int** — the second
+  resolution that could disagree with it is gone.
+- **`_collect_batch`'s two guarded emissions are their own methods**, named for what
+  each does rather than sharing one body.
+- **`metadata.class_path` is public** — it already had a caller outside its module.
+- **The HR cache checksum keys on file name and size only**, not content — now stated
+  explicitly rather than left implicit.
 
 ### Fixed
 
@@ -158,6 +170,22 @@ Three of these break existing setups. Nothing is released yet, so they break no 
 - **SRCNN's paper weight-init std** corrected to the published `0.001`.
 - **`example_input_shape` pointed at the wrong size**, defeating compile warm-up and
   misreporting FLOPs.
+- **A config value that silently produced an incomparable number is now rejected**
+  rather than accepted and scored against a different convention than the paper's.
+- **SRCNN's validation HR is modcropped**, matching the authors' degradation order.
+- **An unbound VGG loss now refuses to compute** instead of silently assuming a
+  `[0, 1]` input range.
+- **SRResNet's padding is honoured everywhere**, and a padding value that cannot work
+  is now rejected instead of silently misaligning HR and SR.
+- **A failed LMDB write transaction is aborted** instead of left for the garbage
+  collector to close.
+- **`test_dataloader` now raises before `setup`** instead of reporting nothing to do.
+- **Both train datasets degrade the whole image and only then extract
+  sub-images/patches**, matching the authors' released degradation order — verified
+  byte-exact against two external reference sets (357/357 of a MATLAB benchmark set,
+  800/800 of DIV2K's own distributed LR).
+- **A model rebuilds from its own artifact header** — SRCNN and SRResNet now accept
+  the list-valued sequence hparams the header records, instead of refusing them.
 
 ### Removed
 

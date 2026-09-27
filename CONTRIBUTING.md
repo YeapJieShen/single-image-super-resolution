@@ -57,7 +57,7 @@ The path a change takes:
 | **Design** | Anything touching a public contract, a metric, or the data path gets agreed before it gets written. A typo fix does not. |
 | **Branch** | `<type>/<topic>`, e.g. `fix/cache-locking`, `docs/workflow`. |
 | **Verify** | Correctness: a test that fails before your change and passes after. Performance: before/after numbers, on real data. |
-| **PR** | Opened against `main`. Stacked PRs must be retargeted to `main` before their final push, or CI never runs on them. |
+| **PR** | Opened against `main`. A stack of dependent PRs is built and landed with `gh stack`, each PR based on the previous one in the stack — that is what gives every PR in the stack its own CI run. |
 | **Merge** | Squash for a single-purpose PR; rebase for one carrying both code and docs, so the commits stay separate. |
 
 ### Evidence
@@ -116,8 +116,11 @@ training drives two networks alternately, which Lightning's automatic loop canno
 so `SRGANLightning` subclasses `SRLightning` and owns its own training step. Anything that
 trains one network needs no new module.
 
-1. Subclass `sisr.models.base.SRModel`: `forward`, `self._hparams`, and optionally
-   `reset_parameters(**kwargs)` for a paper-faithful init.
+1. Subclass `sisr.models.base.SRModel`: `forward`, `self._hparams`, the abstract
+   `input_contract` class var and `variant_tag` property, and optionally
+   `reset_parameters(**kwargs)` for a paper-faithful init. Normalize sequence
+   hyperparameters (kernel sizes, filter counts) with `as_int_tuple`, as every existing
+   architecture does.
 2. Add `<Arch>TrainingConfig` / `<Arch>EvalConfig` with the paper's defaults, copying the
    shape of `sisr/models/srcnn/config.py`.
 3. Pick a processor (`RGBProcessor`, `RGBSignedOutputProcessor`, `YChannelProcessor`,
