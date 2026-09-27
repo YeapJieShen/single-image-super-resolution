@@ -158,7 +158,7 @@ def test_derive_matches_real_matlab_reference_lr_byte_for_byte():
             "docstring for how to fetch it."
         )
     cases = []
-    for dataset in ("Set5", "Set14", "B100"):
+    for dataset in ("Set5", "Set14", "B100", "Urban100"):
         hr_dir = REFERENCE_DIR / dataset / "HR"
         if not hr_dir.is_dir():
             continue
