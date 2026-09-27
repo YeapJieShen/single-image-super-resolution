@@ -74,9 +74,18 @@ def test_check_architecture_zero_filter_raises_for_short_tuple():
         SRCNN(num_channels=3, num_filters=(64, 0), kernel_sizes=(9, 1, 5))
 
 
-def test_check_architecture_non_tuple_raises():
-    with pytest.raises(ValueError):
-        SRCNN(num_channels=3, num_filters=[64, 32], kernel_sizes=(9, 1, 5))
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("num_filters", "64"), ("num_filters", 64), ("kernel_sizes", "915"), ("kernel_sizes", 9)],
+    ids=["num_filters-str", "num_filters-int", "kernel_sizes-str", "kernel_sizes-int"],
+)
+def test_check_architecture_non_sequence_raises(name, value):
+    """A list is accepted (it is what a JSON header holds), but a str or a scalar
+    must still fail as a ValueError naming the parameter, not a TypeError from
+    comparing a character or iterating an int."""
+    kwargs = {"num_filters": (64, 32), "kernel_sizes": (9, 1, 5), name: value}
+    with pytest.raises(ValueError, match=name):
+        SRCNN(num_channels=3, **kwargs)
 
 
 def test_check_architecture_empty_tuple_raises():

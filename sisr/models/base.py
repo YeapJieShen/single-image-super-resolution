@@ -1,10 +1,34 @@
 """Abstract base class for single-image super-resolution architectures."""
 
 import abc
+from collections.abc import Sequence
 from typing import Any, ClassVar, Literal
 
 import torch
 import torch.nn as nn
+
+
+def as_int_tuple(name: str, value: Sequence[int]) -> tuple[int, ...]:
+    """Normalise a per-layer sequence hyperparameter to a tuple.
+
+    Provenance metadata records hparams tuple-free (JSON has no tuple), so a
+    list must rebuild the same model a tuple built. Element values are left to
+    the caller's own checks.
+
+    Args:
+        name: The parameter's name, for the error message.
+        value: A list or tuple.
+
+    Returns:
+        ``value`` as a tuple.
+
+    Raises:
+        ValueError: If ``value`` is a ``str`` (a sequence, but of characters)
+            or is not a sequence at all.
+    """
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise ValueError(f"{name} must be a list or tuple. Got {type(value)}.")
+    return tuple(value)
 
 
 class SRModel(nn.Module, abc.ABC):
