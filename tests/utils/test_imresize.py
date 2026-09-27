@@ -348,9 +348,10 @@ def _reference_cases() -> list[tuple[str, Path, Path, int]]:
 
 
 def test_matlab_imresize_matches_real_matlab_reference_data():
-    """Byte-equality against MATLAB-generated Set5/Set14 LR_bicubic pairs.
+    """Byte-equality against MATLAB-generated benchmark LR_bicubic pairs.
 
-    Generation convention (reverse-engineered and confirmed exact): crop HR
+    Tests the benchmark sets (Set5, Set14, BSD100, Urban100) using the same
+    generation convention (reverse-engineered and confirmed exact): crop HR
     to a multiple of `scale` (mod-crop), then bicubic-downsample the cropped
     array directly to the exact `(h_crop // scale, w_crop // scale)` target
     -- matching how this project's own datasets derive LR (crop first, then
