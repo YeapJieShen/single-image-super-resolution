@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from sisr.models.base import SRModel
+from sisr.models.base import SRModel, SRModelOutput, unwrap_primary
 
 
 def test_srmodel_is_abstract():
@@ -99,3 +99,26 @@ def test_srmodel_refuses_a_subclass_with_no_variant_tag():
 
     with pytest.raises(TypeError, match="variant_tag"):
         _NoTag()
+
+
+def test_unwrap_primary_returns_a_bare_tensor_unchanged():
+    """Existing single-tensor models (SRCNN, SRResNet) must see zero change --
+    unwrap_primary is a no-op on anything that isn't SRModelOutput."""
+    t = torch.rand(2, 3, 4, 4)
+    assert unwrap_primary(t) is t
+
+
+def test_unwrap_primary_extracts_the_record_primary_field():
+    primary = torch.rand(2, 3, 4, 4)
+    extra = torch.rand(2, 3, 4, 4)
+    out = SRModelOutput(primary=primary, extras={"aux": extra})
+    assert unwrap_primary(out) is primary
+
+
+def test_srmodel_output_extras_defaults_are_not_shared_across_instances():
+    """A mutable default shared across instances is the classic Python trap --
+    one instance's extras must not leak into another's."""
+    a = SRModelOutput(primary=torch.zeros(1))
+    b = SRModelOutput(primary=torch.zeros(1))
+    a.extras["x"] = torch.ones(1)
+    assert b.extras == {}
