@@ -4,7 +4,8 @@
 for held-out test sets (Set5, Set14, ...) during both ``cli fit`` (every
 N val cycles) and ``cli test`` (one-shot final eval).
 :class:`GradNormLogger` and :class:`WeightHistogramLogger` log diagnostic
-training signals; :class:`SRCheckpoint` is a thin
+training signals; :class:`LossWeightScheduler` ramps a named term's weight.
+:class:`SRCheckpoint` is a thin
 :class:`~lightning.pytorch.callbacks.ModelCheckpoint` preset for SR metrics;
 :class:`SRWeightsCheckpoint` is a sibling preset that saves bare, optimizer-free
 safetensors weights instead; :class:`SRPredictionWriter` writes ``cli predict``
@@ -601,6 +602,94 @@ class GradNormLogger(Callback):
         )
 
         pl_module.log("diag/grad_norm", total_norm, on_step=True, on_epoch=False, sync_dist=True)
+
+
+class LossWeightScheduler(Callback):
+    """Linearly ramps one ``WeightedSumLoss`` term's weight over training.
+
+    Generic and YAML-configurable, so an architecture whose paper ramps a
+    loss term over training (e.g. DRCN's recursive-supervision weight)
+    needs no bespoke schedule mechanism of its own -- it points this at the
+    term's name and a start/end/span.
+
+    Reads ``pl_module.criterion`` structurally (``getattr(..., None)`` plus
+    ``callable``, the same structural opt-in idiom
+    :class:`~sisr.losses.base.SRLoss` already establishes for ``last_terms``)
+    rather than by ``isinstance``, so any criterion exposing that method
+    participates, not only :class:`~sisr.losses.WeightedSumLoss` by name.
+
+    Progress is measured on the batch-counted step axis (:func:`_logger_step`,
+    the same axis every ``self.log`` metric uses), not ``trainer.global_step``
+    -- SRGAN's manual optimization steps two optimizers per batch, which would
+    otherwise make the configured span mean half as many batches under
+    adversarial training as under automatic optimization.
+
+    Args:
+        term: Name of the term inside the criterion's weights to schedule.
+        start_value: Weight at or before ``start_step``.
+        end_value: Weight at or after ``start_step + duration``.
+        duration: Number of steps the ramp spans. Must be positive.
+        start_step: Step at which the ramp begins. Defaults to ``0``.
+
+    Raises:
+        ValueError: If ``duration`` is not positive.
+    """
+
+    def __init__(
+        self,
+        term: str,
+        start_value: float,
+        end_value: float,
+        duration: int,
+        start_step: int = 0,
+    ):
+        super().__init__()
+        if duration <= 0:
+            raise ValueError(f"duration must be > 0, got {duration}")
+        self.term = term
+        self.start_value = start_value
+        self.end_value = end_value
+        self.duration = duration
+        self.start_step = start_step
+
+    def _value_at(self, step: int) -> float:
+        """The scheduled weight at a given (batch-counted) step."""
+        if step <= self.start_step:
+            return self.start_value
+        if step >= self.start_step + self.duration:
+            return self.end_value
+        frac = (step - self.start_step) / self.duration
+        return self.start_value + (self.end_value - self.start_value) * frac
+
+    def on_train_batch_start(
+        self,
+        trainer: lightning.Trainer,
+        pl_module: lightning.LightningModule,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Set the term's weight for the batch about to run.
+
+        Args:
+            trainer: The trainer instance.
+            pl_module: The model being trained -- ``pl_module.criterion``
+                must expose ``set_weight(name, value)``.
+            batch: Unused.
+            batch_idx: Unused -- progress reads the trainer's own step axis.
+
+        Raises:
+            TypeError: If ``pl_module.criterion`` has no ``set_weight``
+                method, e.g. a plain :class:`torch.nn.MSELoss` rather than a
+                :class:`~sisr.losses.WeightedSumLoss`.
+        """
+        set_weight = getattr(pl_module.criterion, "set_weight", None)
+        if not callable(set_weight):
+            raise TypeError(
+                f"LossWeightScheduler needs pl_module.criterion to expose "
+                f"set_weight(name, value) (e.g. WeightedSumLoss); got "
+                f"{type(pl_module.criterion).__name__}"
+            )
+        set_weight(self.term, self._value_at(_logger_step(trainer)))
 
 
 class WeightHistogramLogger(Callback):
