@@ -21,6 +21,16 @@ class SRLoss(torch.nn.Module, abc.ABC):
     ``isinstance``, so any criterion holding one participates. Those tensors are
     written **in place** and replaced only when the buffer cannot be reused
     (first use, device/dtype change, leaving :func:`torch.inference_mode`).
+
+    **Second optional structural protocol:** a loss exposing
+    ``wants_model_output = True`` (a class or instance attribute) receives
+    the model's *full* forward return as its ``pred`` argument -- a bare
+    tensor, or an :class:`~sisr.models.base.SRModelOutput` when the model
+    returns one -- instead of only the primary tensor every other criterion
+    sees. Checked with ``getattr(criterion, "wants_model_output", False)`` in
+    ``SRLightning._step``, the same nominal, non-``isinstance`` opt-in shape
+    as ``last_terms`` above. A loss that doesn't set it keeps getting
+    exactly today's bare primary tensor, whichever shape the model returned.
     """
 
     @abc.abstractmethod
