@@ -25,7 +25,7 @@ from lightning_utilities.core.rank_zero import rank_zero_info
 from .. import artifacts
 from ..losses import AdversarialLoss
 from ..models.base import SRModel
-from ..models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
+from ..models.srgan import AdversarialDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from ..processors import SRProcessor
 from .config import SREvalConfig
 from .lightning_module import SRLightning
@@ -69,9 +69,9 @@ class SRGANLightning(SRLightning):
             (``[-1, 1]`` under
             :class:`~sisr.processors.RGBSignedOutputProcessor`), not display
             range. Required.
-        discriminator: The critic, normally
-            :class:`~sisr.models.srgan.SRDiscriminator`. Emits logits; it is
-            paired with an ``adversarial_loss`` that applies the sigmoid
+        discriminator: An :class:`~sisr.models.srgan.AdversarialDiscriminator`,
+            normally :class:`~sisr.models.srgan.SRDiscriminator`. Emits logits;
+            it is paired with an ``adversarial_loss`` that applies the sigmoid
             itself. Required.
         training_config: Defaults to :class:`SRGANTrainingConfig`, which
             supplies ``adversarial_weight`` and ``d_steps_per_g_step`` — both
@@ -114,7 +114,7 @@ class SRGANLightning(SRLightning):
         self,
         model: SRModel,
         processor: SRProcessor,
-        discriminator: SRDiscriminator,
+        discriminator: AdversarialDiscriminator,
         training_config: SRGANTrainingConfig | None = None,
         eval_config: SREvalConfig | None = None,
         criterion: torch.nn.Module | None = None,
@@ -295,7 +295,7 @@ class SRGANLightning(SRLightning):
         Raises:
             ValueError: If ``training_config.layer_lrs`` is set.
         """
-        # Inherited through SRResNetTrainingConfig, so YAML can set it; this
+        # Inherited from the base SRTrainingConfig, so YAML can set it; this
         # override never reads it, and a silent uniform-LR fallback is the one
         # unsignalled misconfiguration in a module that refuses four others.
         if self.training_config.layer_lrs is not None:
@@ -370,6 +370,16 @@ class SRGANLightning(SRLightning):
         the generator's backward then flows through a second, fresh
         discriminator forward. No ``retain_graph`` is needed anywhere.
 
+        ``generator_loss`` also receives the real-branch logits computed for
+        ``d_loss`` (detached) rather than a fresh forward: a second forward through
+        the discriminator's BatchNorm layers would update its running statistics an
+        extra time every step, for every loss including the non-saturating one that
+        never reads them. A relativistic subclass therefore sees the **pre-update**
+        discriminator's read of the real batch, one alternation behind the fresh
+        fake-branch forward it is compared against -- cheaper and sufficient for
+        #274's interface fix; a paper-exact relativistic recipe is free to
+        recompute it instead.
+
         Args:
             batch: ``(lr_img, hr_img)`` tuple from the train loader. Both RGB,
                 ``float32`` in ``[0, 1]``.
@@ -387,8 +397,9 @@ class SRGANLightning(SRLightning):
         hr_for_loss = self.processor.extract_target(hr_cropped)
 
         self.toggle_optimizer(opt_d)
+        logits_real = self.discriminator(hr_for_loss)
         d_loss = self.adversarial_loss.discriminator_loss(
-            self.discriminator(hr_for_loss), self.discriminator(sr.detach())
+            logits_real, self.discriminator(sr.detach())
         )
         opt_d.zero_grad()
         self.manual_backward(d_loss)
@@ -410,7 +421,9 @@ class SRGANLightning(SRLightning):
         # gradient either way (also measured).
         self.toggle_optimizer(opt_g)
         content = self.criterion(sr, hr_for_loss)
-        adversarial = self.adversarial_loss.generator_loss(self.discriminator(sr))
+        adversarial = self.adversarial_loss.generator_loss(
+            logits_real.detach(), self.discriminator(sr)
+        )
         g_loss = content + self.training_config.adversarial_weight * adversarial
         opt_g.zero_grad()
         self.manual_backward(g_loss)
