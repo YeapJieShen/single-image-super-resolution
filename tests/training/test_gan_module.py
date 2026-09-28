@@ -304,6 +304,41 @@ def multistep(milestone=2):
 
 
 # ---------------------------------------------------------------------------
+# relativistic loss test (RED/GREEN for #274)
+# ---------------------------------------------------------------------------
+
+
+class _RelativisticAdversarialLoss(AdversarialLoss):
+    """Toy relativistic-average generator loss -- needs BOTH logit tensors.
+
+    Exists only to prove #274's call site can carry it with no side-channel.
+    Not paper-exact (that's a future architecture's job); it only has to
+    use logits_real in a way that would crash if the caller never supplied it.
+    """
+
+    def generator_loss(self, logits_real, logits_fake):
+        return torch.nn.functional.binary_cross_entropy_with_logits(
+            logits_fake - logits_real.mean(), torch.ones_like(logits_fake)
+        )
+
+
+@_ignore_cpu_fit_warnings
+def test_generator_loss_call_site_can_carry_a_relativistic_subclass():
+    """#274: pre-fix, training_step calls
+    `adversarial_loss.generator_loss(self.discriminator(sr))` with a single
+    positional argument. A relativistic generator_loss(logits_real, logits_fake)
+    then fails with "missing 1 required positional argument: 'logits_fake'" --
+    the caller has nothing to bind it to. Guards the exact defect: an
+    interface that accepts logits_real on paper but a call site that never
+    supplies it, forcing a relativistic subclass to reach outside its own
+    interface (a side-channel) for the real logits."""
+    module = build_gan_module()
+    module.adversarial_loss = _RelativisticAdversarialLoss()
+
+    fit_gan(module, n_batches=1)  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # optimizers
 # ---------------------------------------------------------------------------
 
@@ -695,7 +730,7 @@ def test_the_probe_forward_runs_with_the_whole_module_in_eval_mode():
 
 
 def test_layer_lrs_refused():
-    """Inherited through SRResNetTrainingConfig, so YAML can set it — and this
+    """Inherited from the base SRTrainingConfig, so YAML can set it — and this
     override never reads it, which would silently give both networks uniform LRs
     where the base raises. The file's only unsignalled misconfiguration."""
     module = build_gan_module(layer_lrs=[1e-4, 1e-4, 1e-4])
