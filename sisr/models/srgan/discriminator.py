@@ -94,6 +94,16 @@ class SRDiscriminator(AdversarialDiscriminator):
         )
 
     @property
+    def in_channels(self) -> int:
+        """Input channel count."""
+        return self._hparams["in_channels"]
+
+    @property
+    def input_size(self) -> int:
+        """Fixed spatial size (height and width) this discriminator accepts."""
+        return self._hparams["hr_input_size"]
+
+    @property
     def variant_tag(self) -> str:
         """The HR input size it was built for — the one knob that must match the data."""
         return str(self._hparams["hr_input_size"])

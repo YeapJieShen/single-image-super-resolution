@@ -15,12 +15,6 @@ class SRGANTrainingConfig(AdversarialTrainingConfig):
     """SRGAN training defaults.
 
     The generator is SRResNet, so ``scale=4`` is this class's own default.
-    Not inherited from SRResNet's config -- instead this class builds on
-    :class:`~sisr.training.config.AdversarialTrainingConfig` rather than
-    :class:`~sisr.models.srresnet.SRResNetTrainingConfig`, which decouples the
-    training config so a non-SRResNet generator can use this class without
-    being validated against SRResNet-specific hparam names.
-
     Everything adversarial-specific (``init_from``, ``adversarial_weight``,
     ``d_steps_per_g_step``, and their validation) is inherited unchanged from
     :class:`~sisr.training.config.AdversarialTrainingConfig`.
@@ -34,11 +28,7 @@ class SRGANEvalConfig(SRResNetEvalConfig):
     """SRGAN eval defaults — SRResNet's scoring, plus perceptual metrics.
 
     Inherits SRResNet's border, channels and ``ssim_impl='daala'``, so an SRGAN
-    number stays comparable to the baseline computed the same way. Unlike
-    ``SRGANTrainingConfig``, this still subclasses ``SRResNetEvalConfig``
-    directly -- the issue is scoped to the training config; nothing about eval
-    scoring is SRResNet-specific enough to need the same split, and the
-    generator here is still SRResNet's own architecture.
+    number stays comparable to the baseline computed the same way.
 
     Args:
         perceptual_metrics: ``['lpips', 'dists']``. An adversarial objective

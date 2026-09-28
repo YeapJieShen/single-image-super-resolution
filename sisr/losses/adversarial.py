@@ -10,12 +10,11 @@ class AdversarialLoss(torch.nn.Module):
     ``forward(pred, target)`` and the generator term ``-log D(G(I_LR))`` has no
     target, so fitting it would put a dummy argument in the signature the whole
     loss library depends on. Standing apart also makes it testable without a
-    training loop and swappable from YAML (LSGAN, relativistic).
-    :meth:`generator_loss` takes both discriminator logit
-    tensors, so a relativistic subclass (e.g. the relativistic-average
-    objective ESRGAN uses) reads ``logits_real`` straight off its own
-    signature instead of reaching outside it for a side-channel. This class's
-    own non-saturating form ignores ``logits_real`` entirely.
+    training loop and swappable from YAML. :meth:`generator_loss` takes both
+    discriminator logit tensors, so a relativistic subclass (e.g. the
+    relativistic-average objective ESRGAN uses) reads ``logits_real`` straight
+    off its own signature instead of reaching outside it for a side-channel.
+    This class's own non-saturating form ignores ``logits_real`` entirely.
 
     Takes **logits**, not probabilities. Parameter-free, so it adds nothing to
     any ``state_dict``.
@@ -33,6 +32,9 @@ class AdversarialLoss(torch.nn.Module):
 
         Args:
             logits_real: Discriminator logits for the real HR batch, ``(B, 1)``.
+                Detached and computed from the discriminator **before** its update
+                (one alternation behind ``logits_fake``), so a relativistic
+                subclass sees the critic's state from the discriminator step.
                 Unused by this non-saturating form.
             logits_fake: Discriminator logits for generated images, ``(B, 1)``.
 
