@@ -12,15 +12,21 @@ import lightning
 import pytest
 import safetensors.torch
 import torch
+import torch.nn as nn
 
 from sisr import artifacts
 from sisr.losses import AdversarialLoss, VGG19FeatureLoss
 from sisr.models.base import SRModel
-from sisr.models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
+from sisr.models.srgan import (
+    AdversarialDiscriminator,
+    SRDiscriminator,
+    SRGANEvalConfig,
+    SRGANTrainingConfig,
+)
 from sisr.models.srresnet import SRResNet, SRResNetTrainingConfig
 from sisr.processors import RGBSignedOutputProcessor, YChannelProcessor
 from sisr.training import SRCheckpoint, SRGANLightning, SRLightning, SRWeightsCheckpoint
-from sisr.training.config import SRTrainingConfig
+from sisr.training.config import AdversarialTrainingConfig, SRTrainingConfig
 from sisr.training.metadata import build_component_metadata, build_metadata
 
 # Every fit below runs on CPU with a single-worker loader over a handful of
@@ -314,9 +320,18 @@ class _RelativisticAdversarialLoss(AdversarialLoss):
     Exists only to prove #274's call site can carry it with no side-channel.
     Not paper-exact (that's a future architecture's job); it only has to
     use logits_real in a way that would crash if the caller never supplied it.
+    Records the logits it receives so the test can verify they are correct.
     """
 
+    def __init__(self):
+        super().__init__()
+        self.received_logits_real = None
+        self.received_logits_fake = None
+
     def generator_loss(self, logits_real, logits_fake):
+        # Record for post-fit verification.
+        self.received_logits_real = logits_real.detach().clone()
+        self.received_logits_fake = logits_fake.detach().clone()
         return torch.nn.functional.binary_cross_entropy_with_logits(
             logits_fake - logits_real.mean(), torch.ones_like(logits_fake)
         )
@@ -328,14 +343,44 @@ def test_generator_loss_call_site_can_carry_a_relativistic_subclass():
     `adversarial_loss.generator_loss(self.discriminator(sr))` with a single
     positional argument. A relativistic generator_loss(logits_real, logits_fake)
     then fails with "missing 1 required positional argument: 'logits_fake'" --
-    the caller has nothing to bind it to. Guards the exact defect: an
-    interface that accepts logits_real on paper but a call site that never
-    supplies it, forcing a relativistic subclass to reach outside its own
-    interface (a side-channel) for the real logits."""
+    the caller has nothing to bind it to. Guards the exact mutations: a
+    relativistic loss silently degrading to only using fake logits (M4: fake
+    passed as real, M4b: zeros passed as real). The test verifies that
+    logits_real equals the discriminator's real-batch output and differs from
+    logits_fake."""
     module = build_gan_module()
-    module.adversarial_loss = _RelativisticAdversarialLoss()
+    loss = _RelativisticAdversarialLoss()
+    module.adversarial_loss = loss
 
-    fit_gan(module, n_batches=1)  # must not raise
+    # Capture discriminator outputs for the real batch during training.
+    captured_real_outputs = []
+
+    def capture_real_output(module, input, output):
+        captured_real_outputs.append(output.detach().clone())
+
+    hook = module.discriminator.register_forward_hook(capture_real_output)
+
+    try:
+        fit_gan(module, n_batches=1)  # must not raise
+
+        assert loss.received_logits_real is not None, "generator_loss was never called"
+        assert loss.received_logits_fake is not None, "generator_loss was never called"
+        assert len(captured_real_outputs) > 0, "discriminator was never called for real batch"
+
+        discriminator_real_output = captured_real_outputs[0]
+        assert torch.allclose(loss.received_logits_real, discriminator_real_output), (
+            "logits_real must match the discriminator's real-batch output "
+            "(M4b mutation: zeros passed as real would fail here)"
+        )
+
+        # Also verify that logits_real differs from logits_fake,
+        # which catches M4 (fake passed as real).
+        assert not torch.allclose(loss.received_logits_real, loss.received_logits_fake), (
+            "logits_real must differ from logits_fake "
+            "(M4 mutation: fake passed as real would fail here)"
+        )
+    finally:
+        hook.remove()
 
 
 # ---------------------------------------------------------------------------
@@ -743,13 +788,154 @@ def test_a_base_training_config_is_refused():
     """training_step reads adversarial_weight and d_steps_per_g_step off the
     config on every step, and only the subclass carries them — the type hint
     alone does not enforce it, so a base config would fail mid-run instead."""
-    with pytest.raises(TypeError, match="SRGANTrainingConfig"):
+    with pytest.raises(TypeError, match="AdversarialTrainingConfig"):
         SRGANLightning(
             model=SRResNet(scale=4, num_residual_blocks=1),
             processor=RGBSignedOutputProcessor(),
             discriminator=SRDiscriminator(),
             training_config=SRTrainingConfig(),
         )
+
+
+@_ignore_cpu_fit_warnings
+def test_srgan_accepts_non_srgan_adversarial_training_config():
+    """#274: SRGANLightning accepts any AdversarialTrainingConfig subclass,
+    not just SRGANTrainingConfig. This enables a second adversarial
+    architecture to be used with the same training loop without pretending to
+    be SRGAN."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class OtherAdversarialConfig(AdversarialTrainingConfig):
+        """A minimal non-SRGAN adversarial config."""
+
+        scale: int = 4
+
+    module = SRGANLightning(
+        model=SRResNet(scale=4, num_residual_blocks=1),
+        processor=RGBSignedOutputProcessor(),
+        discriminator=SRDiscriminator(),
+        training_config=OtherAdversarialConfig(),
+    )
+    fit_gan(module, n_batches=1)  # must not raise
+
+
+@_ignore_cpu_fit_warnings
+def test_srgan_accepts_non_srdiscriminator_subclass():
+    """SRGANLightning construction accepts any AdversarialDiscriminator subclass,
+    not just SRDiscriminator. The abstract properties (in_channels, input_size)
+    are validated at construction, not duck-typed from hparams."""
+
+    class SimpleDiscriminator(AdversarialDiscriminator):
+        """Minimal discriminator that is not SRDiscriminator."""
+
+        def __init__(self, in_channels: int = 3, input_size: int | None = 96):
+            super().__init__()
+            self._hparams = {"width": 8}  # deliberately omit in_channels, input_size
+            self._in_channels = in_channels
+            self._input_size = input_size
+            self.conv = nn.Conv2d(in_channels, 1, 1)
+
+        @property
+        def in_channels(self) -> int:
+            return self._in_channels
+
+        @property
+        def input_size(self) -> int | None:
+            return self._input_size
+
+        @property
+        def variant_tag(self) -> str:
+            return "simple"
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.conv(x).flatten(1).mean(dim=1, keepdim=True)
+
+    module = SRGANLightning(
+        model=SRResNet(scale=4, num_residual_blocks=1),
+        processor=RGBSignedOutputProcessor(),
+        discriminator=SimpleDiscriminator(),
+        training_config=SRGANTrainingConfig(),
+    )
+    fit_gan(module, n_batches=1)  # must not raise
+
+
+def test_discriminator_input_size_must_match_crop_for_non_srdiscriminator():
+    """The setup probe validates any AdversarialDiscriminator subclass,
+    not just SRDiscriminator. A mismatch raises ValueError, catching any
+    subclass with a wrong input_size declaration."""
+
+    class MismatchedDiscriminator(AdversarialDiscriminator):
+        def __init__(self):
+            super().__init__()
+            self._hparams = {"width": 8}
+            self._in_channels = 3
+            self._input_size = 128  # deliberately wrong: dataset serves 96
+            self.conv = nn.Conv2d(3, 1, 1)
+
+        @property
+        def in_channels(self) -> int:
+            return self._in_channels
+
+        @property
+        def input_size(self) -> int | None:
+            return self._input_size
+
+        @property
+        def variant_tag(self) -> str:
+            return "mismatched"
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.conv(x).flatten(1).mean(dim=1, keepdim=True)
+
+    module = SRGANLightning(
+        model=SRResNet(scale=4, num_residual_blocks=1),
+        processor=RGBSignedOutputProcessor(),
+        discriminator=MismatchedDiscriminator(),
+        training_config=SRGANTrainingConfig(),
+    )
+    module.trainer = SimpleNamespace(datamodule=fake_datamodule(hr_crop_size=96))
+
+    with pytest.raises(ValueError, match="input_size"):
+        module.setup("fit")
+
+
+def test_discriminator_input_size_none_skips_the_probe():
+    """The setup probe skips validation when input_size is None,
+    allowing discriminators that accept variable input sizes."""
+
+    class VariableSizeDiscriminator(AdversarialDiscriminator):
+        def __init__(self):
+            super().__init__()
+            self._hparams = {"width": 8}
+            self._in_channels = 3
+            self._input_size = None  # no fixed input size
+            self.conv = nn.Conv2d(3, 1, 1)
+
+        @property
+        def in_channels(self) -> int:
+            return self._in_channels
+
+        @property
+        def input_size(self) -> int | None:
+            return self._input_size
+
+        @property
+        def variant_tag(self) -> str:
+            return "variable"
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.conv(x).flatten(1).mean(dim=1, keepdim=True)
+
+    module = SRGANLightning(
+        model=SRResNet(scale=4, num_residual_blocks=1),
+        processor=RGBSignedOutputProcessor(),
+        discriminator=VariableSizeDiscriminator(),
+        training_config=SRGANTrainingConfig(),
+    )
+    module.trainer = SimpleNamespace(datamodule=fake_datamodule(hr_crop_size=96))
+
+    module.setup("fit")  # must not raise
 
 
 # ---------------------------------------------------------------------------
