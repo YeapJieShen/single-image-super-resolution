@@ -6,6 +6,8 @@ Adversarial Network (https://arxiv.org/pdf/1609.04802).
 
 import torch
 
+from .base import AdversarialDiscriminator
+
 #: (out_channels_multiplier, stride) for the 7 blocks after the stem, per Fig. 4.
 _BLOCKS: tuple[tuple[int, int], ...] = ((1, 2), (2, 1), (2, 2), (4, 1), (4, 2), (8, 1), (8, 2))
 
@@ -13,13 +15,11 @@ _BLOCKS: tuple[tuple[int, int], ...] = ((1, 2), (2, 1), (2, 2), (4, 1), (4, 2), 
 _DOWNSAMPLES = sum(1 for _, stride in _BLOCKS if stride == 2)
 
 
-class SRDiscriminator(torch.nn.Module):
-    """SRGAN discriminator: conv stem, 7 strided conv-BN-LeakyReLU blocks, dense head.
+class SRDiscriminator(AdversarialDiscriminator):
+    """Concrete :class:`~sisr.models.srgan.AdversarialDiscriminator` for SRGAN.
 
-    Deliberately **not** an :class:`~sisr.models.base.SRModel`: it is a
-    classifier, not an SR mapping, so ``input_contract`` and
-    ``reset_parameters`` would be contracts it cannot honour. It carries
-    ``hparams`` only so provenance metadata can describe it the same way.
+    Ledig et al.'s architecture (Figure 4). See that base for why this isn't an
+    ``SRModel``.
 
     **Emits logits, not probabilities.** Ledig's Figure 4 ends in a sigmoid;
     pairing an unactivated output with ``BCEWithLogitsLoss`` computes the same
@@ -94,17 +94,8 @@ class SRDiscriminator(torch.nn.Module):
         )
 
     @property
-    def hparams(self) -> dict:
-        """Architecture hyperparameters, for provenance metadata."""
-        return self._hparams
-
-    @property
     def variant_tag(self) -> str:
-        """The HR input size it was built for -- the one knob that must match the data.
-
-        Not an ``SRModel``, so this is duck-typed rather than inherited. The
-        artifact naming reads it the same way either way.
-        """
+        """The HR input size it was built for — the one knob that must match the data."""
         return str(self._hparams["hr_input_size"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
