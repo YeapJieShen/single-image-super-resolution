@@ -184,3 +184,25 @@ def test_composite_criterion_survives_a_module_state_dict_roundtrip():
     )
 
     assert all(k.startswith("model.") for k in lit.state_dict()), list(lit.state_dict())
+
+
+def test_set_weight_updates_the_named_term():
+    loss = WeightedSumLoss(
+        terms={"a": _BindSpy(2.0), "b": _BindSpy(5.0)}, weights={"a": 1.0, "b": 0.1}
+    )
+
+    loss.set_weight("b", 0.5)
+
+    assert loss.weights["b"] == pytest.approx(0.5)
+    got = loss(torch.zeros(1), torch.zeros(1))
+    assert got.item() == pytest.approx(2.0 * 1.0 + 5.0 * 0.5)
+
+
+def test_set_weight_on_an_unknown_term_raises_rather_than_silently_adding_it():
+    """Same fail-loud rule __init__ already applies to `weights` -- a stale
+    name from an edited schedule config must not silently create a new,
+    unused entry."""
+    loss = WeightedSumLoss(terms={"vgg22": _BindSpy(1.0)})
+
+    with pytest.raises(ValueError, match="no such term"):
+        loss.set_weight("vgg2", 0.5)
