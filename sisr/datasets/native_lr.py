@@ -3,7 +3,7 @@
 LR is the bicubic downscale of HR by ``scale`` (no upsample round-trip);
 the model is responsible for the ×``scale`` upsampling. :class:`TrainDataset`
 caches full decoded HR images (raw, uint8, headered) through
-:mod:`~sisr.datasets.hr_cache`, shared verbatim with :mod:`sisr.datasets.srcnn`
+:mod:`~sisr.datasets.hr_cache`, shared verbatim with :mod:`sisr.datasets.pre_upsampled`
 — the same image directory produces exactly one cache regardless of which
 architecture builds it first. Decoding a DIV2K PNG costs ~109ms, while the
 96x96 crop kept from it costs ~1ms, so re-decoding per crop is ~99% wasted
@@ -52,7 +52,7 @@ class TrainDataset(HRCachedTrainDataset):
     unaligned offsets would give — 153,892 rather than 2,452,645 on a
     2040x1356 image — and still ~123M across an 800-image training set.
 
-    Unlike :class:`sisr.datasets.srcnn.TrainDataset` there is **no
+    Unlike :class:`sisr.datasets.pre_upsampled.TrainDataset` there is **no
     downsample+upsample round-trip**: the LR is not upsampled back, the model
     owns the x``scale`` upsampling, and the LR tensor is
     ``hr_crop_size // scale`` a side.

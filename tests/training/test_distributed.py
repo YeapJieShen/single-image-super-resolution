@@ -67,7 +67,7 @@ def _make_module() -> SRLightning:
 def _make_datamodule(image_dir: Path, tmp_path: Path) -> SRDataModule:
     """Train plus a primary val set and one benchmark set, over the fixture images."""
     train = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(image_dir),
             "subimg_size": 33,
@@ -78,7 +78,7 @@ def _make_datamodule(image_dir: Path, tmp_path: Path) -> SRDataModule:
         },
     }
     val = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     return SRDataModule(

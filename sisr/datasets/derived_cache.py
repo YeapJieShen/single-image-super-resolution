@@ -23,7 +23,7 @@ negligible; ``'bicubic'`` is HR-sized and roughly doubles the working set.
 Crossing available RAM is a step change, not a gradient — measured at a **21x**
 throughput loss on the far side, with the GPU idle and the loop I/O-bound. Size
 the box against the dataset before choosing ``'bicubic'``; see
-:mod:`sisr.datasets.srcnn`.
+:mod:`sisr.datasets.pre_upsampled`.
 
 Deliberately torch-free, for the same reason :mod:`~sisr.datasets.hr_cache` is:
 :func:`process_derived_image` is the function pickled to ``ProcessPoolExecutor``

@@ -11,7 +11,7 @@ from sisr.training.datamodule import _accepted_init_args
 def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
     """SRDataModule pointing at a single tiny image dir for train/val/test."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(image_dir),
             "subimg_size": 33,
@@ -23,11 +23,11 @@ def _make_dm(image_dir: Path, *, with_train: bool = True) -> SRDataModule:
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     test_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     return SRDataModule(
@@ -104,7 +104,7 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
     """When test_dataloader_kwargs is omitted, the datamodule reuses
     val_dataloader_kwargs."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -116,7 +116,7 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -133,7 +133,7 @@ def test_test_dataloader_kwargs_falls_back_to_val(tiny_rgb_image_dir: Path):
 
 def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir: Path):
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -145,7 +145,7 @@ def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -163,7 +163,7 @@ def test_no_test_datasets_val_dataloader_returns_only_primary(tiny_rgb_image_dir
 def test_old_class_params_rejected(tiny_rgb_image_dir: Path):
     """The legacy `train_dataset_class` etc. params no longer exist."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -174,7 +174,7 @@ def test_old_class_params_rejected(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     with pytest.raises(TypeError):
@@ -196,7 +196,7 @@ def test_setup_predict_only_builds_predict_dataset(tiny_rgb_image_dir: Path):
     """stage='predict' must build only the predict dataset, not train/val/test —
     mirroring the other stages' selective-instantiation contract."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -207,7 +207,7 @@ def test_setup_predict_only_builds_predict_dataset(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -225,7 +225,7 @@ def test_setup_predict_only_builds_predict_dataset(tiny_rgb_image_dir: Path):
 
 def test_predict_dataloader_returns_loader_over_predict_dataset(tiny_rgb_image_dir: Path):
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -236,7 +236,7 @@ def test_predict_dataloader_returns_loader_over_predict_dataset(tiny_rgb_image_d
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -257,7 +257,7 @@ def test_predict_dataloader_returns_loader_over_predict_dataset(tiny_rgb_image_d
 def test_predict_dataloader_default_kwargs(tiny_rgb_image_dir: Path):
     """batch_size=1/num_workers=0 default when predict_dataloader_kwargs is omitted."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -268,7 +268,7 @@ def test_predict_dataloader_default_kwargs(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -317,7 +317,7 @@ def test_train_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
     override produces when it can't reach nested init_args — must raise
     instead of silently building the wrong dataset."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -327,7 +327,7 @@ def test_train_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
         "crops_per_image": 8,  # stray — never reaches init_args
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     with pytest.raises(ValueError, match="crops_per_image"):
@@ -336,7 +336,7 @@ def test_train_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
 
 def test_val_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -345,7 +345,7 @@ def test_val_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
         "scale": 3,
     }
@@ -357,7 +357,7 @@ def test_test_datasets_spec_rejects_stray_sibling_key_names_the_entry(tiny_rgb_i
     """The error must name which test_datasets entry is malformed — 'Set14',
     not just 'test_datasets' — since there can be several."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -366,7 +366,7 @@ def test_test_datasets_spec_rejects_stray_sibling_key_names_the_entry(tiny_rgb_i
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     bad_test_spec = {**val_spec, "scale": 4}
@@ -380,7 +380,7 @@ def test_test_datasets_spec_rejects_stray_sibling_key_names_the_entry(tiny_rgb_i
 
 def test_predict_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path):
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -389,7 +389,7 @@ def test_predict_dataset_spec_rejects_stray_sibling_key(tiny_rgb_image_dir: Path
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     bad_predict_spec = {
@@ -407,7 +407,7 @@ def test_predict_dataset_none_skips_validation(tiny_rgb_image_dir: Path):
     """predict_dataset=None (the default, unconfigured predict) must not be
     validated as if it were a malformed spec."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -416,7 +416,7 @@ def test_predict_dataset_none_skips_validation(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     SRDataModule(train_dataset=train_spec, val_dataset=val_spec)  # must not raise
@@ -424,7 +424,7 @@ def test_predict_dataset_none_skips_validation(tiny_rgb_image_dir: Path):
 
 def test_dataset_spec_missing_class_path_rejected(tiny_rgb_image_dir: Path):
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     with pytest.raises(ValueError, match="class_path"):
@@ -434,7 +434,7 @@ def test_dataset_spec_missing_class_path_rejected(tiny_rgb_image_dir: Path):
 def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
     """train_dataset accepts {class_path, init_args} and setup() instantiates it."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -446,11 +446,11 @@ def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     test_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -462,7 +462,7 @@ def test_train_dataset_built_from_class_path_spec(tiny_rgb_image_dir: Path):
         test_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
     )
     dm.setup(stage="fit")
-    from sisr.datasets.srcnn import TrainDataset, ValidationDataset
+    from sisr.datasets.pre_upsampled import TrainDataset, ValidationDataset
 
     assert isinstance(dm._train_ds, TrainDataset)
     assert isinstance(dm._val_ds, ValidationDataset)
@@ -476,11 +476,11 @@ def test_unknown_init_args_key_names_the_config_field_and_the_valid_keys(tmp_pat
     dataset blocks is wrong is exactly what the reader needs."""
     dm = SRDataModule(
         train_dataset={
-            "class_path": "sisr.datasets.srresnet.ValidationDataset",
+            "class_path": "sisr.datasets.native_lr.ValidationDataset",
             "init_args": {"img_dir": str(tmp_path), "scale": 2, "crops_per_imag": 8},
         },
         val_dataset={
-            "class_path": "sisr.datasets.srresnet.ValidationDataset",
+            "class_path": "sisr.datasets.native_lr.ValidationDataset",
             "init_args": {"img_dir": str(tmp_path), "scale": 2},
         },
     )
@@ -505,8 +505,8 @@ def test_an_unrelated_type_error_from_a_dataset_constructor_is_not_reworded(tmp_
 
     with patch("sisr.training.datamodule.instantiate_class", side_effect=_boom):
         dm = SRDataModule(
-            train_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
-            val_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
+            train_dataset={"class_path": "sisr.datasets.native_lr.ValidationDataset"},
+            val_dataset={"class_path": "sisr.datasets.native_lr.ValidationDataset"},
         )
         with pytest.raises(TypeError, match="something else entirely"):
             dm.setup(stage="fit")
@@ -518,16 +518,16 @@ def test_non_mapping_init_args_is_refused_by_name(tmp_path):
     with pytest.raises(ValueError, match=r"data\.train_dataset\.init_args must be a mapping"):
         SRDataModule(
             train_dataset={
-                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "class_path": "sisr.datasets.native_lr.ValidationDataset",
                 "init_args": ["img_dir", str(tmp_path)],
             },
-            val_dataset={"class_path": "sisr.datasets.srresnet.ValidationDataset"},
+            val_dataset={"class_path": "sisr.datasets.native_lr.ValidationDataset"},
         )
 
 
 @pytest.mark.parametrize(
     "class_path",
-    ["sisr.datasets.srresnet.NoSuchDataset", "no_such_module.Thing", "not-a-dotted-path"],
+    ["sisr.datasets.native_lr.NoSuchDataset", "no_such_module.Thing", "not-a-dotted-path"],
 )
 def test_accepted_init_args_gives_up_quietly_on_an_unresolvable_class(class_path):
     """The accepted-keys lookup is a courtesy on the error path. If the class
@@ -546,7 +546,7 @@ def _make_dm_no_test_sets(image_dir: Path) -> SRDataModule:
     """Same shape as _make_dm, with test_datasets left unset."""
     return SRDataModule(
         train_dataset={
-            "class_path": "sisr.datasets.srcnn.TrainDataset",
+            "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
             "init_args": {
                 "img_dir": str(image_dir),
                 "subimg_size": 33,
@@ -558,7 +558,7 @@ def _make_dm_no_test_sets(image_dir: Path) -> SRDataModule:
             },
         },
         val_dataset={
-            "class_path": "sisr.datasets.srcnn.ValidationDataset",
+            "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
             "init_args": {"img_dir": str(image_dir), "scale": 2},
         },
         val_dataloader_kwargs={"batch_size": 1, "num_workers": 0},
