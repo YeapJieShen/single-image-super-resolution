@@ -1472,7 +1472,7 @@ def test_on_save_checkpoint_round_trips_weights_only(tmp_path, srcnn_rgb_lit: SR
 def _srcnn_datamodule(tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2) -> SRDataModule:
     """SRDataModule over srcnn's pre-upsampled datasets (lr.shape == hr.shape)."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -1484,7 +1484,7 @@ def _srcnn_datamodule(tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2) 
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
     }
     return SRDataModule(
@@ -1500,7 +1500,7 @@ def _srresnet_datamodule(
 ) -> SRDataModule:
     """SRDataModule over srresnet's native-LR datasets (hr.shape == lr.shape * scale)."""
     train_spec = {
-        "class_path": "sisr.datasets.srresnet.TrainDataset",
+        "class_path": "sisr.datasets.native_lr.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "scale": scale,
@@ -1511,7 +1511,7 @@ def _srresnet_datamodule(
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srresnet.ValidationDataset",
+        "class_path": "sisr.datasets.native_lr.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
     }
     return SRDataModule(
@@ -1616,7 +1616,7 @@ def test_setup_skips_pair_check_for_predict_only_datamodule(
     all unbuilt) must not raise even for a would-be-mismatched model."""
     lit = _srresnet_lit(scale=2)
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(

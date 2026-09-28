@@ -84,13 +84,13 @@ model:
       class_path: sisr.models.srresnet.SRResNetEvalConfig
 data:
   train_dataset:
-    class_path: sisr.datasets.srresnet.TrainDataset
+    class_path: sisr.datasets.native_lr.TrainDataset
     init_args:
       img_dir: IMG_DIR
       scale: 4
       hr_crop_size: 96
   val_dataset:
-    class_path: sisr.datasets.srresnet.ValidationDataset
+    class_path: sisr.datasets.native_lr.ValidationDataset
     init_args:
       img_dir: IMG_DIR
       scale: 4
@@ -234,8 +234,8 @@ def test_srresnet_config_resolves_in_process():
     assert m.eval_config.ssim_impl == "daala"  # inherited-default check
     # Dataset specs stay plain {class_path, init_args} dicts (materialized lazily
     # in SRDataModule.setup), so assert on the resolved raw config.
-    assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.srresnet.TrainDataset"
-    assert cli.config.data.val_dataset["class_path"] == "sisr.datasets.srresnet.ValidationDataset"
+    assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.native_lr.TrainDataset"
+    assert cli.config.data.val_dataset["class_path"] == "sisr.datasets.native_lr.ValidationDataset"
     assert cli.config.data.train_dataset["init_args"]["hr_crop_size"] == 96
     # The removed model_colorspace field must not reappear anywhere.
     assert not hasattr(m, "model_colorspace")
@@ -658,7 +658,7 @@ def test_dataset_whole_dict_cli_override_colliding_with_config_fails_loudly():
         _resolve(
             "--config",
             str(SRRESNET_TEMPLATE),
-            '--data.train_dataset={"class_path": "sisr.datasets.srresnet.TrainDataset", '
+            '--data.train_dataset={"class_path": "sisr.datasets.native_lr.TrainDataset", '
             '"init_args": {"img_dir": "data/DIV2K_train_HR", "scale": 4, "hr_crop_size": 96, '
             '"crops_per_image": 8, "use_tqdm": true, "cache_dir": ".lmdb_cache/DIV2K_train_HR"}}',
         )
@@ -893,7 +893,7 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
             "train_dataset": {
-                "class_path": "sisr.datasets.srcnn.TrainDataset",
+                "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
                 "init_args": {
                     "img_dir": str(tiny_rgb_image_dir),
                     "subimg_size": 33,
@@ -904,7 +904,7 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                 },
             },
             "val_dataset": {
-                "class_path": "sisr.datasets.srcnn.ValidationDataset",
+                "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},
@@ -980,7 +980,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
             "train_dataset": {
-                "class_path": "sisr.datasets.srresnet.TrainDataset",
+                "class_path": "sisr.datasets.native_lr.TrainDataset",
                 "init_args": {
                     "img_dir": str(tiny_rgb_image_dir),
                     "scale": 2,
@@ -990,7 +990,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
                 },
             },
             "val_dataset": {
-                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "class_path": "sisr.datasets.native_lr.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},

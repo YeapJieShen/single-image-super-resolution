@@ -280,9 +280,9 @@ class SRLightning(lightning.LightningModule):
                 f"{type(self.model).__name__}.input_contract='pre_upsampled' requires "
                 f"LR and HR to share spatial size, but data.{source} ({ds_name}) served "
                 f"lr {lr_hw} != hr {hr_hw}. A native-LR dataset (e.g. "
-                f"sisr.datasets.srresnet) paired with a pre-upsampled model silently "
+                f"sisr.datasets.native_lr) paired with a pre-upsampled model silently "
                 f"zero-pads in SRLightning._forward_sr instead of raising — point "
-                f"data.{source} at a pre-upsampled dataset (e.g. sisr.datasets.srcnn), "
+                f"data.{source} at a pre-upsampled dataset (e.g. sisr.datasets.pre_upsampled), "
                 f"or switch to a native_lr model."
             )
 
@@ -309,10 +309,10 @@ class SRLightning(lightning.LightningModule):
             f"{type(self.model).__name__}.input_contract='native_lr' requires "
             f"hr.shape[-2:] == lr.shape[-2:] * training_config.scale ({scale}), but "
             f"data.{source} ({ds_name}) served lr {lr_hw}, hr {hr_hw} (expected "
-            f"{expected_hw}). A pre-upsampled dataset (e.g. sisr.datasets.srcnn) "
+            f"{expected_hw}). A pre-upsampled dataset (e.g. sisr.datasets.pre_upsampled) "
             f"paired with a native-LR model silently zero-pads in "
             f"SRLightning._forward_sr instead of raising — point data.{source} at a "
-            f"native-LR dataset (e.g. sisr.datasets.srresnet), or fix "
+            f"native-LR dataset (e.g. sisr.datasets.native_lr), or fix "
             f"training_config.scale."
         )
 
