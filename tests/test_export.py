@@ -17,6 +17,7 @@ onnx = pytest.importorskip("onnx")
 onnxruntime = pytest.importorskip("onnxruntime")
 
 from sisr.export import to_onnx  # noqa: E402
+from sisr.models.base import SRModelOutput  # noqa: E402
 from sisr.models.srcnn import SRCNN, SRCNNTrainingConfig  # noqa: E402
 from sisr.models.srresnet import SRResNet, SRResNetTrainingConfig  # noqa: E402
 from sisr.processors import RGBProcessor, YChannelProcessor  # noqa: E402
@@ -260,3 +261,62 @@ def test_to_onnx_metadata_props_skip_cleanly_without_ckpt_sisr_meta(tmp_path):
     assert training_field["monitor"] is None
     assert training_field["monitor_value"] is None
     assert training_field["global_step"] is None
+
+
+class _RecordWrappingSRCNN(SRCNN):
+    """See tests/training/test_lightning_module.py's twin -- proves the
+    traced ONNX graph is indifferent to which return shape the model uses."""
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary + 1.0})
+
+
+def test_to_onnx_exports_only_the_primary_when_the_model_returns_a_record(tmp_path):
+    """A model returning SRModelOutput must export identically to one
+    returning a bare tensor -- to_onnx traces only the primary field."""
+    model = _RecordWrappingSRCNN(
+        num_channels=1, num_filters=(8, 4), kernel_sizes=(5, 1, 3), padding=0
+    )
+    training_config = SRCNNTrainingConfig(example_input_shape=(1, 32, 32), scale=2)
+    module = SRLightning(
+        model=model, processor=YChannelProcessor(), training_config=training_config
+    )
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path)
+
+    model.eval()
+    x = torch.rand(1, 1, 40, 40)
+    with torch.no_grad():
+        expected = model(x).primary.numpy()
+    actual = _run_ort(onnx_path, x)
+    np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("make_module", "example_input_shape"),
+    [
+        (_make_srcnn_module, (1, 32, 32)),
+        (_make_srresnet_module, (3, 32, 32)),
+    ],
+    ids=["srcnn", "srresnet"],
+)
+def test_to_onnx_plain_model_initializer_names_have_no_wrapped_prefix(
+    tmp_path, make_module, example_input_shape
+):
+    """A plain-tensor model's export must take the untouched code path: none
+    of its initializer names in the exported graph gain the "wrapped." prefix
+    _PrimaryOnly would add. (The tracer also emits ordinary onnx::-prefixed
+    constant initializers that aren't state_dict entries at all, so a full
+    state_dict-subset check isn't the right stronger assertion here.)"""
+    module = make_module(example_input_shape=example_input_shape)
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path)
+
+    onnx_model = onnx.load(str(onnx_path))
+    initializer_names = {init.name for init in onnx_model.graph.initializer}
+
+    wrapped_names = {name for name in initializer_names if name.startswith("wrapped.")}
+    assert not wrapped_names

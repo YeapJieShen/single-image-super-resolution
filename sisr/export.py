@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from . import artifacts
+from .models.base import SRModelOutput, unwrap_primary
 
 if TYPE_CHECKING:
     from .training import SRLightning
@@ -49,6 +50,28 @@ def _require_onnx() -> None:
         import onnx  # noqa: F401
     except ImportError as e:
         raise ImportError(f"onnx is not installed. {_EXTRA_HINT}") from e
+
+
+class _PrimaryOnly(torch.nn.Module):
+    """Traces only a model's primary output, whichever return shape it uses.
+
+    ``torch.onnx.export``'s legacy tracer accepts only tensors (or plain
+    tuples/lists/dicts of them) as outputs -- a model returning
+    :class:`~sisr.models.base.SRModelOutput` cannot be traced directly
+    (``RuntimeError: ... unsupported type``). ``to_onnx`` only wraps a model
+    in this when it actually returns a record (see the ``wraps_output``
+    probe below), so every existing bare-tensor export is completely
+    untouched -- this shim's cosmetic cost (initializer names in the traced
+    graph gain a ``wrapped.`` prefix) is paid only when unwrapping is
+    actually needed.
+    """
+
+    def __init__(self, wrapped: torch.nn.Module):
+        super().__init__()
+        self.wrapped = wrapped
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return unwrap_primary(self.wrapped(x))
 
 
 def to_onnx(
@@ -127,6 +150,9 @@ def to_onnx(
     was_training = model.training
     model.eval()
     try:
+        with torch.no_grad():
+            wraps_output = isinstance(model(input_sample), SRModelOutput)
+        trace_target = _PrimaryOnly(model) if wraps_output else model
         with warnings.catch_warnings():
             # dynamo=False (the legacy TorchScript exporter) is deliberate: torch's
             # newer torch.export-based path needs `onnxscript`, outside the
@@ -144,7 +170,7 @@ def to_onnx(
             warnings.filterwarnings("ignore", category=DeprecationWarning)
             warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
             torch.onnx.export(
-                model,
+                trace_target,
                 (input_sample,),
                 str(file_path),
                 input_names=["input"],
