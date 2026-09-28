@@ -150,7 +150,8 @@ eval_config:
 
 Other fields: `crop_border`, `psnr_channels`, `ssim_channels`, `separate_psnr`,
 `perceptual_metrics` (`lpips` needs the `[perceptual]` extra; `dists` ships in core),
-and `lpips_net` — a LPIPS figure is only comparable under the same backbone.
+`lpips_net` — a LPIPS figure is only comparable under the same backbone — and
+`quantize_uint8` (round SR/HR to 8-bit levels before PSNR only; on by default for SRCNN, matching Dong et al.).
 
 ---
 
