@@ -376,6 +376,79 @@ def test_configure_optimizers_no_scheduler_returns_bare(srcnn_rgb_lit: SRLightni
     assert isinstance(out, torch.optim.Optimizer)
 
 
+def _grad_after_clip(
+    scale_clip_with_lr: bool, theta: float, initial_lr: float, gamma: float, n_batches: int
+) -> list[float]:
+    """Runs a real Trainer over ``n_batches`` (batch_size=1) with
+    ``gradient_clip_val=theta``, ``gradient_clip_algorithm="value"``, and a
+    ``StepLR(step_size=1, gamma=gamma)`` scheduler (stepped once per batch, #273). Returns
+    ``feat[0].weight.grad.abs().max()`` captured at ``on_train_batch_end`` for every batch —
+    after clipping has run (``Precision._clip_gradients`` fires before ``optimizer.step()``)
+    and before the next batch's backward overwrites ``.grad``.
+
+    HR targets are scaled far outside the model's output range (``* 1000 + 500``) so every
+    element of every gradient tensor saturates the clip in both directions tested here —
+    guaranteeing ``grad.abs().max() == grad.abs().min() == the clip value`` exactly, not just
+    an upper bound.
+    """
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2, scale_clip_with_lr=scale_clip_with_lr),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=initial_lr),
+        lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=1, gamma=gamma),
+    )
+    g = torch.Generator().manual_seed(0)
+    lr_imgs = torch.rand(n_batches, 3, 33, 33, generator=g)
+    hr_imgs = torch.rand(n_batches, 3, 33, 33, generator=g) * 1000 + 500
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(lr_imgs, hr_imgs), batch_size=1
+    )
+
+    captured: list[float] = []
+
+    class _GradSpy(lightning.Callback):
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            captured.append(pl_module.model.feat[0].weight.grad.abs().max().item())
+
+    trainer = lightning.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=0,
+        gradient_clip_val=theta,
+        gradient_clip_algorithm="value",
+        callbacks=[_GradSpy()],
+    )
+    trainer.fit(lit, loader)
+    return captured
+
+
+def test_configure_gradient_clipping_off_clips_at_raw_theta_regardless_of_lr():
+    """#286 regression guard: scale_clip_with_lr=False (explicit) must behave exactly like
+    Lightning's own unoverridden clipping -- unaffected by the lr schedule."""
+    grads = _grad_after_clip(
+        scale_clip_with_lr=False, theta=0.01, initial_lr=1.0, gamma=0.5, n_batches=2
+    )
+    assert grads[0] == pytest.approx(0.01)
+    assert grads[1] == pytest.approx(0.01)
+
+
+def test_configure_gradient_clipping_scales_by_current_lr_when_enabled():
+    """#286: scale_clip_with_lr=True clips to theta/current_lr, exercised across a real
+    scheduler step (StepLR halves lr right after batch 1)."""
+    grads = _grad_after_clip(
+        scale_clip_with_lr=True, theta=0.01, initial_lr=1.0, gamma=0.5, n_batches=2
+    )
+    assert grads[0] == pytest.approx(0.01)  # theta / lr=1.0
+    assert grads[1] == pytest.approx(0.02)  # theta / lr=0.5
+
+
 # ---------------------------------------------------------------------------
 # test_step / build_metric_tensors / flatten_hparams
 # ---------------------------------------------------------------------------
