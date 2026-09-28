@@ -429,6 +429,13 @@ def _grad_after_clip(
     return captured
 
 
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:You defined a `validation_step` but have no `val_dataloader`:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
 def test_configure_gradient_clipping_off_clips_at_raw_theta_regardless_of_lr():
     """#286 regression guard: scale_clip_with_lr=False (explicit) must behave exactly like
     Lightning's own unoverridden clipping -- unaffected by the lr schedule."""
@@ -439,14 +446,22 @@ def test_configure_gradient_clipping_off_clips_at_raw_theta_regardless_of_lr():
     assert grads[1] == pytest.approx(0.01)
 
 
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:You defined a `validation_step` but have no `val_dataloader`:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
 def test_configure_gradient_clipping_scales_by_current_lr_when_enabled():
     """#286: scale_clip_with_lr=True clips to theta/current_lr, exercised across a real
-    scheduler step (StepLR halves lr right after batch 1)."""
+    scheduler step (StepLR halves lr right after batch 1). Mutation X1: using
+    theta*initial_lr/current_lr instead would give 0.01 and 0.02, which this test catches."""
     grads = _grad_after_clip(
-        scale_clip_with_lr=True, theta=0.01, initial_lr=1.0, gamma=0.5, n_batches=2
+        scale_clip_with_lr=True, theta=0.01, initial_lr=0.1, gamma=0.5, n_batches=2
     )
-    assert grads[0] == pytest.approx(0.01)  # theta / lr=1.0
-    assert grads[1] == pytest.approx(0.02)  # theta / lr=0.5
+    assert grads[0] == pytest.approx(0.1)  # theta / lr=0.1
+    assert grads[1] == pytest.approx(0.2)  # theta / lr=0.05
 
 
 # ---------------------------------------------------------------------------

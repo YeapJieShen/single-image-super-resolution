@@ -114,6 +114,20 @@ class SRTrainingConfig:
             does not hold across precisions**: ``'max-autotune'`` beat
             ``'reduce-overhead'`` under bf16 and lost under fp32 — measure per
             configuration, never assume.
+
+        scale_clip_with_lr: When ``True``, ``SRLightning.configure_gradient_clipping``
+            clips gradients to ``gradient_clip_val / current_lr`` instead of the trainer's
+            raw ``gradient_clip_val`` — so the gradient bound widens as the LR decays,
+            and the update ``lr · g`` stays bounded by the threshold (VDSR's adjustable
+            gradient clipping). ``Trainer(gradient_clip_val=..., gradient_clip_algorithm=...)``
+            stays the one place the threshold itself is set; this only changes what it scales by.
+            Default ``False`` is Lightning's own unscaled behavior, unchanged. Reads the *first*
+            optimizer param group's ``lr`` — the uniform-LR case this flag is meant for;
+            combining it with ``layer_lrs`` (per-``Conv2d`` param groups) is unsupported and
+            untested. **Manual optimization refuses this flag outright** —
+            ``SRGANLightning`` raises at construction if it is set, because Lightning never
+            calls ``configure_gradient_clipping`` under manual optimization at all, so the
+            flag would otherwise be silently accepted and silently do nothing.
     """
 
     layer_lrs: list[float | list[float]] | None = None
@@ -124,6 +138,7 @@ class SRTrainingConfig:
     scale: int | None = None
     compile_backend: str | None = None
     compile_mode: str | None = None
+    scale_clip_with_lr: bool = False
 
     def __post_init__(self) -> None:
         """Reject a compile mode that nothing will apply, and values that mean nothing.
