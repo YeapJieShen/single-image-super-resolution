@@ -317,9 +317,10 @@ class SRScorer:
         """Mean perceptual score under the configured backbone.
 
         Args:
-            name: ``'lpips'`` or ``'dists'``.
+            name: Any key of :data:`~sisr.metrics.perceptual.PERCEPTUAL_METRICS`.
             sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
-            hr: Reference, same shape.
+            hr: Reference, same shape. Ignored by the no-reference metrics, which
+                score the same cropped ``sr`` the paired metrics see.
 
         Returns:
             0-dim tensor.

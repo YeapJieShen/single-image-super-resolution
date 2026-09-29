@@ -376,13 +376,14 @@ class SREvalConfig:
             same setting. The value is recorded in ``hparams`` and in every
             artifact's ``sisr_meta`` so any checkpoint can be traced back.
 
-        perceptual_metrics: Perceptual metrics to report, from ``'lpips'`` and
-            ``'dists'``. Empty by default, so an architecture that never asks
-            for them logs exactly the tags it logged before. Both are
-            lower-is-better and RGB-only (no colorspace decomposition), so they
-            get their own tag families ``lpips/val`` / ``dists/val`` rather than
-            a key under the PSNR/SSIM scheme. ``'lpips'`` requires the
-            ``[perceptual]`` extra.
+        perceptual_metrics: Perceptual metrics to report: the paired ``'lpips'`` and
+            ``'dists'``, and the no-reference ``'niqe'``, ``'ma'`` and ``'pi'`` (see
+            :mod:`sisr.metrics.perceptual`). Empty by default, so an architecture
+            that never asks for them logs exactly the tags it logged before. All are
+            lower-is-better except ``'ma'``, and none has a colorspace
+            decomposition, so each gets its own tag family (``lpips/val``,
+            ``niqe/val``, ...) rather than a key under the PSNR/SSIM scheme. All but
+            ``'dists'`` require the ``[perceptual]`` extra.
 
         lpips_net: LPIPS backbone — ``'alex'`` (default, and what the SR
             literature usually reports), ``'vgg'`` or ``'squeeze'``. **A LPIPS
