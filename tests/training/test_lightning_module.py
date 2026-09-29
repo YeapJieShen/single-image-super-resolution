@@ -11,6 +11,7 @@ import torchmetrics
 
 from sisr.losses import SRLoss
 from sisr.metrics.scoring import SRScorer
+from sisr.models.base import SRModelOutput, unwrap_primary
 from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
@@ -61,6 +62,27 @@ def rgb_lr_hr_batch() -> tuple[torch.Tensor, torch.Tensor]:
     lr = torch.rand(2, 3, 33, 33, generator=g)
     hr = torch.rand(2, 3, 33, 33, generator=g)
     return lr, hr
+
+
+class _RecordWrappingSRCNN(SRCNN):
+    """Wraps real SRCNN's forward in SRModelOutput -- proves every downstream
+    consumer (reconstruct, shape checks, predict, a non-opted-in loss) is
+    indifferent to which return shape a model uses."""
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary + 1.0})
+
+
+def _paired_lits() -> tuple[SRLightning, SRLightning]:
+    """A plain-tensor SRCNN and a record-wrapping twin, identical weights."""
+    plain_model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0)
+    record_model = _RecordWrappingSRCNN(
+        num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0
+    )
+    record_model.load_state_dict(plain_model.state_dict())
+    kwargs = dict(processor=RGBProcessor(), eval_config=SREvalConfig(crop_border=0))
+    return SRLightning(model=plain_model, **kwargs), SRLightning(model=record_model, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -2460,3 +2482,203 @@ def test_eval_padding_makes_the_scored_region_the_authors():
 
     assert sr.shape == hr.shape, "same-padded inference must not shrink the SR field"
     assert hr_aligned.shape == hr.shape, "so center_crop must have nothing left to take"
+
+
+# ---------------------------------------------------------------------------
+# SRModelOutput — record-returning model
+# ---------------------------------------------------------------------------
+
+
+def test_step_loss_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss_plain, *_ = plain._step((lr, hr))
+    loss_record, *_ = record._step((lr, hr))
+
+    assert torch.equal(loss_plain, loss_record)
+
+
+def test_predict_step_output_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr = torch.rand(2, 3, 8, 8)
+
+    assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
+
+
+def test_predict_rgb_output_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    sr_plain, hr_plain = plain.predict_rgb(lr, hr)
+    sr_record, hr_record = record.predict_rgb(lr, hr)
+
+    assert torch.equal(sr_plain, sr_record)
+    assert torch.equal(hr_plain, hr_record)
+
+
+def test_self_ensembled_predict_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    """Self-ensembling averages the primary only -- the one field predict, metrics and
+    export read -- so a record-returning model ensembles exactly like its plain twin.
+    Compared unclamped too: a tiny random SRCNN can clamp to all zeros, which would make
+    the clamped comparisons vacuous."""
+    torch.manual_seed(0)
+    plain, record = _paired_lits()
+    plain.eval_config.self_ensemble = record.eval_config.self_ensemble = True
+    lr, hr = torch.rand(2, 3, 8, 6), torch.rand(2, 3, 8, 6)
+
+    raw_plain, _ = plain._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    raw_record, _ = record._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    assert torch.equal(raw_plain, raw_record)
+    single_pass, _ = plain._forward_lr(lr, need_sr_rgb=False)
+    assert not torch.equal(raw_plain, single_pass)
+    assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
+    sr_plain, _ = plain.predict_rgb(lr, hr, self_ensemble=True)
+    sr_record, _ = record.predict_rgb(lr, hr, self_ensemble=True)
+    assert torch.equal(sr_plain, sr_record)
+    assert not torch.equal(sr_plain, plain.predict_rgb(lr, hr)[0])
+
+
+class _RecordAwareLoss(SRLoss):
+    """Test double: opts in to the full model output and records what it saw."""
+
+    wants_model_output = True
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        primary = unwrap_primary(pred)
+        extra = pred.extras["echo"] if isinstance(pred, SRModelOutput) else primary
+        return torch.nn.functional.mse_loss(primary, target) + torch.nn.functional.mse_loss(
+            extra, target
+        )
+
+
+class _InstanceOptInLoss(_RecordAwareLoss):
+    """Opts in on the instance only; the class attribute says False."""
+
+    wants_model_output = False
+
+    def __init__(self):
+        super().__init__()
+        self.wants_model_output = True
+
+
+@pytest.mark.parametrize("loss_cls", [_RecordAwareLoss, _InstanceOptInLoss])
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_opts_in_receives_the_full_record_not_only_primary(need_sr_rgb, loss_cls):
+    """wants_model_output=True is the opt-in -- such a loss must see the
+    SRModelOutput itself, extras included, not only its primary field,
+    whether the class or the instance sets it.
+
+    Parametrized over need_sr_rgb: training_step calls _step with False,
+    every other caller with the True default, and the record must survive
+    _forward_lr's early return the same way in both."""
+    _, record = _paired_lits()
+    record.criterion = loss_cls()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert len(record.criterion.received) == 1
+    assert isinstance(record.criterion.received[0], SRModelOutput)
+
+
+class _ExtraHeadSRCNN(SRCNN):
+    """SRCNN whose only extra depends on a parameter the primary never touches."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_gain = torch.nn.Parameter(torch.tensor(2.0))
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary * self.extra_gain})
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_an_opted_in_loss_backpropagates_through_the_extras(need_sr_rgb):
+    """A loss term on an extra must train the model: gradient has to reach a
+    parameter used only by that extra. A record handed over detached would train
+    as if the term were not there."""
+    model = _ExtraHeadSRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0)
+    lit = SRLightning(
+        model=model, processor=RGBProcessor(), eval_config=SREvalConfig(crop_border=0)
+    )
+    lit.criterion = _RecordAwareLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss, *_ = lit._step((lr, hr), need_sr_rgb=need_sr_rgb)
+    loss.backward()
+
+    assert model.extra_gain.grad is not None
+    assert model.extra_gain.grad.abs().item() > 0
+
+
+class _PlainCapturingLoss(SRLoss):
+    """Test double with NO wants_model_output -- the default, opted-out case."""
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_does_not_opt_in_never_sees_the_record(need_sr_rgb):
+    """No wants_model_output attribute -> the criterion must keep getting
+    exactly today's bare primary tensor, even when the model returns a
+    record with extras, on either need_sr_rgb path."""
+    _, record = _paired_lits()
+    record.criterion = _PlainCapturingLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert not isinstance(record.criterion.received[0], SRModelOutput)
+
+
+class _ExplicitOptOutLoss(SRLoss):
+    """Test double with wants_model_output SET to False, not merely absent --
+    the third member of the True/absent/explicit-False trio. A check using
+    hasattr instead of getattr(..., False) would treat this the same as
+    wants_model_output = True, since the attribute exists either way."""
+
+    wants_model_output = False
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_explicitly_sets_wants_model_output_false_never_sees_the_record(need_sr_rgb):
+    """wants_model_output = False, set explicitly rather than left absent,
+    must behave exactly like the opted-out default, on either need_sr_rgb
+    path."""
+    _, record = _paired_lits()
+    record.criterion = _ExplicitOptOutLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert not isinstance(record.criterion.received[0], SRModelOutput)

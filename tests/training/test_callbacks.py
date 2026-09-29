@@ -16,12 +16,14 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from PIL import Image
 
 from sisr import artifacts
+from sisr.losses import WeightedSumLoss
 from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
     BenchmarkImageLogger,
     GradNormLogger,
+    LossWeightScheduler,
     SRCheckpoint,
     SREvalConfig,
     SRLightning,
@@ -420,6 +422,111 @@ def test_grad_norm_logger_cadence_counts_batches_not_optimizer_steps():
         _make_step_axis_trainer(global_step=14, batches_that_stepped=10), pl_module
     )
     pl_module.log.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# LossWeightScheduler
+# ---------------------------------------------------------------------------
+
+
+def _make_scheduler_pl_module() -> SimpleNamespace:
+    criterion = WeightedSumLoss(terms={"aux": torch.nn.MSELoss()}, weights={"aux": 1.0})
+    return SimpleNamespace(criterion=criterion)
+
+
+def test_loss_weight_scheduler_hits_start_middle_and_end_exactly():
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=100)
+    pl_module = _make_scheduler_pl_module()
+
+    for step, expected in [(0, 1.0), (25, 0.75), (50, 0.5), (100, 0.0)]:
+        trainer = _make_step_axis_trainer(global_step=step, batches_that_stepped=step)
+        cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+        assert pl_module.criterion.weights["aux"] == pytest.approx(expected), step
+
+
+def test_loss_weight_scheduler_reads_the_batch_axis_not_the_optimizer_axis():
+    """Same discipline as GradNormLogger's cadence test, applied to a
+    scheduled VALUE instead of a cadence gate: global_step says "past the
+    end" (200 >= duration 100); batches_that_stepped says "exactly halfway"
+    (50). Only reading the batch axis can produce the midpoint value."""
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=100)
+    pl_module = _make_scheduler_pl_module()
+    trainer = _make_step_axis_trainer(global_step=200, batches_that_stepped=50)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.5)
+
+
+def test_loss_weight_scheduler_honours_a_nonzero_start_step():
+    cb = LossWeightScheduler(
+        term="aux", start_value=1.0, end_value=0.0, duration=100, start_step=10
+    )
+    pl_module = _make_scheduler_pl_module()
+
+    trainer = _make_step_axis_trainer(global_step=5, batches_that_stepped=5)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(1.0)
+
+    trainer = _make_step_axis_trainer(global_step=35, batches_that_stepped=35)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.75)
+
+    trainer = _make_step_axis_trainer(global_step=60, batches_that_stepped=60)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.5)
+
+    trainer = _make_step_axis_trainer(global_step=500, batches_that_stepped=500)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.0)
+
+
+def test_loss_weight_scheduler_does_not_reach_end_value_one_step_early():
+    """The ramp must still be interpolating at duration - 1, not already
+    clamped to end_value -- catches an off-by-one end clamp."""
+    cb = LossWeightScheduler(
+        term="aux", start_value=1.0, end_value=0.0, duration=100, start_step=10
+    )
+    pl_module = _make_scheduler_pl_module()
+    trainer = _make_step_axis_trainer(global_step=109, batches_that_stepped=109)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.01)
+
+
+def test_loss_weight_scheduler_writes_only_the_named_term():
+    """Every other scheduler test uses a single-term criterion, which can't
+    see *which* term got written -- a scheduler pointed at "main" that
+    actually wrote the first term in sorted order ("aux"), or wrote every
+    term, would still pass all of them. "main" sorts after "aux" so this
+    also catches a scheduler that defaults to sorted(weights)[0]."""
+    criterion = WeightedSumLoss(
+        terms={"aux": torch.nn.MSELoss(), "main": torch.nn.L1Loss()},
+        weights={"aux": 0.3, "main": 1.0},
+    )
+    pl_module = SimpleNamespace(criterion=criterion)
+    cb = LossWeightScheduler(term="main", start_value=1.0, end_value=0.0, duration=100)
+    trainer = _make_step_axis_trainer(global_step=25, batches_that_stepped=25)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights == pytest.approx({"aux": 0.3, "main": 0.75})
+
+
+def test_loss_weight_scheduler_rejects_a_criterion_with_no_set_weight():
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=10)
+    pl_module = SimpleNamespace(criterion=torch.nn.MSELoss())
+    trainer = _make_step_axis_trainer(global_step=0, batches_that_stepped=0)
+
+    with pytest.raises(TypeError, match="set_weight"):
+        cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+
+@pytest.mark.parametrize("duration", [0, -5])
+def test_loss_weight_scheduler_construction_rejects_a_non_positive_duration(duration):
+    with pytest.raises(ValueError, match="duration"):
+        LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=duration)
 
 
 # ---------------------------------------------------------------------------
