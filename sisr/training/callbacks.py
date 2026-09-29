@@ -250,6 +250,7 @@ class BenchmarkImageLogger(Callback):
             source_dataloaders=trainer.val_dataloaders,
             dataloader_idx=dataloader_idx,
             should_log_images=self._on_image_log_interval(),
+            self_ensemble=False,
         )
 
     def on_validation_epoch_end(
@@ -312,6 +313,7 @@ class BenchmarkImageLogger(Callback):
             source_dataloaders=trainer.test_dataloaders,
             dataloader_idx=dataloader_idx,
             should_log_images=True,
+            self_ensemble=_sr(pl_module).eval_config.self_ensemble,
         )
 
     def on_test_epoch_end(
@@ -343,6 +345,7 @@ class BenchmarkImageLogger(Callback):
         source_dataloaders: Sequence[Any] | None,
         dataloader_idx: int,
         should_log_images: bool,
+        self_ensemble: bool = False,
     ) -> None:
         """Forward one batch, compute per-image metrics on-device, and stream image strips.
 
@@ -358,6 +361,11 @@ class BenchmarkImageLogger(Callback):
         callback cannot diverge from ``validation_step`` on the crop, the
         reductions, or which backbone an ``eval_config`` means.
 
+        ``self_ensemble`` is forwarded to ``predict_rgb`` unchanged: :meth:`on_test_batch_end`
+        passes ``pl_module.eval_config.self_ensemble``; :meth:`on_validation_batch_end` always
+        passes ``False`` — self-ensembling must never apply during validation, whether that
+        validation is `fit`'s periodic cycle or a bare `cli validate`.
+
         When images or per-image scalars are wanted, exactly one host transfer
         per image composes them and both are emitted immediately — **nothing
         image-shaped is buffered**; only a ``BenchmarkSample`` is kept, for
@@ -366,7 +374,7 @@ class BenchmarkImageLogger(Callback):
         lr_img, hr_img = batch
 
         with torch.no_grad():
-            sr, hr_cropped = _sr(pl_module).predict_rgb(lr_img, hr_img)
+            sr, hr_cropped = _sr(pl_module).predict_rgb(lr_img, hr_img, self_ensemble=self_ensemble)
 
         # Resolve filenames from the underlying dataset for use as TB tags.
         # Optional only because Lightning declares the loader lists for every

@@ -31,6 +31,7 @@ def test_sr_eval_config_defaults():
     # Y-SSIM ships without waiting for an architecture subclass to add it.
     assert cfg.ssim_channels == ["RGB", "Y"]
     assert cfg.ssim_impl == "wang"
+    assert cfg.self_ensemble is False
 
 
 def test_sr_eval_config_psnr_channels_isolated_per_instance():
@@ -74,6 +75,7 @@ def test_sr_eval_config_field_names():
         "ssim_impl",
         "perceptual_metrics",
         "lpips_net",
+        "self_ensemble",
     }
 
 

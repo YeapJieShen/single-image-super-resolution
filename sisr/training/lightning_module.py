@@ -25,6 +25,7 @@ from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
 from .metadata import build_metadata
 from .probe import probe_pair
+from .self_ensemble import self_ensemble_forward
 
 
 class SRLightning(lightning.LightningModule):
@@ -439,21 +440,24 @@ class SRLightning(lightning.LightningModule):
     # and predict_step use the value without each re-proving it is not None.
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
+        self,
+        lr_img: torch.Tensor,
+        need_sr_rgb: Literal[True] = True,
+        self_ensemble: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: Literal[False]
+        self, lr_img: torch.Tensor, need_sr_rgb: Literal[False], self_ensemble: bool = False
     ) -> tuple[torch.Tensor, None]: ...
 
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: bool
+        self, lr_img: torch.Tensor, need_sr_rgb: bool, self_ensemble: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: bool = True
+        self, lr_img: torch.Tensor, need_sr_rgb: bool = True, self_ensemble: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """LR-only core of the forward pipeline: extract -> model -> (reconstruct).
 
@@ -473,6 +477,13 @@ class SRLightning(lightning.LightningModule):
                 passing ``False`` — it discards ``sr_rgb``, and reconstruct
                 costs real time (~11.5% of a data-free SRCNN step for
                 ``YChannelProcessor``; ~0 for SRResNet's elementwise ones).
+            self_ensemble: When ``True``, routes the model call through
+                :func:`~sisr.training.self_ensemble.self_ensemble_forward` (8 forward passes,
+                averaged) instead of calling the model once. Callers gate this on
+                ``eval_config.self_ensemble`` themselves — this method never reads
+                ``eval_config`` — so :meth:`training_step`/:meth:`validation_step` (via
+                :meth:`_step`) never pass it, keeping training/validation cost unchanged
+                regardless of the config.
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — raw model output in the model IO
@@ -481,7 +492,9 @@ class SRLightning(lightning.LightningModule):
         """
         model_input = self.processor.extract(lr_img)
         model_fn = self._compiled if self.training and self._compiled is not None else self.model
-        sr_model_out = model_fn(model_input)
+        sr_model_out = (
+            self_ensemble_forward(model_fn, model_input) if self_ensemble else model_fn(model_input)
+        )
         if not need_sr_rgb:
             return sr_model_out, None
         sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
@@ -496,21 +509,37 @@ class SRLightning(lightning.LightningModule):
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: Literal[True] = True,
+        self_ensemble: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[False]
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: Literal[False],
+        self_ensemble: bool = False,
     ) -> tuple[torch.Tensor, None, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: bool,
+        self_ensemble: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
 
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool = True
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: bool = True,
+        self_ensemble: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Canonical SR forward: extract -> model -> (reconstruct) -> crop HR.
 
@@ -525,6 +554,7 @@ class SRLightning(lightning.LightningModule):
             need_sr_rgb: Forwarded to :meth:`_forward_lr`. The HR crop uses
                 ``sr_model_out.shape[-2:]`` regardless, since every shipped
                 ``SRProcessor.reconstruct`` preserves H/W.
+            self_ensemble: Forwarded to :meth:`_forward_lr` — see there.
 
         Returns:
             ``(sr_model_out, sr_rgb, hr_cropped)`` — raw (unclamped) model
@@ -540,7 +570,9 @@ class SRLightning(lightning.LightningModule):
                 mismatch) earlier and louder; this guards callers that bypass
                 it, such as direct ``_forward_sr``/``_step`` calls in tests.
         """
-        sr_model_out, sr_rgb = self._forward_lr(lr_img, need_sr_rgb=need_sr_rgb)
+        sr_model_out, sr_rgb = self._forward_lr(
+            lr_img, need_sr_rgb=need_sr_rgb, self_ensemble=self_ensemble
+        )
         hr_hw, sr_hw = hr_img.shape[-2:], sr_model_out.shape[-2:]
         if hr_hw[0] < sr_hw[0] or hr_hw[1] < sr_hw[1]:
             raise ValueError(
@@ -556,7 +588,7 @@ class SRLightning(lightning.LightningModule):
         return sr_model_out, sr_rgb, hr_cropped
 
     def predict_rgb(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, self_ensemble: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the SR forward and return spatially-aligned SR / HR RGB tensors.
 
@@ -571,12 +603,16 @@ class SRLightning(lightning.LightningModule):
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
                 ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
+            self_ensemble: Forwarded to :meth:`_forward_sr` — see there. Callers decide this
+                explicitly: :class:`~sisr.training.callbacks.BenchmarkImageLogger` passes
+                ``eval_config.self_ensemble`` only from its *test*-stage hook, always ``False``
+                from its validation-stage one.
 
         Returns:
             ``(sr_rgb, hr_cropped)`` — SR RGB clamped to ``[0, 1]`` and HR
             center-cropped to the SR spatial size, both RGB ``float32``.
         """
-        _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
+        _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, self_ensemble=self_ensemble)
         return sr_rgb, hr_cropped
 
     @overload
@@ -862,6 +898,9 @@ class SRLightning(lightning.LightningModule):
     ) -> torch.Tensor:
         """Run the HR-free inference pipeline: extract → model → reconstruct.
 
+        Self-ensembles (8 forward passes, averaged) when ``eval_config.self_ensemble`` is
+        ``True`` — see :meth:`_forward_lr`.
+
         Shares :meth:`_forward_lr` with :meth:`_forward_sr` (the pipeline
         backing :meth:`_step` / :meth:`predict_rgb`) — the same colorspace
         pipeline minus the HR-dependent center-crop and scoring, neither of
@@ -885,7 +924,7 @@ class SRLightning(lightning.LightningModule):
             explicit int) shrinks H/W per conv layer (see
             :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
         """
-        _, sr_rgb = self._forward_lr(batch)
+        _, sr_rgb = self._forward_lr(batch, self_ensemble=self.eval_config.self_ensemble)
         return sr_rgb
 
     def resolved_scale(self, why: str) -> int:
