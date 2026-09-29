@@ -2519,11 +2519,19 @@ def test_predict_rgb_output_is_identical_whether_the_model_returns_a_tensor_or_a
 
 def test_self_ensembled_predict_is_identical_whether_the_model_returns_a_tensor_or_a_record():
     """Self-ensembling averages the primary only -- the one field predict, metrics and
-    export read -- so a record-returning model ensembles exactly like its plain twin."""
+    export read -- so a record-returning model ensembles exactly like its plain twin.
+    Compared unclamped too: a tiny random SRCNN can clamp to all zeros, which would make
+    the clamped comparisons vacuous."""
+    torch.manual_seed(0)
     plain, record = _paired_lits()
     plain.eval_config.self_ensemble = record.eval_config.self_ensemble = True
     lr, hr = torch.rand(2, 3, 8, 6), torch.rand(2, 3, 8, 6)
 
+    raw_plain, _ = plain._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    raw_record, _ = record._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    assert torch.equal(raw_plain, raw_record)
+    single_pass, _ = plain._forward_lr(lr, need_sr_rgb=False)
+    assert not torch.equal(raw_plain, single_pass)
     assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
     sr_plain, _ = plain.predict_rgb(lr, hr, self_ensemble=True)
     sr_record, _ = record.predict_rgb(lr, hr, self_ensemble=True)
