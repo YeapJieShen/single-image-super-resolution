@@ -36,7 +36,7 @@ def as_int_tuple(name: str, value: Sequence[int]) -> tuple[int, ...]:
 class SRModelOutput:
     """A model's output when it has more to expose than one SR tensor.
 
-    Recursive-supervision architectures (e.g. DRCN, #282) need named
+    Recursive-supervision architectures (e.g. DRCN) need named
     intermediates downstream (a loss that opts in) while every existing
     consumer -- metrics, predict, export -- must keep seeing exactly what it
     sees today. A model returning this instead of a bare tensor is the one
@@ -115,7 +115,7 @@ class SRModel(nn.Module, abc.ABC):
 
         Returns a bare tensor (the historical, still-default contract) or,
         for an architecture with named intermediates a downstream loss might
-        want (e.g. DRCN's recursive supervision, #282), an
+        want (e.g. DRCN's recursive supervision), an
         :class:`SRModelOutput` wrapping ``primary`` plus those ``extras``.
         Every consumer that has not opted in reads only ``primary`` -- via
         :func:`unwrap_primary` -- so SRCNN/SRResNet are unaffected either way.
