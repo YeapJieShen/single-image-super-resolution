@@ -37,6 +37,11 @@ a remote host, and ``--wildcards`` for the subtree globs to expand)::
 
 then move all three dirs under ``data/reference/``.
 
+Urban100 (a fourth benchmark set, from the same archive) is fetched
+separately by tests/reference/fetch_urban100.py rather than by hand --
+run it once to populate data/reference/Urban100/{HR,LR_bicubic/{X2,X3,X4}}
+in the same layout as the three sets above.
+
 SRCNN's degradation is bicubic-down *then* bicubic-up (see
 :func:`sisr.datasets.srcnn._degrade`) -- the benchmark distribution above
 only covers the downscale leg. To also cover the upscale leg, generate, in
@@ -329,7 +334,7 @@ def test_resize_matches_matlab_imresize():
 
 def _reference_cases() -> list[tuple[str, Path, Path, int]]:
     cases = []
-    for dataset in ("Set5", "Set14", "B100"):
+    for dataset in ("Set5", "Set14", "B100", "Urban100"):
         hr_dir = REFERENCE_DIR / dataset / "HR"
         if not hr_dir.is_dir():
             continue
@@ -343,9 +348,10 @@ def _reference_cases() -> list[tuple[str, Path, Path, int]]:
 
 
 def test_matlab_imresize_matches_real_matlab_reference_data():
-    """Byte-equality against MATLAB-generated Set5/Set14 LR_bicubic pairs.
+    """Byte-equality against MATLAB-generated benchmark LR_bicubic pairs.
 
-    Generation convention (reverse-engineered and confirmed exact): crop HR
+    Tests the benchmark sets (Set5, Set14, BSD100, Urban100) using the same
+    generation convention (reverse-engineered and confirmed exact): crop HR
     to a multiple of `scale` (mod-crop), then bicubic-downsample the cropped
     array directly to the exact `(h_crop // scale, w_crop // scale)` target
     -- matching how this project's own datasets derive LR (crop first, then

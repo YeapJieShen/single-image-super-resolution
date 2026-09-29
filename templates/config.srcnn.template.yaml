@@ -66,6 +66,11 @@ data:
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale
+    Urban100:
+      class_path: sisr.datasets.srcnn.ValidationDataset
+      init_args:
+        img_dir: data/Urban100_HR
+        scale: *scale
   train_dataloader_kwargs:
     # The authors' released Caffe train prototxt: hdf5_data_param.batch_size 128.
     batch_size: 128
