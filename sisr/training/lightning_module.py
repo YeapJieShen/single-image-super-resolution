@@ -483,7 +483,8 @@ class SRLightning(lightning.LightningModule):
                 ``eval_config.self_ensemble`` themselves — this method never reads
                 ``eval_config`` — so :meth:`training_step`/:meth:`validation_step` (via
                 :meth:`_step`) never pass it, keeping training/validation cost unchanged
-                regardless of the config.
+                regardless of the config. Only the primary is ensembled, so the result
+                is a bare tensor even for a model returning an ``SRModelOutput``.
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — raw model output in the model IO
@@ -494,7 +495,9 @@ class SRLightning(lightning.LightningModule):
         model_input = self.processor.extract(lr_img)
         model_fn = self._compiled if self.training and self._compiled is not None else self.model
         sr_model_out = (
-            self_ensemble_forward(model_fn, model_input) if self_ensemble else model_fn(model_input)
+            self_ensemble_forward(lambda x: unwrap_primary(model_fn(x)), model_input)
+            if self_ensemble
+            else model_fn(model_input)
         )
         if not need_sr_rgb:
             return sr_model_out, None
