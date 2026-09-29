@@ -149,8 +149,10 @@ eval_config:
 ```
 
 Other fields: `crop_border`, `psnr_channels`, `ssim_channels`, `separate_psnr`,
-`perceptual_metrics` (`lpips` needs the `[perceptual]` extra; `dists` ships in core),
-and `lpips_net` — a LPIPS figure is only comparable under the same backbone.
+`perceptual_metrics` (the paired `lpips` and `dists`, and the no-reference `niqe`,
+`ma` and `pi`; all but `dists` need the `[perceptual]` extra, and `pi` applies PIRM's
+own 4-pixel shave on top of `crop_border`), and `lpips_net` — a LPIPS figure is only
+comparable under the same backbone.
 
 ---
 
