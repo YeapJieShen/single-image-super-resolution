@@ -147,6 +147,29 @@ def test_to_onnx_restores_training_mode(tmp_path, was_training):
     assert module.model.training is was_training
 
 
+def test_to_onnx_leaves_a_train_mode_batchnorm_model_untouched(tmp_path):
+    """Exporting must not change the model it exports. A freshly built or loaded module
+    is in train mode, where any forward updates BatchNorm running stats -- so the
+    export's own forwards must run in eval mode, and the graph must carry the weights
+    the module held before export."""
+    module = _make_srresnet_module(example_input_shape=(3, 16, 16))
+    module.model.train()
+    before = {k: v.clone() for k, v in module.model.state_dict().items()}
+    onnx_path = tmp_path / "model.onnx"
+
+    to_onnx(module, onnx_path)
+
+    after = module.model.state_dict()
+    assert [k for k in before if not torch.equal(before[k], after[k])] == []
+    reference = _make_srresnet_module(example_input_shape=(3, 16, 16)).model
+    reference.load_state_dict(before)
+    reference.eval()
+    x = torch.rand(1, 3, 20, 28, generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():
+        expected = reference(x).numpy()
+    np.testing.assert_allclose(_run_ort(onnx_path, x), expected, atol=1e-4, rtol=1e-3)
+
+
 def test_to_onnx_missing_onnx_raises_import_error_with_extra_hint(monkeypatch):
     """Simulates `onnx` missing (sys.modules poisoning) -> ImportError mentioning the extra."""
     monkeypatch.setitem(sys.modules, "onnx", None)

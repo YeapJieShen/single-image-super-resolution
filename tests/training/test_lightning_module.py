@@ -2517,6 +2517,20 @@ def test_predict_rgb_output_is_identical_whether_the_model_returns_a_tensor_or_a
     assert torch.equal(hr_plain, hr_record)
 
 
+def test_self_ensembled_predict_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    """Self-ensembling averages the primary only -- the one field predict, metrics and
+    export read -- so a record-returning model ensembles exactly like its plain twin."""
+    plain, record = _paired_lits()
+    plain.eval_config.self_ensemble = record.eval_config.self_ensemble = True
+    lr, hr = torch.rand(2, 3, 8, 6), torch.rand(2, 3, 8, 6)
+
+    assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
+    sr_plain, _ = plain.predict_rgb(lr, hr, self_ensemble=True)
+    sr_record, _ = record.predict_rgb(lr, hr, self_ensemble=True)
+    assert torch.equal(sr_plain, sr_record)
+    assert not torch.equal(sr_plain, plain.predict_rgb(lr, hr)[0])
+
+
 class _RecordAwareLoss(SRLoss):
     """Test double: opts in to the full model output and records what it saw."""
 
@@ -2538,22 +2552,65 @@ class _RecordAwareLoss(SRLoss):
         )
 
 
+class _InstanceOptInLoss(_RecordAwareLoss):
+    """Opts in on the instance only; the class attribute says False."""
+
+    wants_model_output = False
+
+    def __init__(self):
+        super().__init__()
+        self.wants_model_output = True
+
+
+@pytest.mark.parametrize("loss_cls", [_RecordAwareLoss, _InstanceOptInLoss])
 @pytest.mark.parametrize("need_sr_rgb", [True, False])
-def test_a_loss_that_opts_in_receives_the_full_record_not_only_primary(need_sr_rgb):
+def test_a_loss_that_opts_in_receives_the_full_record_not_only_primary(need_sr_rgb, loss_cls):
     """wants_model_output=True is the opt-in -- such a loss must see the
-    SRModelOutput itself, extras included, not only its primary field.
+    SRModelOutput itself, extras included, not only its primary field,
+    whether the class or the instance sets it.
 
     Parametrized over need_sr_rgb: training_step calls _step with False,
     every other caller with the True default, and the record must survive
     _forward_lr's early return the same way in both."""
     _, record = _paired_lits()
-    record.criterion = _RecordAwareLoss()
+    record.criterion = loss_cls()
     lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
 
     record._step((lr, hr), need_sr_rgb=need_sr_rgb)
 
     assert len(record.criterion.received) == 1
     assert isinstance(record.criterion.received[0], SRModelOutput)
+
+
+class _ExtraHeadSRCNN(SRCNN):
+    """SRCNN whose only extra depends on a parameter the primary never touches."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_gain = torch.nn.Parameter(torch.tensor(2.0))
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary * self.extra_gain})
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_an_opted_in_loss_backpropagates_through_the_extras(need_sr_rgb):
+    """A loss term on an extra must train the model: gradient has to reach a
+    parameter used only by that extra. A record handed over detached would train
+    as if the term were not there."""
+    model = _ExtraHeadSRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0)
+    lit = SRLightning(
+        model=model, processor=RGBProcessor(), eval_config=SREvalConfig(crop_border=0)
+    )
+    lit.criterion = _RecordAwareLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss, *_ = lit._step((lr, hr), need_sr_rgb=need_sr_rgb)
+    loss.backward()
+
+    assert model.extra_gain.grad is not None
+    assert model.extra_gain.grad.abs().item() > 0
 
 
 class _PlainCapturingLoss(SRLoss):
