@@ -1264,12 +1264,18 @@ def test_validation_step_never_self_ensembles_even_when_eval_config_enables_it(
     "ignore:The '.*' does not have many workers:"
     "lightning.pytorch.utilities.warnings.PossibleUserWarning",
 )
-def test_fit_never_self_ensembles_even_when_eval_config_enables_it(
-    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+@pytest.mark.parametrize(
+    ("entry_point", "expected"),
+    [("fit", {"train": 1, "eval": 1}), ("validate", {"train": 0, "eval": 1})],
+)
+def test_fit_and_validate_never_self_ensemble_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch, entry_point, expected
 ):
-    """Acceptance (#284): a real fit, where Lightning sets the train/eval mode and grad
-    state itself, calls the model once per training step and once per validation step,
-    even when eval_config.self_ensemble=True."""
+    """Acceptance (#284): a real fit or a standalone validate, where Lightning sets the
+    train/eval mode, grad and inference-mode state itself, calls the model once per
+    training step and once per validation step, even when eval_config.self_ensemble=True.
+    Both entry points, because fit validates under no_grad and a standalone validate under
+    inference_mode -- a gate keyed on either state is caught by one of them."""
     lit = srcnn_rgb_lit
     lit.eval_config.self_ensemble = True
     calls = {"train": 0, "eval": 0}
@@ -1293,8 +1299,11 @@ def test_fit_never_self_ensembles_even_when_eval_config_enables_it(
         enable_model_summary=False,
         num_sanity_val_steps=0,
     )
-    trainer.fit(lit, loader, loader)
-    assert calls == {"train": 1, "eval": 1}
+    if entry_point == "fit":
+        trainer.fit(lit, loader, loader)
+    else:
+        trainer.validate(lit, loader)
+    assert calls == expected
 
 
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
