@@ -65,8 +65,8 @@ class ESPCN(SRModel):
             )
         if any(k % 2 == 0 for k in kernel_sizes):
             raise ValueError(
-                f"kernel_sizes must all be odd, so the padding keeps each convolution "
-                f"shape-preserving; an even kernel shifts the output grid. Got {kernel_sizes}."
+                f"kernel_sizes must all be odd, so 'same' padding keeps each convolution "
+                f"shape-preserving. Got {kernel_sizes}."
             )
         if padding != "same" and (
             isinstance(padding, bool)
@@ -75,8 +75,8 @@ class ESPCN(SRModel):
         ):
             raise ValueError(
                 f"padding must be 'same' or (k - 1) // 2 for every kernel in {kernel_sizes}; "
-                f"got {padding!r}. PixelShuffle multiplies whatever size a convolution loses "
-                f"by scale."
+                f"got {padding!r}. This keeps the output exactly scale x the input: "
+                f"PixelShuffle multiplies whatever size a convolution loses by scale."
             )
 
         self._hparams = {

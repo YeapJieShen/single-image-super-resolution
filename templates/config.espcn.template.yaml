@@ -30,6 +30,7 @@ model:
       training_config:
         class_path: sisr.models.espcn.ESPCNTrainingConfig
         init_args:
+          scale: *scale
           # Optional when training -- derived from the data. Stated here because
           # `sisr export` reads this file and has no data to derive it from.
           example_input_shape: [1, 17, 17]

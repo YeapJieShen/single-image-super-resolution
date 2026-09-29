@@ -80,3 +80,17 @@ def test_non_positive_kernel_rejected():
 def test_even_kernels_rejected_because_same_padding_would_misalign():
     with pytest.raises(ValueError, match="odd"):
         ESPCN(scale=2, kernel_sizes=(4, 3, 3))
+
+
+def test_non_shape_preserving_padding_rejected():
+    with pytest.raises(ValueError, match="padding"):
+        ESPCN(scale=2, padding=0)
+
+
+def test_matching_int_padding_accepted():
+    assert ESPCN(scale=2, padding=1, kernel_sizes=(3, 3, 3))(torch.zeros(1, 1, 8, 8)).shape == (
+        1,
+        1,
+        16,
+        16,
+    )
