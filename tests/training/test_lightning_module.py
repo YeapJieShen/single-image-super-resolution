@@ -929,6 +929,38 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
     torch.testing.assert_close(pred_hr, step_hr)
 
 
+def test_forward_lr_self_ensemble_calls_model_eight_times(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """self_ensemble=True must route the model call through self_ensemble_forward (8
+    dihedral transforms) instead of the single call the default path makes."""
+    lr, _ = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit._forward_lr(lr, self_ensemble=True)
+    assert spy.call_count == 8
+
+
+def test_forward_lr_self_ensemble_off_by_default_calls_model_once(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    lr, _ = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit._forward_lr(lr)
+    assert spy.call_count == 1
+
+
+def test_predict_rgb_forwards_self_ensemble_flag_to_forward_sr(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    lr, hr = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_rgb(lr, hr, self_ensemble=True)
+    assert spy.call_count == 8
+
+
 # ---------------------------------------------------------------------------
 # Metric-path clamp to [0, 1], applied once in _forward_lr
 # ---------------------------------------------------------------------------
@@ -1084,6 +1116,7 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
         "ssim_impl": "wang",
         "perceptual_metrics": [],
         "lpips_net": "alex",
+        "self_ensemble": False,
     }
     assert isinstance(lit.hparams["training_config"], dict)
     assert not any("/" in k for k in lit.hparams)
@@ -1147,6 +1180,130 @@ def test_predict_step_dataloader_idx_default_is_ignored(srcnn_rgb_lit: SRLightni
     out_default = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
     out_explicit = srcnn_rgb_lit.predict_step(lr, batch_idx=0, dataloader_idx=0)
     torch.testing.assert_close(out_default, out_explicit)
+
+
+def test_predict_step_self_ensembles_when_eval_config_enables_it(srcnn_rgb_lit: SRLightning):
+    """predict_step must read eval_config.self_ensemble itself -- this is the only knob
+    'sisr predict' has for turning self-ensembling on."""
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    lr = torch.rand(1, 3, 33, 33, generator=torch.Generator().manual_seed(3))
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    assert spy.call_count == 8
+
+
+def test_predict_step_single_pass_when_self_ensemble_off(srcnn_rgb_lit: SRLightning):
+    """Regression guard: eval_config.self_ensemble defaults to False, so predict_step's
+    existing single-pass behavior (test_predict_step_matches_forward_lr_rgb_path above) is
+    unchanged."""
+    lr = torch.rand(1, 3, 33, 33, generator=torch.Generator().manual_seed(3))
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    assert spy.call_count == 1
+
+
+def test_predict_step_self_ensemble_works_for_native_lr_contract_srresnet():
+    """Acceptance (#284): self-ensemble must work for the native-LR (spatially-scaling)
+    contract too, not just pre-upsampled. Non-square input (12x16→24x32) is required
+    because the 4 dihedral transforms that swap H and W would crash torch.stack on
+    shape mismatches if the transpose branch of _transform or _untransform were
+    skipped — a square input would pass even with transpose disabled,
+    since (H, W) == (W, H). This test guards the output shape is correct for all
+    transforms, including those that transpose."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(self_ensemble=True),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(1, 3, 12, 16)
+    out = lit.predict_step(lr, batch_idx=0)
+    assert out.shape == (1, 3, 24, 32)
+
+
+def test_training_step_never_self_ensembles_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """Acceptance (#284): self-ensemble must never apply during training or
+    validation-during-fit, even when eval_config.self_ensemble=True. training_step
+    must call the model exactly once, not 8 times. This catches mutations
+    (_forward_lr reading eval_config.self_ensemble unconditionally) that
+    would silently break training speed."""
+    lr, hr = rgb_lr_hr_batch
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.log = MagicMock()  # Mock logging to avoid trainer warnings
+    srcnn_rgb_lit.training_step((lr, hr), batch_idx=0)
+    assert spy.call_count == 1
+
+
+def test_validation_step_never_self_ensembles_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """Acceptance (#284): self-ensemble must never apply during validation-during-fit,
+    even when eval_config.self_ensemble=True. Called in the state Lightning validates in
+    (eval mode, no grad), so a gate keyed on ``not self.training`` is caught too."""
+    lr, hr = rgb_lr_hr_batch
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.log = MagicMock()  # Mock logging to avoid trainer warnings
+    srcnn_rgb_lit.eval()
+    with torch.no_grad():
+        srcnn_rgb_lit.validation_step((lr, hr), batch_idx=0)
+    assert spy.call_count == 1
+
+
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
+@pytest.mark.parametrize(
+    ("entry_point", "expected"),
+    [("fit", {"train": 1, "eval": 1}), ("validate", {"train": 0, "eval": 1})],
+)
+def test_fit_and_validate_never_self_ensemble_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch, entry_point, expected
+):
+    """Acceptance (#284): a real fit or a standalone validate, where Lightning sets the
+    train/eval mode, grad and inference-mode state itself, calls the model once per
+    training step and once per validation step, even when eval_config.self_ensemble=True.
+    Both entry points, because fit validates under no_grad and a standalone validate under
+    inference_mode -- a gate keyed on either state is caught by one of them."""
+    lit = srcnn_rgb_lit
+    lit.eval_config.self_ensemble = True
+    calls = {"train": 0, "eval": 0}
+    forward = lit.model.forward
+
+    def counting_forward(x: torch.Tensor) -> torch.Tensor:
+        calls["train" if lit.training else "eval"] += 1
+        return forward(x)
+
+    lit.model.forward = counting_forward
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(*rgb_lr_hr_batch), batch_size=2
+    )
+    trainer = lightning.Trainer(
+        max_steps=1,
+        limit_val_batches=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=0,
+    )
+    if entry_point == "fit":
+        trainer.fit(lit, loader, loader)
+    else:
+        trainer.validate(lit, loader)
+    assert calls == expected
 
 
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
