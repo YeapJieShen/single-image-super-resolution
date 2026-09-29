@@ -22,17 +22,23 @@ testing) and data/Urban100_HR (for validation/test datasets), using the same
 layout Set5/Set14/B100 already use. Idempotent: does nothing and exits 0 if
 both directories already look populated.
 
-Note: the daala_c_reference test (tests/metrics/test_ssim.py::test_real_image_
-matches_daala_c_reference) expects Set5/Set14/BSD100 data in data/reference/ and
-will fail with an AssertionError if only Urban100 is present. This is expected
-when fetching Urban100 in isolation — fetch all reference sets separately if you
-plan to run the full test suite.
+The download and extraction happen in a temporary directory under
+data/reference/ that is removed afterwards, so nothing else under data/reference/
+(a manually downloaded benchmark.tar or benchmark/ extraction) is touched. The
+server often resets the first connection, so the download is tried 3 times.
+
+Note: once data/ exists,
+tests/metrics/test_ssim.py::test_real_image_matches_daala_c_reference expects the
+Set5/Set14/BSD100 HR dirs listed in tests/reference/daala_ssim_cases.py REAL_SETS
+(data/Set5_HR, data/Set14_HR, data/BSD100_HR) and fails on a checkout holding
+only this script's output.
 """
 
 import hashlib
 import shutil
 import sys
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -40,6 +46,7 @@ URL = "https://cv.snu.ac.kr/research/EDSR/benchmark.tar"
 SHA256 = "80c21c333bbf6ceb5308b7243761f8284478274413a97b96f1d63e9045fd93e8"
 DEST_REFERENCE = Path(__file__).resolve().parents[2] / "data" / "reference" / "Urban100"
 DEST_HR = Path(__file__).resolve().parents[2] / "data" / "Urban100_HR"
+DOWNLOAD_ATTEMPTS = 3
 
 
 def main() -> None:
@@ -52,12 +59,19 @@ def main() -> None:
         print(f"{DEST_REFERENCE} and {DEST_HR} already populated, nothing to do.")
         return
 
-    tar_path = DEST_REFERENCE.parent / "benchmark.tar"
-    tar_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if not reference_populated:
-            print(f"downloading {URL} ...")
-            urllib.request.urlretrieve(URL, tar_path)
+    if not reference_populated:
+        DEST_REFERENCE.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=DEST_REFERENCE.parent) as tmp:
+            tar_path = Path(tmp) / "benchmark.tar"
+            for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+                print(f"downloading {URL} (attempt {attempt}/{DOWNLOAD_ATTEMPTS}) ...")
+                try:
+                    urllib.request.urlretrieve(URL, tar_path)
+                    break
+                except OSError as err:
+                    if attempt == DOWNLOAD_ATTEMPTS:
+                        raise
+                    print(f"download failed ({err}), retrying")
 
             with open(tar_path, "rb") as f:
                 digest = hashlib.file_digest(f, "sha256").hexdigest()
@@ -70,22 +84,19 @@ def main() -> None:
             print("checksum verified, extracting Urban100 ...")
             with tarfile.open(tar_path) as tar:
                 members = [m for m in tar.getmembers() if m.name.startswith("benchmark/Urban100/")]
-                tar.extractall(DEST_REFERENCE.parent, members=members, filter="data")
+                tar.extractall(tmp, members=members, filter="data")
             shutil.rmtree(DEST_REFERENCE, ignore_errors=True)
-            shutil.move(str(DEST_REFERENCE.parent / "benchmark" / "Urban100"), str(DEST_REFERENCE))
-            shutil.rmtree(DEST_REFERENCE.parent / "benchmark", ignore_errors=True)
+            shutil.move(str(Path(tmp) / "benchmark" / "Urban100"), str(DEST_REFERENCE))
 
-            n = len(list((DEST_REFERENCE / "HR").glob("*.png")))
-            print(f"wrote {DEST_REFERENCE} ({n} HR images)")
+        n = len(list((DEST_REFERENCE / "HR").glob("*.png")))
+        print(f"wrote {DEST_REFERENCE} ({n} HR images)")
 
-        if not hr_populated:
-            DEST_HR.mkdir(parents=True, exist_ok=True)
-            for src in (DEST_REFERENCE / "HR").glob("*.png"):
-                shutil.copy2(src, DEST_HR / src.name)
-            n = len(list(DEST_HR.glob("*.png")))
-            print(f"wrote {DEST_HR} ({n} HR images)")
-    finally:
-        tar_path.unlink(missing_ok=True)
+    if not hr_populated:
+        DEST_HR.mkdir(parents=True, exist_ok=True)
+        for src in (DEST_REFERENCE / "HR").glob("*.png"):
+            shutil.copy2(src, DEST_HR / src.name)
+        n = len(list(DEST_HR.glob("*.png")))
+        print(f"wrote {DEST_HR} ({n} HR images)")
 
 
 if __name__ == "__main__":
