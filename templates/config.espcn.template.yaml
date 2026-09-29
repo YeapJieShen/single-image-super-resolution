@@ -1,0 +1,144 @@
+# ESPCN -- Shi et al., sub-pixel convolution on native LR, Y channel only.
+# Built and smoke-tested, NOT yet reproduced: bicubic degradation, no decay schedule.
+# Settings are explained in docs/configuration.md. Config files must stay ASCII.
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+optimizer:
+  class_path: torch.optim.SGD
+  init_args:
+    lr: 1.0e-2         # base LR; ignored per-group when layer_lrs is set
+    momentum: 0.9      # as SRCNN's template; the paper states plain SGD
+
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.espcn.ESPCN
+        init_args:
+          scale: &scale 3
+          in_out_channels: 1                 # Y channel only
+          filters: [64, 32]
+          kernel_sizes: [5, 3, 3]
+          padding: same
+      processor:
+        class_path: sisr.processors.YChannelProcessor
+      # criterion unset means torch.nn.MSELoss, the paper's objective.
+      # layer_lrs defaults to [1e-2, 1e-2, 1e-3]: the final layer learns 10x slower.
+      training_config:
+        class_path: sisr.models.espcn.ESPCNTrainingConfig
+        init_args:
+          scale: *scale
+          # Optional when training -- derived from the data. Stated here because
+          # `sisr export` reads this file and has no data to derive it from.
+          example_input_shape: [1, 17, 17]
+      # psnr_channels defaults to ['Y'], the paper's metric.
+      eval_config:
+        class_path: sisr.models.espcn.ESPCNEvalConfig
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.native_lr.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      scale: *scale
+      hr_crop_size: 51        # 17 * scale, the paper's 17x17 LR sub-images
+      crops_per_image: 1
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.native_lr.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+    Set14:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+    BSD100:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+  train_dataloader_kwargs:
+    batch_size: 16
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  max_steps: 1000000
+  val_check_interval: 50000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 1000
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  # Trains eager fp32. bf16-mixed alone is SLOWER; see docs/configuration.md.
+  # precision: bf16-mixed
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: ssim/val/Y
+        save_top_k: 3
+        filename_prefix: sr-ssim
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/Y
+        save_top_k: 3
+        filename_prefix: sr-weights-ssim
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        every_n_batches: 5000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: ESPCN
+          version: baseline
+        log_graph: true
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest
