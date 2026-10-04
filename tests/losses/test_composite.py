@@ -267,9 +267,10 @@ def test_the_record_reaches_opted_in_terms_and_only_the_primary_reaches_plain_on
 
     assert probe.received[0] is record
     assert plain.received[0] is record.primary
-    expected = 0.3 * ((record.extras["aux"] - target) ** 2).mean() + 0.7 * (
-        (record.primary - target) ** 2
-    ).mean()
+    expected = (
+        0.3 * ((record.extras["aux"] - target) ** 2).mean()
+        + 0.7 * ((record.primary - target) ** 2).mean()
+    )
     assert got.item() == pytest.approx(expected.item())
 
 
