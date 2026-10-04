@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from sisr.losses import SRLoss, TotalVariationLoss, VGG19FeatureLoss, WeightedSumLoss
+from sisr.models.base import SRModelOutput
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, RGBSignedOutputProcessor, SRProcessor
 from sisr.training import SREvalConfig, SRLightning
@@ -206,3 +207,102 @@ def test_set_weight_on_an_unknown_term_raises_rather_than_silently_adding_it():
 
     with pytest.raises(ValueError, match="no such term"):
         loss.set_weight("vgg2", 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Forwarding the model's output record to opted-in inner terms
+# ---------------------------------------------------------------------------
+
+
+class _RecordProbe(SRLoss):
+    """Opts in to the full record; remembers exactly what it was handed."""
+
+    wants_model_output = True
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor: SRProcessor) -> None:
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred.extras["aux"], target)
+
+
+class _PlainProbe(torch.nn.Module):
+    """A plain term that records its input and demands a bare tensor."""
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
+def _record(shape=(1, 1, 4, 4)) -> SRModelOutput:
+    g = torch.Generator().manual_seed(0)
+    return SRModelOutput(
+        primary=torch.rand(*shape, generator=g), extras={"aux": torch.rand(*shape, generator=g)}
+    )
+
+
+def test_a_composite_wants_the_record_iff_any_term_does():
+    plain = WeightedSumLoss(terms={"a": torch.nn.MSELoss()})
+    mixed = WeightedSumLoss(terms={"a": torch.nn.MSELoss(), "rec": _RecordProbe()})
+
+    assert plain.wants_model_output is False
+    assert mixed.wants_model_output is True
+
+
+def test_the_record_reaches_opted_in_terms_and_only_the_primary_reaches_plain_ones():
+    probe, plain = _RecordProbe(), _PlainProbe()
+    loss = WeightedSumLoss(terms={"rec": probe, "final": plain}, weights={"rec": 0.3, "final": 0.7})
+    record, target = _record(), torch.rand(1, 1, 4, 4)
+
+    got = loss(record, target)
+
+    assert probe.received[0] is record
+    assert plain.received[0] is record.primary
+    expected = 0.3 * ((record.extras["aux"] - target) ** 2).mean() + 0.7 * (
+        (record.primary - target) ** 2
+    ).mean()
+    assert got.item() == pytest.approx(expected.item())
+
+
+def test_a_composite_with_no_opted_in_term_passes_a_bare_tensor_through_unchanged():
+    plain = _PlainProbe()
+    loss = WeightedSumLoss(terms={"a": plain})
+    pred = torch.rand(1, 1, 4, 4)
+
+    loss(pred, torch.zeros_like(pred))
+
+    assert plain.received[0] is pred
+
+
+class _RecordSRCNN(SRCNN):
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"aux": primary * 2.0})
+
+
+def test_srlightning_hands_the_record_to_a_composite_term_through_the_real_step():
+    probe = _RecordProbe()
+    lit = SRLightning(
+        model=_RecordSRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0),
+        processor=RGBProcessor(),
+        criterion=WeightedSumLoss(
+            terms={"rec": probe, "final": torch.nn.MSELoss()}, weights={"rec": 1.0, "final": 1.0}
+        ),
+        eval_config=SREvalConfig(crop_border=0),
+    )
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss = lit._step((lr, hr), need_sr_rgb=False)[0]
+
+    assert torch.isfinite(loss)
+    assert isinstance(probe.received[0], SRModelOutput)
+    assert set(lit.criterion.last_terms) == {"rec", "final"}

@@ -31,6 +31,8 @@ class SRLoss(torch.nn.Module, abc.ABC):
     ``SRLightning._step``, the same nominal, non-``isinstance`` opt-in shape
     as ``last_terms`` above. A loss that doesn't set it keeps getting
     exactly today's bare primary tensor, whichever shape the model returned.
+    :class:`~sisr.losses.composite.WeightedSumLoss` forwards the record to its
+    opted-in terms, so such a loss may sit inside a weighted sum.
     """
 
     @abc.abstractmethod
