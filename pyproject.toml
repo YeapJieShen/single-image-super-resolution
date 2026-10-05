@@ -77,7 +77,7 @@ export = [
 # so PI) only: its NIQE disagrees with the MATLAB release, so NIQE is native, and
 # needs SciPy just to read the release's pristine-model .mat.
 perceptual = ["lpips>=0.1", "pyiqa>=0.1.16", "scipy>=1.11"]
-# SciPy only reads MatConvNet .mat files for sisr.models.drcn.port (official DRCN weights);
+# SciPy only reads MatConvNet .mat files for sisr.models.{drcn,vdsr}.port (official DRCN and VDSR weights);
 # perceptual already pulls it, but loading weights should not need LPIPS/pyiqa.
 weights = ["scipy>=1.11"]
 
