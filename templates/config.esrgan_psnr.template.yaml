@@ -1,0 +1,153 @@
+# ESRGAN stage 1 -- Wang et al.: the PSNR-oriented RRDB network, trained with L1.
+# Stage 2 (config.esrgan.template.yaml) starts from this run's weights. Settings are explained
+# in docs/configuration.md. Config files must stay ASCII.
+# From the paper (Sec. 4.1): batch 16, 128x128 HR patches, Adam, lr 2e-4 halved every 2e5
+# updates, MATLAB-bicubic LR. NOT stated by the paper, so assumptions here: the total step
+# count, and training on DIV2K alone (the paper adds Flickr2K and OST).
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 2.0e-4          # betas (0.9, 0.999) are Adam's defaults, as the paper states
+
+# Counted in optimizer steps (= batches here; interval: step).
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.StepLR
+  init_args:
+    step_size: 200000
+    gamma: 0.5
+
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.esrgan.RRDBNet
+        init_args:
+          scale: &scale 4
+          in_out_channels: 3
+          features: 64
+          growth: 32
+          num_blocks: 23
+          residual_scale: 0.2
+      # RGB in [0, 1] both ways, as the released code trains.
+      processor:
+        class_path: sisr.processors.RGBProcessor
+      criterion:
+        class_path: torch.nn.L1Loss
+      training_config:
+        class_path: sisr.models.esrgan.RRDBNetTrainingConfig
+        init_args:
+          scale: *scale
+          example_input_shape: [3, 32, 32]   # 128 / 4
+      # PSNR and SSIM on Y, border = scale, Wang SSIM.
+      eval_config:
+        class_path: sisr.models.esrgan.RRDBNetEvalConfig
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.native_lr.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      scale: *scale
+      hr_crop_size: &hr_crop 128   # the paper's 128x128 patches
+      crops_per_image: 1
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.native_lr.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+    Set14:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+    BSD100:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+  train_dataloader_kwargs:
+    batch_size: 16
+    # !! These counts have OOM'd host RAM on a 16-worker box. Lower them if you do.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  # ASSUMPTION: the paper gives no total; 1,000,000 steps (5 halvings of the schedule above
+  # would be reached at 1e6).
+  max_steps: 1000000
+  val_check_interval: 50000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 1000
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-ssim
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-weights-ssim
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        every_n_batches: 5000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: RRDBNet
+          version: baseline
+        log_graph: true
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest
