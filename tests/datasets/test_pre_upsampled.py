@@ -475,3 +475,130 @@ def test_subimg_size_and_scale_are_no_longer_coupled(tmp_path: Path):
         assert np.array_equal(got, plane[top : top + 33, left : left + 33]), (
             f"scale {scale}: 33 % {scale} == {33 % scale} must not change anything"
         )
+
+
+def test_train_dataset_caches_lr_sized_plane_not_hr_sized(tiny_rgb_image_dir: Path):
+    """#280: caching the HR-sized "bicubic" plane roughly doubles the training
+    working set (raw-HR cache + a same-size derived plane). TrainDataset must
+    cache the "lr" plane (1/scale**2 of HR) and upsample per patch instead.
+
+    Mutation this catches: reverting TrainDataset's derived_kind back to
+    "bicubic" makes the cached plane HR-sized again and this assertion fails.
+    """
+    scale = 2
+    ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=scale)
+    h_full, w_full = ds._img_sizes[0]
+    h_crop = h_full - h_full % scale
+    w_crop = w_full - w_full % scale
+    with ds._read_derived(0) as plane:
+        assert plane.shape == (h_crop // scale, w_crop // scale, 3)
+
+
+def test_train_dataset_rejects_a_scale_resize_window_cannot_serve(tiny_rgb_image_dir: Path):
+    """Scale 6 has no byte-exact per-patch upsample, so construction must fail
+    up front -- not build the cache and then fail in the first loader worker.
+
+    Mutation this catches: deleting the constructor's check builds the cache
+    and succeeds here."""
+    with pytest.raises(ValueError, match="odd or power-of-two"):
+        _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=6)
+
+
+def test_train_dataset_lr_hr_alignment_non_square_image(tmp_path: Path):
+    """On a non-square image, LR patch must be byte-identical to slicing
+    from the whole-image upsampled plane at the correct (row, col) position.
+
+    Mutation this catches: swapping top/left arguments in __getitem__'s
+    resize_window call silently misaligns LR against HR on non-square images
+    where top != left.
+    """
+    from sisr.datasets.derived_cache import derive
+
+    rng = np.random.default_rng(seed=99)
+    h_full, w_full = 60, 40  # portrait: h > w
+    arr = rng.integers(0, 256, size=(h_full, w_full, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(tmp_path / "portrait.png")
+
+    scale = 3
+    ds = _make_train(tmp_path, subimg_size=20, stride=8, scale=scale)
+    expected_full = derive(arr, "bicubic", scale)
+
+    row, col = 0, 2
+    top, left = row * ds.stride, col * ds.stride
+    idx = ds._img_offsets[0] + row * ds._img_n_cols[0] + col
+    assert top != left, f"test setup: top={top}, left={left} must differ"
+
+    lr, hr = ds[idx]
+    got_lr = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+    got_hr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+
+    expected_lr = expected_full[top : top + ds.sub_img_size, left : left + ds.sub_img_size]
+    expected_hr = arr[top : top + ds.sub_img_size, left : left + ds.sub_img_size]
+
+    assert np.array_equal(got_lr, expected_lr), (
+        f"LR mismatch at top={top}, left={left} "
+        f"(this catches a top/left swap in resize_window call)"
+    )
+    assert np.array_equal(got_hr, expected_hr), f"HR mismatch at top={top}, left={left}"
+
+
+DIV2K_HR_DIR = Path(__file__).resolve().parents[2] / "data" / "DIV2K_train_HR"
+
+
+def test_train_dataset_patch_matches_real_div2k_at_every_corner(tmp_path: Path):
+    """Issue #280 acceptance (1): on a real DIV2K image, the per-patch upsample
+    sliced from the cached "lr" plane via TrainDataset.__getitem__ must be
+    byte-identical to the old whole-image-upsample-then-extract path, at all
+    four corners -- not just typical interior patches, since an off-by-one in
+    the slicing shows there first.
+
+    Tests the full path through TrainDataset, not just resize_window in isolation.
+    """
+    if not DIV2K_HR_DIR.is_dir():
+        pytest.skip(f"{DIV2K_HR_DIR} not present -- needs a real data/ checkout")
+
+    from sisr.datasets.derived_cache import derive
+
+    scale = 3
+    sub_img_size = 33
+
+    # Copy one real DIV2K image to tmp_path to avoid modifying the real checkout
+    src_path = sorted(DIV2K_HR_DIR.glob("*.png"))[0]
+    dst_path = tmp_path / src_path.name
+    Image.open(src_path).save(dst_path)
+
+    whole = np.array(Image.open(src_path).convert("RGB"))
+    h, w = whole.shape[:2]
+    h_crop, w_crop = h - h % scale, w - w % scale
+
+    # Build TrainDataset on the temp directory
+    ds = _make_train(tmp_path, subimg_size=sub_img_size, stride=1, scale=scale)
+
+    # Compute expected full upsampled plane from the original image
+    expected_full = derive(whole, "bicubic", scale)
+
+    # Compute the indices for the four corners of the output image
+    # with stride=1, every pixel position is a patch start
+    corners = [
+        (0, 0),
+        (0, w_crop - sub_img_size),
+        (h_crop - sub_img_size, 0),
+        (h_crop - sub_img_size, w_crop - sub_img_size),
+    ]
+
+    for top, left in corners:
+        # Find which index in the dataset corresponds to this (top, left) position
+        # With stride=1, idx = offset + top * n_cols + left
+        idx = ds._img_offsets[0] + top * ds._img_n_cols[0] + left
+        assert idx < len(ds), f"Grid corner {(top, left)} is past end of dataset"
+
+        lr, hr = ds[idx]
+        got_lr = (lr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+        got_hr = (hr.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+
+        # Expected values from the whole-image planes
+        expected_lr = expected_full[top : top + sub_img_size, left : left + sub_img_size]
+        expected_hr = whole[top : top + sub_img_size, left : left + sub_img_size]
+
+        assert np.array_equal(got_lr, expected_lr), f"LR mismatch at corner ({top}, {left})"
+        assert np.array_equal(got_hr, expected_hr), f"HR mismatch at corner ({top}, {left})"

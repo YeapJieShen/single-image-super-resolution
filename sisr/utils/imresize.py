@@ -239,6 +239,156 @@ def matlab_imresize(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndar
     return arr[:, :, 0] if flag2d else arr
 
 
+def _order_free_factor(in_length: int, out_length: int) -> int | None:
+    """The integer upscale factor ``out_length / in_length`` if any summation order is exact.
+
+    For an integer upscale factor *s*, every bicubic weight is an exact rational:
+    the kernel is sampled at multiples of ``1/(2s)``, its rows sum to exactly 1,
+    and the polynomial's halves cancel against the sample's denominator. When *s*
+    is odd, every weight is a multiple of ``1/s**3``, so a pass over integer pixels
+    lands on a multiple of ``1/s**3`` too -- never within ``1/(2*s**3)`` of a
+    rounding tie, against a float error below ``1e-11``. When *s* is a power of
+    two, every weight, product and sum is exactly representable, so there is no
+    error at all. Either way, every uint8 a pass produces is independent of the
+    order its terms are summed in, which is what lets :func:`resize_window` use a
+    different (and faster) contraction from :func:`matlab_imresize` and still
+    match it byte for byte. Other factors (6, non-integer, downscales) can land
+    on a tie that only the exact summation order resolves, and return ``None``.
+    """
+    factor, rem = divmod(out_length, in_length)
+    if rem or factor < 1 or (factor % 2 == 0 and factor & (factor - 1)):
+        return None
+    return factor
+
+
+@functools.cache
+def _upscale_taps(factor: int, phase: int, length: int) -> tuple[np.ndarray, int]:
+    """Dense weights for *length* output pixels starting at output pixel *phase*.
+
+    Output pixel ``i``'s centre sits at source coordinate ``(2i + 1 - factor) /
+    (2 * factor)``, and its four taps start one pixel before that centre's floor
+    (a tap two pixels away has weight exactly 0, so four cover the support). The
+    centre advances one source pixel per *factor* output pixels, so a window at
+    output pixel ``q * factor + phase`` is this window shifted by ``q`` source
+    pixels -- the table depends only on ``(factor, phase, length)``, a handful of
+    entries per dataset.
+
+    Returns:
+        ``(dense, first)``: a read-only ``(length, n)`` matrix whose row ``r``
+        holds output pixel ``phase + r``'s weights over the source pixels
+        ``first .. first + n - 1`` (unfolded -- may run past either edge).
+    """
+    num = 2 * np.arange(phase, phase + length) + 1 - factor
+    taps = (num // (2 * factor) - 1)[:, None] + np.arange(4)
+    weights = _cubic(num[:, None] / (2 * factor) - taps)
+    first = int(taps[0, 0])
+    dense = np.zeros((length, int(taps[-1, -1]) - first + 1))
+    dense[np.arange(length)[:, None], taps - first] = weights
+    dense.setflags(write=False)
+    return dense, first
+
+
+def _upscale_source(
+    factor: int, in_length: int, start: int, length: int
+) -> tuple[np.ndarray, slice | np.ndarray]:
+    """One axis' dense weights for an output window, and the source pixels they act on.
+
+    The source selector is a plain slice when the window's taps stay inside the
+    image; otherwise its unfolded indices are mirror-folded exactly as
+    :func:`_contributions` folds them, so a border tap reads the same pixel.
+    """
+    q, phase = divmod(start, factor)
+    dense, first = _upscale_taps(factor, phase, length)
+    first += q
+    stop = first + dense.shape[1]
+    if first >= 0 and stop <= in_length:
+        return dense, slice(first, stop)
+    folded = np.mod(np.arange(first, stop), 2 * in_length)
+    return dense, np.where(folded < in_length, folded, 2 * in_length - 1 - folded)
+
+
+def _upscale_pass(dense: np.ndarray, arr: np.ndarray) -> np.ndarray:
+    """``dense`` applied along *arr*'s first axis, rounded MATLAB's way.
+
+    *arr* holds integer values, so the result is too: ``floor(clip(x) + 0.5)``
+    is round-half-away-from-zero for the non-negative values clipping leaves,
+    folded into one clip at ``255.5`` (identical for every input).
+    """
+    out = dense @ arr.reshape(arr.shape[0], -1)
+    out += 0.5
+    np.clip(out, 0.0, 255.5, out=out)
+    np.floor(out, out=out)
+    return out.reshape(dense.shape[0], *arr.shape[1:])
+
+
+def resize_window(
+    image: np.ndarray,
+    output_shape: tuple[int, int],
+    row_start: int,
+    row_len: int,
+    col_start: int,
+    col_len: int,
+) -> np.ndarray:
+    """One window of an integer-factor upscale, without computing the rest.
+
+    Byte-identical to ``matlab_imresize(image, output_shape)[row_start :
+    row_start + row_len, col_start : col_start + col_len]``. Each output pixel
+    depends only on its own few source taps, so only the source pixels the
+    window's taps reach are read, and each pass is one small dense matrix
+    product. That contraction sums in a different order from
+    :func:`matlab_imresize`'s, which is exact only for the factors
+    :func:`_order_free_factor` admits -- odd factors and powers of two; any
+    other factor raises rather than risk a tie resolved the other way. Passes
+    run smaller-factor axis first, as in :func:`matlab_imresize`.
+
+    Args:
+        image: uint8 array, ``(H, W)`` or ``(H, W, C)`` -- the whole source
+            (e.g. a cached LR plane), not a pre-cropped window.
+        output_shape: The full ``(height, width)`` the whole upscale would
+            produce; it fixes each axis' factor.
+        row_start: First output row of the window.
+        row_len: Number of output rows to return.
+        col_start: First output column of the window.
+        col_len: Number of output columns to return.
+
+    Returns:
+        uint8 array of shape ``(row_len, col_len)`` or ``(row_len, col_len, C)``.
+
+    Raises:
+        ValueError: If the window does not fit inside *output_shape*, or an
+            axis' factor is not an odd or power-of-two integer upscale.
+    """
+    in_h, in_w = image.shape[0], image.shape[1]
+    out_h, out_w = output_shape
+    if not (0 <= row_start and row_start + row_len <= out_h):
+        msg = f"Window [{row_start}, {row_start + row_len}) exceeds output height {out_h}"
+        raise ValueError(msg)
+    if not (0 <= col_start and col_start + col_len <= out_w):
+        msg = f"Window [{col_start}, {col_start + col_len}) exceeds output width {out_w}"
+        raise ValueError(msg)
+    factor_h = _order_free_factor(in_h, out_h)
+    factor_w = _order_free_factor(in_w, out_w)
+    if factor_h is None or factor_w is None:
+        msg = (
+            f"resize_window needs an odd or power-of-two integer upscale per axis; "
+            f"got {in_h}x{in_w} -> {out_h}x{out_w}"
+        )
+        raise ValueError(msg)
+
+    dense_h, rows = _upscale_source(factor_h, in_h, row_start, row_len)
+    dense_w, cols = _upscale_source(factor_w, in_w, col_start, col_len)
+    arr = image[:, :, None] if image.ndim == 2 else image
+    arr = arr[rows][:, cols].astype(np.float64)
+    if factor_h <= factor_w:
+        arr = _upscale_pass(dense_h, arr)
+        arr = _upscale_pass(dense_w, arr.transpose(1, 0, 2)).transpose(1, 0, 2)
+    else:
+        arr = _upscale_pass(dense_w, arr.transpose(1, 0, 2)).transpose(1, 0, 2)
+        arr = _upscale_pass(dense_h, arr)
+    out = arr.astype(np.uint8, order="C")
+    return out[:, :, 0] if image.ndim == 2 else out
+
+
 def resize(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     """Resizes a uint8 image to ``(height, width) = size``.
 

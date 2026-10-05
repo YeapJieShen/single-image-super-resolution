@@ -75,8 +75,10 @@ from sisr.utils.imresize import (
     _cubic,
     _resize_axis,
     _round_half_away_from_zero,
+    _upscale_taps,
     matlab_imresize,
     resize,
+    resize_window,
 )
 
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference"
@@ -437,3 +439,129 @@ def test_matlab_imresize_upscale_matches_real_matlab_reference_data():
         f"{len(mismatches)}/{len(cases)} reference images did not reproduce byte-exactly: "
         f"{mismatches[:10]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# resize_window: one window of an integer upscale, byte-identical to the whole
+# ---------------------------------------------------------------------------
+
+
+def _window_grid(out_h: int, out_w: int, rng: np.random.Generator):
+    """Every window size from 1 pixel to the whole output, at all four corners,
+    the centre and one random position -- the corners are where the mirror fold
+    and an off-by-one in a phase or origin show up first."""
+    for row_len in sorted({1, min(5, out_h), min(33, out_h), out_h}):
+        for col_len in sorted({1, min(7, out_w), min(33, out_w), out_w}):
+            last_row, last_col = out_h - row_len, out_w - col_len
+            rows = {0, last_row, last_row // 2, int(rng.integers(0, last_row + 1))}
+            cols = {0, last_col, last_col // 2, int(rng.integers(0, last_col + 1))}
+            for row_start in sorted(rows):
+                for col_start in sorted(cols):
+                    yield row_start, row_len, col_start, col_len
+
+
+@pytest.mark.parametrize(
+    "in_h,in_w,factor_h,factor_w",
+    [
+        (45, 68, 3, 3),  # SRCNN's shipped scale
+        (68, 102, 2, 2),
+        (34, 51, 4, 4),
+        (7, 9, 5, 5),
+        (5, 6, 8, 8),
+        (17, 23, 3, 2),  # anisotropic: the width pass runs first
+        (17, 23, 2, 3),  # anisotropic: the height pass runs first
+        (12, 7, 4, 5),
+        (3, 2, 3, 3),  # smaller than the kernel: taps fold more than once
+        (1, 1, 3, 3),
+    ],
+)
+@pytest.mark.parametrize("channels", [None, 1, 3])
+def test_resize_window_matches_whole_matlab_imresize(in_h, in_w, factor_h, factor_w, channels):
+    """``resize_window`` must equal the whole ``matlab_imresize`` sliced at the
+    window, for every window shape and position. ``matlab_imresize`` shares no
+    contraction code with it (only ``_cubic``), so it is an independent oracle."""
+    rng = np.random.default_rng(seed=in_h * 1000 + in_w * 10 + factor_h)
+    shape = (in_h, in_w) if channels is None else (in_h, in_w, channels)
+    img = rng.integers(0, 256, size=shape, dtype=np.uint8)
+    out_shape = (in_h * factor_h, in_w * factor_w)
+    full = matlab_imresize(img, out_shape)
+    for row_start, row_len, col_start, col_len in _window_grid(*out_shape, rng):
+        got = resize_window(img, out_shape, row_start, row_len, col_start, col_len)
+        expected = full[row_start : row_start + row_len, col_start : col_start + col_len]
+        assert got.dtype == np.uint8
+        assert got.shape == expected.shape, (row_start, row_len, col_start, col_len)
+        assert np.array_equal(got, expected), (row_start, row_len, col_start, col_len)
+
+
+@pytest.mark.parametrize("factor", [2, 3, 4, 5, 8])
+def test_upscale_taps_are_exact_rationals_with_no_tie_in_reach(factor):
+    """The premise ``resize_window``'s byte-identity rests on (see
+    ``_order_free_factor``): at an odd factor every weight is a multiple of
+    ``1/factor**3``; at a power of two every weight is a multiple of ``1/(2 * (2 * factor)**3)``,
+    exactly representable.
+    Either way rows sum to 1. If a kernel or centre change broke this, the
+    window could round a tie differently from ``matlab_imresize``."""
+    for phase in range(factor):
+        dense, _ = _upscale_taps(factor, phase, 3 * factor)
+        np.testing.assert_allclose(dense.sum(axis=1), 1.0, rtol=0, atol=1e-15)
+        if factor % 2:
+            scaled = dense * factor**3
+            np.testing.assert_allclose(scaled, np.round(scaled), rtol=0, atol=1e-11)
+        else:
+            scaled = dense * 2 * (2 * factor) ** 3
+            assert np.array_equal(scaled, np.round(scaled))
+
+
+@pytest.mark.parametrize(
+    "in_shape,out_shape",
+    [
+        ((10, 10), (60, 60)),  # factor 6: even, not a power of two
+        ((10, 10), (30, 60)),  # one axis bad is enough
+        ((10, 10), (25, 25)),  # non-integer
+        ((30, 30), (10, 10)),  # downscale
+    ],
+)
+def test_resize_window_rejects_factors_whose_rounding_depends_on_order(in_shape, out_shape):
+    """Factor 6 really does differ: summed in ``resize_window``'s order it moves
+    ~0.02% of pixels by one level against ``matlab_imresize``. So it must raise,
+    not silently return different bytes."""
+    img = np.zeros((*in_shape, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="odd or power-of-two integer upscale"):
+        resize_window(img, out_shape, 0, 1, 0, 1)
+
+
+def test_resize_window_rejects_window_past_output_shape():
+    """Mutation this catches: deleting the bounds checks lets a window running
+    off the end of output_shape return fewer rows/columns than requested."""
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="exceeds output height"):
+        resize_window(img, (20, 20), row_start=15, row_len=10, col_start=0, col_len=5)
+    with pytest.raises(ValueError, match="exceeds output width"):
+        resize_window(img, (20, 20), row_start=0, row_len=5, col_start=18, col_len=5)
+
+
+def test_resize_window_rejects_negative_start():
+    """Same mutation: a negative start must raise, not read a wrapped window."""
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="exceeds output height"):
+        resize_window(img, (20, 20), row_start=-1, row_len=5, col_start=0, col_len=5)
+    with pytest.raises(ValueError, match="exceeds output width"):
+        resize_window(img, (20, 20), row_start=0, row_len=5, col_start=-1, col_len=5)
+
+
+def test_resize_window_whole_output_matches_real_matlab_upscale_reference_data():
+    """The same MATLAB ``Bicubic_up`` pairs as the upscale test above, through
+    ``resize_window`` asked for the whole output -- a check against MATLAB
+    itself, not only against ``matlab_imresize``."""
+    cases = _upscale_cases()
+    if not cases:
+        pytest.skip(f"No Bicubic_up/ reference data under {REFERENCE_DIR}")
+    mismatches = []
+    for dataset, lr_path, up_path, scale in cases:
+        lr = np.array(Image.open(lr_path).convert("RGB"))
+        up_real = np.array(Image.open(up_path).convert("RGB"))
+        out_h, out_w = lr.shape[0] * scale, lr.shape[1] * scale
+        up_mine = resize_window(lr, (out_h, out_w), 0, out_h, 0, out_w)
+        if up_mine.shape != up_real.shape or not np.array_equal(up_mine, up_real):
+            mismatches.append(f"{dataset}/{lr_path.stem} x{scale}")
+    assert not mismatches, f"{len(mismatches)}/{len(cases)} mismatched: {mismatches[:10]}"
