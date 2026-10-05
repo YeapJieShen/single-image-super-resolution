@@ -128,6 +128,20 @@ def test_discriminator_default_is_the_128_patch_vgg_with_five_downsamples():
     assert d.classifier[0].in_features == 512 * 4 * 4 and d.classifier[-1].out_features == 1
 
 
+def test_discriminator_batch_norm_layout_is_pinned():
+    """Nine BatchNorms, each straight after a bias-free conv; only the 3x3 stem has a bias."""
+    layers = list(VGGStyleDiscriminator().features)
+    norms = [i for i, m in enumerate(layers) if isinstance(m, torch.nn.BatchNorm2d)]
+
+    assert len(norms) == 9
+    for i in norms:
+        prev = layers[i - 1]
+        assert isinstance(prev, torch.nn.Conv2d) and prev.bias is None
+    convs = [m for m in layers if isinstance(m, torch.nn.Conv2d)]
+    assert [c.bias is not None for c in convs] == [True] + [False] * 9
+    assert convs[0].kernel_size == (3, 3)
+
+
 @pytest.mark.parametrize("size", [0, 16, 100])
 def test_discriminator_rejects_a_size_the_dense_head_cannot_take(size):
     with pytest.raises(ValueError, match="multiple of 32"):

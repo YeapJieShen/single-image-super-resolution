@@ -5,7 +5,8 @@
 # From the paper (Sec. 4.1, eq. 3): L_G = L_percep + lambda * L_Ra + eta * L1 with lambda = 5e-3,
 # eta = 1e-2; Adam lr 1e-4 halved at [50k, 100k, 200k, 300k] iterations; batch 16, 128 patches.
 # ASSUMPTIONS (not stated by the paper): the VGG feature distance is L1 and unscaled (the
-# released code's), the discriminator is the released VGG-128 net, the total length, and the
+# released code's), the discriminator is BasicSR's VGGStyleDiscriminator at 128 (the released
+# training code's; other sizes differ from it, see its docstring), the total length, and the
 # L_Ra sum-of-two-terms convention (see RelativisticAverageLoss).
 seed_everything: 42
 

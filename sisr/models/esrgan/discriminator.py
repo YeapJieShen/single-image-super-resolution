@@ -1,9 +1,11 @@
 """ESRGAN's discriminator -- a VGG-style classifier on 128x128 HR patches.
 
 The paper (Wang et al. 2018) does not draw its discriminator; this is the VGG-128 network of
-the authors' released training code, written from memory of it and so an **assumption**:
-a 3x3 stem, then five stages of a 3x3 stride-1 conv and a 4x4 stride-2 conv (channels
-64, 128, 256, 512, 512) with BatchNorm, and two dense layers of 100 and 1. Four-by-four stride-2
+the authors' released training code (BasicSR's ``basicsr/archs/discriminator_arch.py``,
+``VGGStyleDiscriminator``), layer for layer at 128. Away from 128 this differs from it: it
+keeps five stages and widens the dense head, where BasicSR asserts 128 or 256 and adds a stage
+at 256. The layout: a 3x3 stem, then five stages of a 3x3 stride-1 conv and a 4x4 stride-2
+conv (channels 64, 128, 256, 512, 512) with BatchNorm, and two dense layers of 100 and 1. Four-by-four stride-2
 convs, not the 3x3 stride-2 of SRGAN's discriminator, are the visible difference.
 """
 
