@@ -66,12 +66,14 @@ class _PrimaryOnly(torch.nn.Module):
     actually needed.
     """
 
-    def __init__(self, wrapped: torch.nn.Module):
+    def __init__(self, wrapped: torch.nn.Module, scale: int | None = None):
         super().__init__()
         self.wrapped = wrapped
+        self.scale = scale
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return unwrap_primary(self.wrapped(x))
+        out = self.wrapped(x) if self.scale is None else self.wrapped(x, scale=self.scale)
+        return unwrap_primary(out)
 
 
 def to_onnx(
@@ -147,12 +149,22 @@ def to_onnx(
         input_sample = torch.zeros(1, *shape)
 
     model = module.model
+    # A multi-scale model is one graph per scale: export the first listed (recorded in
+    # the metadata's io.scale, which stays the whole list).
+    fixed_scale = module.resolved_scales()[0] if model.multi_scale else None
     was_training = model.training
     model.eval()
     try:
         with torch.no_grad():
-            wraps_output = isinstance(model(input_sample), SRModelOutput)
-        trace_target = _PrimaryOnly(model) if wraps_output else model
+            probe = (
+                model(input_sample)
+                if fixed_scale is None
+                else model(input_sample, scale=fixed_scale)
+            )
+            wraps_output = isinstance(probe, SRModelOutput)
+        trace_target = (
+            _PrimaryOnly(model, fixed_scale) if wraps_output or fixed_scale is not None else model
+        )
         with warnings.catch_warnings():
             # dynamo=False (the legacy TorchScript exporter) is deliberate: torch's
             # newer torch.export-based path needs `onnxscript`, outside the

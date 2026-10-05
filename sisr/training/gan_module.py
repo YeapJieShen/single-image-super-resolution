@@ -143,6 +143,14 @@ class SRGANLightning(SRLightning):
                 f"adversarial_weight and d_steps_per_g_step off it on every step."
             )
 
+        if len(self._scales_or_empty()) > 1:
+            raise ValueError(
+                f"SRGANLightning trains at one scale, but the run lists "
+                f"{self._scales_or_empty()}. Ledig et al.'s SRGAN is single-scale; "
+                f"multi-scale training is not wired through the adversarial step. Set "
+                f"model.training_config.init_args.scale to one scale."
+            )
+
         if self.training_config.scale_clip_with_lr:
             raise ValueError(
                 "training_config.scale_clip_with_lr=True has no effect here: "

@@ -99,9 +99,10 @@ class BenchmarkImageLogger(Callback):
     differs between them:
 
     * **`cli fit` / `cli validate`** — ``val_dataloader()`` returns
-      ``[primary_val] + test_loaders``, so this ignores ``dataloader_idx == 0``
-      (owned by ``SRLightning.validation_step``) and maps ``1..N`` onto
-      ``dataset_names``. Image strips are throttled by ``every_n_val_runs``.
+      ``[primary_val] + test_loaders`` (the primary set once per scale for a multi-scale
+      run), so this ignores the leading ``n_primary`` loaders (owned by
+      ``SRLightning.validation_step``) and maps the rest onto ``dataset_names``. Image
+      strips are throttled by ``every_n_val_runs``.
     * **`cli test`** — ``test_dataloader()`` returns the test loaders only, so
       ``0..N-1`` map straight across. No throttle; test is one-shot.
 
@@ -126,7 +127,8 @@ class BenchmarkImageLogger(Callback):
     The TensorBoard experiment is resolved once in :meth:`setup`.
 
     Args:
-        dataset_names: Ordered test set names, matching
+        dataset_names: Ordered test set names -- the *expanded* ones for a multi-scale run
+            (``Set5_x2``, ``Set5_x4``) -- matching
             ``SRDataModule.test_dataloader()`` / the trailing entries of
             ``val_dataloader()``. ``None`` auto-discovers from
             ``trainer.datamodule.test_names``.
@@ -191,7 +193,11 @@ class BenchmarkImageLogger(Callback):
             dm = getattr(trainer, "datamodule", None)
             names = getattr(dm, "test_names", None) if dm is not None else None
             self.dataset_names = list(names or [])
-        self._val_mapping = {i + 1: name for i, name in enumerate(self.dataset_names)}
+        dm = getattr(trainer, "datamodule", None)
+        # The primary val set is one loader per scale, so the test loaders start after all of
+        # them (1 for a single-scale run).
+        n_primary = int(getattr(dm, "n_primary", 1))
+        self._val_mapping = {i + n_primary: name for i, name in enumerate(self.dataset_names)}
         self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
 
         tb_logger = next(
@@ -402,7 +408,9 @@ class BenchmarkImageLogger(Callback):
             # was, calling torchmetrics with the default dim=None (whole-batch
             # pooling) and agreeing with validation_step only because this loop
             # slices one image at a time.
-            scores = _sr(pl_module).scorer.score(sr[i : i + 1], hr_cropped[i : i + 1])
+            scores = _sr(pl_module).scorer.score(
+                sr[i : i + 1], hr_cropped[i : i + 1], scale=getattr(dataset, "scale", None)
+            )
             # float(), not .item(): Scores carries either tensors (this path,
             # straight from the scorer) or plain floats (the means _flush_buffer
             # builds). Exact for a 0-dim tensor, and total over both.

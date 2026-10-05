@@ -76,6 +76,7 @@ def test_sr_eval_config_field_names():
         "perceptual_metrics",
         "lpips_net",
         "self_ensemble",
+        "predict_scale",
     }
 
 
@@ -381,7 +382,7 @@ def test_training_config_rejects_a_non_integer_scale_with_an_actionable_message(
     config key -- the exact unhelpful failure this validation exists to remove.
     bool is excluded on purpose: `isinstance(True, int)` is True, and
     `scale: true` in YAML is not an upscaling factor."""
-    for bad in ("4", 4.0, True, [4]):
+    for bad in ("4", 4.0, True, [], [4, 4], [2, "x"]):
         with pytest.raises(ValueError, match="scale"):
             SRTrainingConfig(scale=bad)
 

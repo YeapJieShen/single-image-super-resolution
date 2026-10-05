@@ -17,6 +17,11 @@ model:
         class_path: sisr.models.srresnet.SRResNet
         init_args:
           scale: &scale 4
+          # Multi-scale training (one set of weights at several scales) is for a `multi_scale`
+          # model, which SRResNet is not. Such a model takes a list here instead:
+          #   scale: &scale [2, 3, 4]
+          # and every `scale: *scale` below follows it: the train dataset draws one scale per
+          # batch, and each val/test set is scored once per scale (Set5_x2, Set5_x3, ...).
           in_out_channels: 3
           hidden_channel: 64
           kernel_sizes: [9, 3, 9]
