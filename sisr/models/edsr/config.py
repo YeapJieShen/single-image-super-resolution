@@ -40,12 +40,14 @@ class EDSRTrainingConfig(SRTrainingConfig):
 class EDSREvalConfig(SREvalConfig):
     """EDSR's reporting: PSNR/SSIM on Y, a border of ``scale``, Wang SSIM.
 
-    **This matches the authors' own evaluation** (``calc_psnr`` in their repository): it shaves
-    ``scale`` pixels on benchmark sets, takes Y from the RGB *difference* with the studio-range
-    BT.601 weights (65.738, 129.057, 25.064) / 256 -- the same Y as ``psnr/val/Y`` -- and a
-    single-channel image is replicated to three channels before it, so (unlike the MATLAB
-    releases of VDSR and DRCN) it needs no separate grey-image rule. The one difference is that
-    they round the SR output to 8 bits before scoring; this pipeline scores the float output.
+    The authors' own evaluation shaves ``scale`` pixels on benchmark sets and takes Y from the
+    studio-range BT.601 weights, which is what ``psnr/val/Y`` does. **The paper's table was
+    produced with MATLAB** (sec 4.5), whose ``rgb2ycbcr`` on 8-bit images returns 8-bit luma,
+    so both planes are rounded; this pipeline scores the float output's float Y, which reads
+    0.01-0.10 dB higher on the released checkpoints. Under the MATLAB protocol they match the
+    paper's EDSR and EDSR+ rows to within 0.006 dB. A single-channel image is replicated to
+    three channels before the transform, as the authors' loader does, so (unlike the MATLAB
+    releases of VDSR and DRCN) there is no separate grey-image rule.
     """
 
     crop_border: int | None = None

@@ -19,6 +19,7 @@ from sisr.models.edsr import EDSR, EDSREvalConfig, EDSRTrainingConfig
 from sisr.models.edsr.port import load_official, rename_key
 from sisr.processors import RGBProcessor
 from sisr.training import SRLightning
+from tests.models.matlab_protocol import psnr, rgb2ycbcr
 
 DATA = Path(os.environ.get("SISR_DATA_DIR") or Path(__file__).resolve().parents[3] / "data")
 WEIGHTS = DATA / "weights" / "edsr"
@@ -156,24 +157,26 @@ PAPER = {
 
 
 def _psnr_y(sr, hr, scale):
+    """This pipeline's own metric: studio Y of the float RGB, border = scale."""
     a, b = (rgb_to_ycbcr_studio(t)[:, :1, scale:-scale, scale:-scale] * 255 for t in (sr, hr))
     return float(10 * torch.log10(255.0**2 / ((a - b) ** 2).mean()))
 
 
-@needs_weights
-@pytest.mark.parametrize("scale", [2, 3, 4])
-@pytest.mark.parametrize("name", list(PAPER))
-@pytest.mark.parametrize("plus", [False, True], ids=["EDSR", "EDSR+"])
-def test_released_edsr_reproduces_the_papers_numbers_within_0_2_db(name, scale, plus):
-    """PSNR-Y through the pipeline (float output, border = scale), EDSR and EDSR+.
+def _psnr_matlab(sr, hr, scale):
+    """The paper's protocol (sec 4.5: "We used MATLAB functions for evaluation").
 
-    The pre-registered rule is 0.05 dB reproduced, 0.20 dB reproduced with the difference named.
-    The released PyTorch checkpoints are not the paper's Torch7 models: their repository says the
-    PyTorch versions give "slightly better performances" (~0.1 dB), and all nine EDSR deltas here
-    are positive (0.01-0.10 dB), so the bound asserted is 0.20 dB, not 0.05.
+    SR is clamped and rounded to 8-bit RGB, MATLAB's ``rgb2ycbcr`` on uint8 returns uint8 Y (so
+    both luma planes are rounded), ``scale`` pixels are shaved, and PSNR is taken on doubles.
     """
-    if not (DATA / name).exists():
-        pytest.skip(f"{name} not available")
+
+    def luma(t):
+        rgb = (t[0].clamp(0, 1) * 255).round().byte().permute(1, 2, 0).cpu().numpy()
+        return rgb2ycbcr(rgb)[..., 0]
+
+    return psnr(luma(hr), luma(sr), scale)
+
+
+def _scores(name, scale, plus, metrics):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = EDSR(scale=scale, features=256, num_blocks=32, residual_scale=0.1)
     lit = SRLightning(
@@ -185,11 +188,32 @@ def test_released_edsr_reproduces_the_papers_numbers_within_0_2_db(name, scale, 
     model.load_state_dict(load_official(WEIGHTS / FULL[scale], model))  # after construction
     lit = lit.to(device).eval()
     ds = ValidationDataset(DATA / name, scale)
-    scores = []
+    scores = {m.__name__: [] for m in metrics}
     for i in range(len(ds)):
         lr, hr = (t[None].to(device) for t in ds[i])
         with torch.no_grad():
             sr, hr_cropped = lit.predict_rgb(lr, hr, self_ensemble=plus)
-        scores.append(_psnr_y(sr, hr_cropped, scale))
+        for m in metrics:
+            scores[m.__name__].append(m(sr, hr_cropped, scale))
+    return {k: sum(v) / len(v) for k, v in scores.items()}
 
-    assert sum(scores) / len(scores) == pytest.approx(PAPER[name][scale][int(plus)], abs=0.2)
+
+@needs_weights
+@pytest.mark.parametrize("scale", [2, 3, 4])
+@pytest.mark.parametrize("name", list(PAPER))
+@pytest.mark.parametrize("plus", [False, True], ids=["EDSR", "EDSR+"])
+def test_released_edsr_reproduces_the_papers_numbers_within_0_05_db(name, scale, plus):
+    """The released checkpoints under the paper's own protocol: all 18 cells within 0.05 dB.
+
+    The paper evaluated with MATLAB, whose ``rgb2ycbcr`` on 8-bit input returns 8-bit luma, so
+    both planes are rounded (``_psnr_matlab``). The pipeline's float Y (``_psnr_y``) reads
+    0.01-0.10 dB higher on the same outputs, so that figure is only bounded at 0.2 dB.
+    """
+    if not (DATA / name).exists():
+        pytest.skip(f"{name} not available")
+
+    got = _scores(name, scale, plus, [_psnr_matlab, _psnr_y])
+
+    paper = PAPER[name][scale][int(plus)]
+    assert got["_psnr_matlab"] == pytest.approx(paper, abs=0.05)
+    assert got["_psnr_y"] == pytest.approx(paper, abs=0.2)
