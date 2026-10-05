@@ -353,7 +353,7 @@ def test_to_onnx_exports_a_real_drcn_with_its_recursions_unrolled(tmp_path):
     torch.manual_seed(0)
     model = DRCN(in_out_channels=1, features=8, recursions=3)
     with torch.no_grad():
-        model.ensemble.copy_(torch.tensor([0.5, 0.3, 0.1]))
+        model.ensemble.copy_(torch.tensor([0.5, 0.3, 0.1, 0.4]))
     module = SRLightning(
         model=model,
         processor=YChannelProcessor(),

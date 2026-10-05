@@ -17,7 +17,7 @@ class RecursiveSupervisionLoss(SRLoss):
     ``alpha * l1 + (1 - alpha) * l2``.
 
     Opts in to the model's full output record (``wants_model_output``) and
-    reads ``extras["recursions"]``, shape ``(B, D, C, H, W)``.
+    reads ``extras["recursions"]``, shape ``(B, D + 1, C, H, W)``.
     """
 
     wants_model_output = True

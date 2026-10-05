@@ -12,24 +12,27 @@ from sisr.models.base import SRModel, SRModelOutput
 
 
 class DRCN(SRModel):
-    """Embedding, one shared recursive conv, a shared reconstruction net, a learned ensemble.
+    """Embedding, a shared recursive block, a shared reconstruction net, a learned ensemble.
 
-    The embedding net (two 3x3 convs) produces ``H0``. A **single** 3x3 conv
-    is applied ``recursions`` times, each followed by a ReLU, giving
-    ``H_1 .. H_D``; the parameter count is independent of ``recursions``. One
-    reconstruction net (3x3 conv, ReLU, 3x3 conv) maps every ``H_d`` to a
-    residual, and the input skip adds ``x`` to it: ``y_d = x + f(H_d)``. The
-    output is the learned weighted sum ``sum_d w_d * y_d``.
+    This is the wiring of the authors' released network, which the pretrained
+    weights require. The embedding net (two 3x3 convs with ReLUs) produces
+    ``H0``. A **shared** 3x3 conv, ``recon1``, maps it to ``z_0`` (linear); then
+    ``recursions`` times, ``z_d = recon1(relu(infer(z_{d-1})))`` with ``infer`` a
+    second shared 3x3 conv, so the parameter count is independent of
+    ``recursions``. A final 3x3 conv, ``recon2``, reads every ``z_d`` and gives
+    a residual ``r_d``: ``recursions + 1`` predictions. The output adds the
+    input skip once, after the learned ensemble: ``x + sum_d w_d * r_d``.
 
-    **The ensemble weights are raw and un-normalised**, initialised to
-    ``1 / recursions`` -- the paper's "weighted average ... learned during
-    training", with no softmax -- so weights ported from the authors'
-    release reproduce their outputs exactly.
+    That equals the paper's ``sum_d w_d * (x + r_d)`` only when the weights sum
+    to 1, as they do at initialisation (``1 / (recursions + 1)`` each); the
+    released weights sum to about 1.65, so the skip placement matters for
+    parity. **The ensemble weights are raw and un-normalised** (no softmax).
 
     ``forward`` returns an :class:`~sisr.models.base.SRModelOutput`: ``primary``
-    is the ensemble, ``extras["recursions"]`` stacks every ``y_d`` as
-    ``(B, D, C, H, W)`` for recursive supervision. Metrics, predict and export
-    read only ``primary``.
+    is the output above, ``extras["recursions"]`` stacks every per-recursion
+    prediction ``x + r_d`` as ``(B, recursions + 1, C, H, W)`` for recursive
+    supervision (its MSE to the target equals the residual MSE the authors
+    train on). Metrics, predict and export read only ``primary``.
 
     Reference:
     - Deeply-Recursive Convolutional Network for Image Super-Resolution:
@@ -38,8 +41,7 @@ class DRCN(SRModel):
     Args:
         in_out_channels: Input/output channel count (1 for the paper's Y channel).
         features: Width of every hidden conv (256 in the paper).
-        recursions: Number of applications of the shared inference conv (16
-            in the paper).
+        recursions: Applications of the shared inference conv (16 in the paper).
         kernel_size: Odd kernel size of every conv (3 in the paper); padding
             keeps the resolution.
 
@@ -90,9 +92,9 @@ class DRCN(SRModel):
             torch.nn.ReLU(inplace=True),
         )
         self.infer = conv(features, features)
-        self.recon1 = conv(features, features)
+        self.recon1 = conv(features, features)  # shared: also sits inside the recursion
         self.recon2 = conv(features, in_out_channels)
-        self.ensemble = torch.nn.Parameter(torch.full((recursions,), 1.0 / recursions))
+        self.ensemble = torch.nn.Parameter(torch.full((recursions + 1,), 1.0 / (recursions + 1)))
 
     @property
     def variant_tag(self) -> str:
@@ -100,12 +102,13 @@ class DRCN(SRModel):
         return f"r{self._hparams['recursions']}"
 
     def reset_parameters(self, **kwargs: Any) -> None:
-        """The paper's init: He for ordinary convs, identity for the recursive one.
+        """The paper's init: He for ordinary convs, identity for the shared ones.
 
-        Non-recursive convs use He et al.'s normal init; the recursive conv is
-        zero except for the self-connection (the centre tap from each channel
-        to the same channel). All biases are zero. The ensemble weights are
-        reset to ``1 / recursions``.
+        Non-recursive convs use He et al.'s normal init. The two shared
+        convs, ``infer`` and ``recon1``, are zero except for the
+        self-connection (the centre tap from each channel to the same channel),
+        as in the authors' released network. All biases are zero. The ensemble
+        weights are reset to ``1 / (recursions + 1)``.
 
         Args:
             **kwargs: Unused; absorbed so callers can invoke this
@@ -113,7 +116,7 @@ class DRCN(SRModel):
         """
         for module in self.modules():
             if isinstance(module, torch.nn.Conv2d):
-                if module is self.infer:
+                if module is self.infer or module is self.recon1:
                     torch.nn.init.zeros_(module.weight)
                     centre = module.kernel_size[0] // 2
                     with torch.no_grad():
@@ -124,7 +127,7 @@ class DRCN(SRModel):
                 assert module.bias is not None
                 torch.nn.init.zeros_(module.bias)
         with torch.no_grad():
-            self.ensemble.fill_(1.0 / self.recursions)
+            self.ensemble.fill_(1.0 / (self.recursions + 1))
 
     def forward(self, x: torch.Tensor) -> SRModelOutput:
         """Run the recursions and the learned ensemble.
@@ -135,13 +138,13 @@ class DRCN(SRModel):
         Returns:
             An :class:`~sisr.models.base.SRModelOutput` whose ``primary`` is
             ``(B, in_out_channels, H, W)`` and whose ``extras["recursions"]``
-            is ``(B, recursions, in_out_channels, H, W)``.
+            is ``(B, recursions + 1, in_out_channels, H, W)``.
         """
-        h = self.embed(x)
-        outputs = []
+        z = self.recon1(self.embed(x))
+        residuals = [self.recon2(z)]
         for _ in range(self.recursions):
-            h = torch.relu(self.infer(h))
-            outputs.append(x + self.recon2(torch.relu(self.recon1(h))))
-        stacked = torch.stack(outputs, dim=1)
-        primary = (stacked * self.ensemble.view(1, -1, 1, 1, 1)).sum(dim=1)
-        return SRModelOutput(primary=primary, extras={"recursions": stacked})
+            z = self.recon1(torch.relu(self.infer(z)))
+            residuals.append(self.recon2(z))
+        stacked = torch.stack(residuals, dim=1)
+        primary = x + (stacked * self.ensemble.view(1, -1, 1, 1, 1)).sum(dim=1)
+        return SRModelOutput(primary=primary, extras={"recursions": x.unsqueeze(1) + stacked})
