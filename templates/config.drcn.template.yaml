@@ -1,5 +1,5 @@
 # DRCN -- Kim et al., deeply-recursive CNN, pre-upsampled LR, Y-channel only.
-# Built and smoke-tested, NOT yet reproduced. The paper states no alpha schedule and no step
+# Built and smoke-tested; the ported official weights reproduce the paper (see the README), this training recipe is NOT yet reproduced. The paper states no alpha schedule and no step
 # budget; both are assumptions below. Its lr decay on a validation plateau is not reproduced.
 # Settings are explained in docs/configuration.md. Config files must stay ASCII.
 seed_everything: 42
@@ -93,16 +93,6 @@ data:
 
 trainer:
   max_epochs: -1
-  # The authors' released solver: max_iter 15000000 ITERATIONS.
-  # !! This DISAGREES with the paper, and the disagreement is deliberate to
-  # preserve rather than resolve. 15000000 x 128 = 1.92e9 backpropagations,
-  # against the paper's stated 8e8 (which would be 6250000 iterations here).
-  # We follow the authors' file, because it is the value they state; the paper's
-  # figure is presumably where they snapshotted from (snapshot: 500), but which
-  # snapshot produced the published numbers is not recorded anywhere.
-  # PRACTICAL: this is a very long run. snapshot cadence is what it is for --
-  # stop early at a checkpoint rather than lowering this to a number no source
-  # states.
   # The paper states no step budget. ASSUMPTION: 200000 steps; the LossWeightScheduler
   # durations below must equal it.
   max_steps: 200000
@@ -175,7 +165,7 @@ trainer:
           save_dir: experiments
           name: DRCN
           version: baseline
-        log_graph: true
+        log_graph: false   # TensorBoard graph tracing cannot serialise the model's output record
         default_hp_metric: false
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
