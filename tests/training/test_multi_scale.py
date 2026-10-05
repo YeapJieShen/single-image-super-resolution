@@ -146,6 +146,22 @@ def test_metadata_records_a_scale_list_and_the_filename_token_sorts_it():
     assert artifacts.stem(meta).endswith("x2-3-4_RGB_ms")
 
 
+def test_metadata_states_each_scales_border_when_crop_border_is_null():
+    """``eval_config.crop_border`` is null for a multi-scale run, which only means something
+    to a reader who knows the rule; the artifact spells the borders out."""
+    meta = build_metadata(_lit(scale=(4, 2, 3)))
+
+    assert meta["eval_config"]["crop_border"] is None
+    assert meta["io"]["crop_border_by_scale"] == {"4": 4, "2": 2, "3": 3}
+
+
+def test_metadata_adds_no_border_table_when_the_border_is_resolved():
+    meta = build_metadata(_lit(model=_PlainNet(scale=4), scale=[4]))
+
+    assert meta["eval_config"]["crop_border"] == 4
+    assert "crop_border_by_scale" not in meta["io"]
+
+
 def test_metadata_keeps_an_int_for_a_single_scale():
     lit = _lit(model=_PlainNet(scale=4), scale=[4])
 
@@ -279,6 +295,34 @@ def test_multi_scale_validation_logs_each_scale_and_their_mean():
     assert logged["loss/val/x4"] == pytest.approx(0.04, rel=1e-4)
     assert logged["loss/val"] == pytest.approx(0.025, rel=1e-4)
     assert lit.model.seen == [2, 4]  # type: ignore[attr-defined]
+
+
+def test_multi_scale_validation_means_are_batch_size_weighted_across_batches():
+    """Per scale: batches of size 1 and 3 with different errors. A sum, an unweighted mean of
+    the batches and the weighted mean are all different numbers here."""
+    lit = _val_module()
+    logged = _logged(lit)
+    # (scale, batch size, constant error) -> per-batch MSE d^2.
+    plan = {0: [(1, 0.1), (3, 0.3)], 1: [(2, 0.2), (1, 0.4)]}
+    for idx, scale in enumerate((2, 4)):
+        for n, d in plan[idx]:
+            lr = torch.rand(n, 3, 16 // scale, 16 // scale) * 0.4 + 0.2
+            up = torch.nn.functional.interpolate(lr, scale_factor=scale, mode="nearest")
+            lit.validation_step((lr, up + d), 0, dataloader_idx=idx)
+
+    lit.on_validation_epoch_end()
+
+    mse = {i: sum(n * d * d for n, d in b) / sum(n for n, _ in b) for i, b in plan.items()}
+    assert logged["loss/val/x2"] == pytest.approx(mse[0], rel=1e-4)
+    assert logged["loss/val/x4"] == pytest.approx(mse[1], rel=1e-4)
+    assert logged["loss/val"] == pytest.approx((mse[0] + mse[1]) / 2, rel=1e-4)
+    psnr = {
+        i: sum(n * 20 * math.log10(1 / d) for n, d in b) / sum(n for n, _ in b)
+        for i, b in plan.items()
+    }
+    assert logged["psnr/val/RGB/x2"] == pytest.approx(psnr[0], rel=1e-4)
+    assert logged["psnr/val/RGB/x4"] == pytest.approx(psnr[1], rel=1e-4)
+    assert logged["psnr/val/RGB"] == pytest.approx((psnr[0] + psnr[1]) / 2, rel=1e-4)
 
 
 def test_multi_scale_validation_ignores_the_test_loaders_and_resets_between_epochs():

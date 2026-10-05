@@ -112,6 +112,14 @@ def test_train_datasets_reject_malformed_scale_lists(mixed_size_image_dir: Path,
         native_lr.TrainDataset(mixed_size_image_dir, scale=bad, hr_crop_size=12)
 
 
+def test_pre_upsampled_checks_every_scale_before_building_a_cache(mixed_size_image_dir: Path):
+    """6 is neither odd nor a power of two; as the second scale it must still be refused,
+    and before any cache is built."""
+    with pytest.raises(ValueError, match="odd or power-of-two"):
+        pre_upsampled.TrainDataset(mixed_size_image_dir, subimg_size=12, stride=12, scale=[3, 6])
+    assert not (mixed_size_image_dir / ".lmdb_cache").exists()
+
+
 # --- native_lr: one scale per batch ----------------------------------------------------
 
 

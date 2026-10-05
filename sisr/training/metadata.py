@@ -191,6 +191,10 @@ def build_metadata(
         "output_colorspace": processor.output_colorspace,
     }
     meta["eval_config"] = _to_plain(dataclasses.asdict(module.eval_config))
+    if module.eval_config.crop_border is None:
+        # ``eval_config.crop_border: null`` means "each sample's own scale" for a multi-scale
+        # run; state the borders so a reader needs no knowledge of that rule.
+        meta["io"]["crop_border_by_scale"] = {str(s): s for s in scales}
     return meta
 
 
