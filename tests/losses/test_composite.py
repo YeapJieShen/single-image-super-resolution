@@ -231,6 +231,21 @@ class _RecordProbe(SRLoss):
         return torch.nn.functional.mse_loss(pred.extras["aux"], target)
 
 
+class _PlainSRLossProbe(SRLoss):
+    """An SRLoss that does NOT opt in: it must get the bare primary tensor."""
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor: SRProcessor) -> None:
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
 class _PlainProbe(torch.nn.Module):
     """A plain term that records its input and demands a bare tensor."""
 
@@ -272,6 +287,16 @@ def test_the_record_reaches_opted_in_terms_and_only_the_primary_reaches_plain_on
         + 0.7 * ((record.primary - target) ** 2).mean()
     )
     assert got.item() == pytest.approx(expected.item())
+
+
+def test_an_srloss_that_does_not_opt_in_gets_only_the_primary():
+    probe, plain = _RecordProbe(), _PlainSRLossProbe()
+    loss = WeightedSumLoss(terms={"rec": probe, "tv": plain})
+    record = _record()
+
+    loss(record, torch.rand(1, 1, 4, 4))
+
+    assert plain.received[0] is record.primary
 
 
 def test_a_composite_with_no_opted_in_term_passes_a_bare_tensor_through_unchanged():

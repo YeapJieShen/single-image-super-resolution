@@ -25,7 +25,7 @@ class DRCN(SRModel):
 
     That equals the paper's ``sum_d w_d * (x + r_d)`` only when the weights sum
     to 1, as they do at initialisation (``1 / (recursions + 1)`` each); the
-    released weights sum to about 1.65, so the skip placement matters for
+    released weights sum to 1.28-1.65 across the three scales, so the skip placement matters for
     parity. **The ensemble weights are raw and un-normalised** (no softmax).
 
     ``forward`` returns an :class:`~sisr.models.base.SRModelOutput`: ``primary``

@@ -1,6 +1,8 @@
 # DRCN -- Kim et al., deeply-recursive CNN, pre-upsampled LR, Y-channel only.
-# Built and smoke-tested; the ported official weights reproduce the paper (see the README), this training recipe is NOT yet reproduced. The paper states no alpha schedule and no step
-# budget; both are assumptions below. Its lr decay on a validation plateau is not reproduced.
+# Built and smoke-tested. The ported official weights reproduce the paper's PSNR-Y (see the
+# README); this training recipe is NOT yet reproduced. The paper states no alpha schedule and no
+# step budget (both assumed below), and it trains on Yang's 91 images where this template uses
+# DIV2K. Its lr decay on a validation plateau is not reproduced.
 # Settings are explained in docs/configuration.md. Config files must stay ASCII.
 seed_everything: 42
 
@@ -42,7 +44,8 @@ model:
         class_path: sisr.models.drcn.DRCNTrainingConfig
         init_args:
           scale: &scale 3
-          # Clip to theta / lr (gradient_clip_val below), the paper's stabiliser.
+          # ASSUMPTION, borrowed from VDSR: clip to theta / lr (gradient_clip_val below). The DRCN
+          # paper states no clipping; drop both lines to train exactly as it describes.
           scale_clip_with_lr: true
           example_input_shape: [1, 41, 41]
       # Defaults to ssim_impl: wang, the field standard.
@@ -81,7 +84,7 @@ data:
         img_dir: data/BSD100_HR
         scale: *scale
   train_dataloader_kwargs:
-    batch_size: 20          # the paper's mini-batch
+    batch_size: 64          # the paper's mini-batch of 64 patches
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.
     num_workers: 16
     pin_memory: true
@@ -100,7 +103,8 @@ trainer:
   check_val_every_n_epoch: null
   num_sanity_val_steps: -1
   log_every_n_steps: 100
-  # The paper clips gradients at theta = 0.01 and scales it by the learning rate.
+  # ASSUMPTION, borrowed from VDSR (theta = 0.01, scaled by the learning rate); the DRCN paper
+  # states no gradient clipping.
   gradient_clip_val: 0.01
   gradient_clip_algorithm: value
   deterministic: false

@@ -123,12 +123,19 @@ def _resize(plane, shape):
     return np.einsum("jk,ijk->ij", ww, plane[:, iw])
 
 
-def _authors_input(rgb, sf):
-    """(HR YCbCr uint8, clamped bicubic-up Y, bicubic-up Cb, Cr) exactly as DRCN.m builds them."""
+def _prepare(path, sf):
+    """(ground-truth plane uint8, network input, Cb, Cr or None) for one image at scale ``sf``."""
+    img = Image.open(path)
+    grey = img.mode == "L"
+    rgb = np.asarray(img if grey else img.convert("RGB"))
     h, w = rgb.shape[0] - rgb.shape[0] % sf, rgb.shape[1] - rgb.shape[1] % sf
+    if grey:
+        gt = rgb[:h, :w]
+        up = _resize(_resize(gt / 255.0, (h // sf, w // sf)), (h, w))
+        return gt, up, None, None
     ycc = _rgb2ycbcr(rgb[:h, :w])
     up = [_resize(_resize(ycc[..., i] / 255.0, (h // sf, w // sf)), (h, w)) for i in range(3)]
-    return ycc, np.clip(up[0], 16 / 255, 235 / 255), up[1], up[2]
+    return ycc[..., 0], np.clip(up[0], 16 / 255, 235 / 255), up[1], up[2]
 
 
 def _u8(x):
@@ -197,8 +204,7 @@ def test_ported_weights_match_a_hand_rolled_forward_of_the_same_mat():
 @needs_authors_output
 def test_ported_x2_reproduces_the_authors_released_output_image():
     """DRCN.m's own PNG for Set5 'head' (x2): within 2 grey levels everywhere."""
-    rgb = np.asarray(Image.open(SET5 / "head.png").convert("RGB"))
-    _, y, cb, cr = _authors_input(rgb, 2)
+    _, y, cb, cr = _prepare(SET5 / "head.png", 2)
 
     pred = _predict(_drcn(2), y)  # primary already carries the input skip
     ours = _ycbcr2rgb(_u8(np.stack([pred, cb, cr], -1)))
@@ -212,19 +218,28 @@ def test_ported_x2_reproduces_the_authors_released_output_image():
     assert (diff > 1).mean() < 1e-3
 
 
-PAPER_SET5 = {2: 37.63, 3: 33.82, 4: 31.53}  # arXiv 1511.04491, benchmark table, PSNR-Y
+PAPER_PSNR = {  # arXiv 1511.04491, benchmark table, PSNR-Y
+    "Set5_HR": {2: 37.63, 3: 33.82, 4: 31.53},
+    "Set14_HR": {2: 33.04, 3: 29.76, 4: 28.02},
+    "BSD100_HR": {2: 31.85, 3: 28.80, 4: 27.23},
+}
 
 
 @needs_weights
 @pytest.mark.parametrize("sf", [2, 3, 4])
-def test_ported_weights_reproduce_the_papers_set5_psnr(sf):
-    """Set5 PSNR-Y under the authors' protocol within 0.05 dB of the paper (issue #296's rule)."""
-    if not SET5.exists():
-        pytest.skip("Set5 not available")
+@pytest.mark.parametrize("name", list(PAPER_PSNR))
+def test_ported_weights_reproduce_the_papers_psnr(name, sf):
+    """PSNR-Y under the authors' protocol within 0.05 dB of the paper (issue #296's rule).
+
+    Set14's single-channel ``bridge`` pins the grey branch: forced through RGB it scores
+    1.32 dB higher and lifts the Set14 mean by ~0.09 dB.
+    """
+    if not (DATA / name).exists():
+        pytest.skip(f"{name} not available")
     model = _drcn(sf)
     scores = []
-    for path in sorted(SET5.glob("*.png")):
-        ycc, y, _, _ = _authors_input(np.asarray(Image.open(path).convert("RGB")), sf)
-        scores.append(_psnr(ycc[..., 0], _u8(_predict(model, y)), sf))
+    for path in sorted((DATA / name).glob("*.png")):
+        gt, y, _, _ = _prepare(path, sf)
+        scores.append(_psnr(gt, _u8(_predict(model, y)), sf))
 
-    assert np.mean(scores) == pytest.approx(PAPER_SET5[sf], abs=0.05)
+    assert np.mean(scores) == pytest.approx(PAPER_PSNR[name][sf], abs=0.05)

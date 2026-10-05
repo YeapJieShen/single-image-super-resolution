@@ -21,12 +21,13 @@ class DRCNTrainingConfig(SRTrainingConfig):
     recursive conv.
 
     The paper trains with ``L = alpha * l_recursive + (1 - alpha) * l_final +
-    beta * ||theta||^2`` (``beta = 1e-4``, SGD momentum 0.9, lr 0.01), and stabilises
-    training with gradient clipping. It does **not** state how ``alpha`` evolves
+    beta * ||theta||^2`` (``beta = 1e-4``, SGD momentum 0.9, lr 0.01).
+    It does **not** state how ``alpha`` evolves
     during training. **Assumption, recorded:** the template ramps ``alpha`` linearly
     from 1 to 0 over the run (two ``LossWeightScheduler`` callbacks, one per term).
-    ``beta`` is the optimizer's ``weight_decay``; the clip threshold is the
-    trainer's ``gradient_clip_val`` with ``scale_clip_with_lr``.
+    ``beta`` is the optimizer's ``weight_decay``. The paper states no gradient
+    clipping; the template's ``gradient_clip_val`` with ``scale_clip_with_lr`` is
+    an assumption borrowed from VDSR.
 
     ``scale`` is left at the inherited ``None``: the model is resolution-preserving
     and the paper reports x2/x3/x4.
