@@ -1,8 +1,10 @@
 """Whole-image derived planes, cached as a sibling of the raw-HR cache.
 
-Both train datasets need a plane derived from the **whole** HR image: SRResNet
-the bicubic downscale, SRCNN that downscale bicubically restored to HR size.
-Degrading an already-extracted crop instead resolves the kernel's edge taps
+Both train datasets need a plane derived from the **whole** HR image: the
+bicubic downscale (kind ``'lr'``). SRResNet slices its LR crop straight out of
+it; SRCNN upsamples each patch's window of the same plane back to HR size at
+load time (see :mod:`sisr.datasets.pre_upsampled`). Degrading an
+already-extracted crop instead resolves the kernel's edge taps
 against the crop border rather than the real neighbouring pixels, which is not
 what the surveyed reference pipelines do and not what produced the numbers this
 project compares against.
@@ -21,9 +23,9 @@ whole cache, so what governs throughput is whether the raw-HR cache *plus* this
 plane fits in page cache. ``'lr'`` costs ``1/scale**2`` of the HR pixels and is
 negligible; ``'bicubic'`` is HR-sized and roughly doubles the working set.
 Crossing available RAM is a step change, not a gradient — measured at a **21x**
-throughput loss on the far side, with the GPU idle and the loop I/O-bound. Size
-the box against the dataset before choosing ``'bicubic'``; see
-:mod:`sisr.datasets.pre_upsampled`.
+throughput loss on the far side, with the GPU idle and the loop I/O-bound. No
+current caller caches ``'bicubic'`` for this reason; it remains a valid,
+tested ``derive()`` output for anything that wants a whole HR-sized plane.
 
 Deliberately torch-free, for the same reason :mod:`~sisr.datasets.hr_cache` is:
 :func:`process_derived_image` is the function pickled to ``ProcessPoolExecutor``
@@ -51,8 +53,9 @@ exactly why it was rejected there.
 """
 
 KINDS = ("lr", "bicubic")
-"""``'lr'`` -- the bicubic downscale by ``scale`` (SRResNet's model input).
-``'bicubic'`` -- that downscale bicubically restored to HR size (SRCNN's)."""
+"""``'lr'`` -- the bicubic downscale by ``scale`` (both train datasets' cached plane).
+``'bicubic'`` -- that downscale bicubically restored to HR size (tested as a
+reference oracle for correctness, but no longer cached by any trainer)."""
 
 HEADER = struct.Struct("<II")
 
