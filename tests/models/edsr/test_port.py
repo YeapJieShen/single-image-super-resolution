@@ -13,13 +13,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from sisr.colorspace import rgb_to_ycbcr_studio
 from sisr.datasets.native_lr import ValidationDataset
 from sisr.models.edsr import EDSR, EDSREvalConfig, EDSRTrainingConfig
 from sisr.models.edsr.port import load_official, rename_key
 from sisr.processors import RGBProcessor
 from sisr.training import SRLightning
-from tests.models.matlab_protocol import psnr, rgb2ycbcr
+from tests.models.matlab_protocol import psnr_float_y, psnr_matlab
 
 DATA = Path(os.environ.get("SISR_DATA_DIR") or Path(__file__).resolve().parents[3] / "data")
 WEIGHTS = DATA / "weights" / "edsr"
@@ -156,26 +155,6 @@ PAPER = {
 }
 
 
-def _psnr_y(sr, hr, scale):
-    """This pipeline's own metric: studio Y of the float RGB, border = scale."""
-    a, b = (rgb_to_ycbcr_studio(t)[:, :1, scale:-scale, scale:-scale] * 255 for t in (sr, hr))
-    return float(10 * torch.log10(255.0**2 / ((a - b) ** 2).mean()))
-
-
-def _psnr_matlab(sr, hr, scale):
-    """The paper's protocol (sec 4.5: "We used MATLAB functions for evaluation").
-
-    SR is clamped and rounded to 8-bit RGB, MATLAB's ``rgb2ycbcr`` on uint8 returns uint8 Y (so
-    both luma planes are rounded), ``scale`` pixels are shaved, and PSNR is taken on doubles.
-    """
-
-    def luma(t):
-        rgb = (t[0].clamp(0, 1) * 255).round().byte().permute(1, 2, 0).cpu().numpy()
-        return rgb2ycbcr(rgb)[..., 0]
-
-    return psnr(luma(hr), luma(sr), scale)
-
-
 def _scores(name, scale, plus, metrics):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = EDSR(scale=scale, features=256, num_blocks=32, residual_scale=0.1)
@@ -206,14 +185,14 @@ def test_released_edsr_reproduces_the_papers_numbers_within_0_05_db(name, scale,
     """The released checkpoints under the paper's own protocol: all 18 cells within 0.05 dB.
 
     The paper evaluated with MATLAB, whose ``rgb2ycbcr`` on 8-bit input returns 8-bit luma, so
-    both planes are rounded (``_psnr_matlab``). The pipeline's float Y (``_psnr_y``) reads
+    both planes are rounded (``psnr_matlab``). The pipeline's float Y (``psnr_float_y``) reads
     0.01-0.10 dB higher on the same outputs, so that figure is only bounded at 0.2 dB.
     """
     if not (DATA / name).exists():
         pytest.skip(f"{name} not available")
 
-    got = _scores(name, scale, plus, [_psnr_matlab, _psnr_y])
+    got = _scores(name, scale, plus, [psnr_matlab, psnr_float_y])
 
     paper = PAPER[name][scale][int(plus)]
-    assert got["_psnr_matlab"] == pytest.approx(paper, abs=0.05)
-    assert got["_psnr_y"] == pytest.approx(paper, abs=0.2)
+    assert got["psnr_matlab"] == pytest.approx(paper, abs=0.05)
+    assert got["psnr_float_y"] == pytest.approx(paper, abs=0.2)

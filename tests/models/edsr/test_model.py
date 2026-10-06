@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from sisr.models.edsr import EDSR
-from sisr.models.edsr.model import _ResBlock
+from sisr.models.edsr.model import ResBlock
 
 
 def _net(scale=2, **kw):
@@ -30,7 +30,7 @@ def test_there_is_no_batch_norm_anywhere():
 
 
 def test_the_residual_scale_multiplies_each_blocks_residual():
-    block = _ResBlock(4, residual_scale=0.1)
+    block = ResBlock(4, residual_scale=0.1)
     for p in block.parameters():
         torch.nn.init.zeros_(p)
     with torch.no_grad():
