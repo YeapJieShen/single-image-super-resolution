@@ -196,3 +196,48 @@ def test_ported_weights_reproduce_the_papers_psnr(name, sf):
     scores = [score_image(p, sf, predict) for p in sorted((DATA / name).glob("*.png"))]
 
     assert np.mean(scores) == pytest.approx(PAPER_PSNR[name][sf], abs=0.05)
+
+
+# --- through the pipeline, with the studio-range processor -----------------------------
+
+
+def _pipeline_psnr(name, sf, processor):
+    from sisr.datasets.pre_upsampled import ValidationDataset
+    from sisr.models.vdsr import VDSREvalConfig, VDSRTrainingConfig
+    from sisr.training import SRLightning
+    from tests.models.matlab_protocol import psnr_float_y
+
+    model = VDSR()
+    lit = SRLightning(
+        model=model,
+        processor=processor,
+        training_config=VDSRTrainingConfig(scale=[sf]),
+        eval_config=VDSREvalConfig(),
+    )
+    model.load_state_dict(load_matconvnet(WEIGHTS / "mat" / "VDSR.mat"))  # after construction
+    lit = lit.to(_device()).eval()
+    ds = ValidationDataset(DATA / name, sf)
+    scores = []
+    for i in range(len(ds)):
+        lr, hr = (t[None].to(_device()) for t in ds[i])
+        with torch.no_grad():
+            sr, hr_c = lit.predict_rgb(lr, hr)
+        scores.append(psnr_float_y(sr, hr_c, sf))
+    return float(np.mean(scores))
+
+
+@needs_weights
+def test_studio_y_processor_brings_vdsr_set5_x2_to_the_paper_through_the_pipeline():
+    """The released weights were trained on MATLAB's studio Y, not the full-range one.
+
+    Set5 x2, float-Y metric (no 8-bit rounding): full-range 37.31, studio 37.50, paper 37.53.
+    """
+    from sisr.processors import StudioYChannelProcessor, YChannelProcessor
+
+    if not (DATA / "Set5_HR").exists():
+        pytest.skip("Set5_HR not available")
+    studio = _pipeline_psnr("Set5_HR", 2, StudioYChannelProcessor())
+    full = _pipeline_psnr("Set5_HR", 2, YChannelProcessor())
+
+    assert studio == pytest.approx(37.53, abs=0.05)
+    assert abs(studio - 37.53) < abs(full - 37.53) - 0.1
