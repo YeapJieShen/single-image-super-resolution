@@ -1027,7 +1027,7 @@ class SRLightning(lightning.LightningModule):
         metric uses, and therefore the one that locates this file on a curve —
         ``global_step`` beside it is the optimizer count, which an adversarial
         run advances twice per batch. See
-        :meth:`~sisr.training.callbacks._SRCheckpointBase._monitor_candidates`
+        :meth:`~sisr.training.callbacks.checkpoint._SRCheckpointBase._monitor_candidates`
         for the matching correction to the *filename*.
 
         Args:

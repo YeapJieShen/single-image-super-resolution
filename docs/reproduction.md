@@ -242,7 +242,7 @@ both are pinned:
   standard. The switch is **in place**: `ssim/val/RGB` and `ssim/val/Y` name the
   metric identically either way, and checkpoint filenames
   (`sr-{step}-ssim_val_RGB={value:.4f}.ckpt`, built by
-  [`SRCheckpoint`](sisr/training/callbacks.py)) carry only the bare number — so
+  [`SRCheckpoint`](sisr/training/callbacks/checkpoint.py)) carry only the bare number — so
   neither the tag nor the filename reveals which convention produced a given value.
   It is recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
   SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
@@ -264,8 +264,8 @@ both are pinned:
   per-image PSNR values versus a single PSNR from pooled MSE — with the two diverging by
   up to ~2.5 dB on the same data. This project uses the former (their convention (a), not
   MSE-pooling): PSNR is computed one image at a time and the per-image values are then
-  averaged (`sisr/training/callbacks.py:365-370` computes each image's PSNR, `:440-442`
-  takes the arithmetic mean over them), independently confirmed by
+  averaged (`BenchmarkImageLogger._collect_batch` in `sisr/training/callbacks/images.py` computes
+  each image's PSNR and `_flush_buffer` takes the arithmetic mean over them), independently confirmed by
   [`SRLightning._mean_psnr`](sisr/training/lightning_module.py)
   (`sisr/training/lightning_module.py:504-515`), whose own docstring names and rejects
   MSE-pooling as the alternative. Wang, Chen and Hoi's
