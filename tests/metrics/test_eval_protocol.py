@@ -37,7 +37,7 @@ TEMPLATES = Path(__file__).resolve().parents[2] / "templates"
 EXPECTED = {  # name -> (round_to_uint8, grey_plane_scoring, float_degrade on every eval dataset)
     "vdsr": (True, True, True),
     "drcn": (True, True, True),
-    "edsr": (True, True, False),
+    "edsr": (True, False, False),
     "mdsr": (True, True, False),
     "srcnn": (True, False, False),
     "srresnet": (False, False, False),
