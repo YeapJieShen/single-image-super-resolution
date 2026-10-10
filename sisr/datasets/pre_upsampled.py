@@ -44,7 +44,7 @@ import numpy as np
 import torch
 
 from ..utils.cache import LMDBCacheBuildContext
-from ..utils.imresize import resize, resize_window
+from ..utils.imresize import resize, resize_float, resize_window
 from .base import HRCachedTrainDataset, SRDataset, as_scales
 from .derived_cache import modcrop as _modcrop
 from .derived_cache import modcrop_extent as _modcrop_extent
@@ -287,16 +287,24 @@ class ValidationDataset(SRDataset):
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
+        float_degrade (bool): Degrade in floating point -- no uint8 re-quantization
+            between the down and up passes and no final rounding or clamp
+            (:func:`~sisr.utils.imresize.resize_float`) -- as ``VDSR.m`` and
+            ``demo_SR.m`` do in ``single`` precision. The served LR is then not an 8-bit
+            image and may leave ``[0, 1]`` by a bicubic overshoot. Evaluation only: the
+            training dataset has no such option and the uint8 path is untouched.
+            Default ``False``.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int):
+    def __init__(self, img_dir: str | Path, scale: int, float_degrade: bool = False):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
+        self.float_degrade = float_degrade
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -315,6 +323,11 @@ class ValidationDataset(SRDataset):
         """
         path = self.img_paths[idx]
         arr = _modcrop(self._load_rgb(path), self.scale)  # HWC uint8 RGB
+        if self.float_degrade:
+            h, w = arr.shape[:2]
+            down = resize_float(arr.astype(np.float64), (h // self.scale, w // self.scale))
+            lr = torch.from_numpy((resize_float(down, (h, w)) / 255.0).astype(np.float32))
+            return lr.permute(2, 0, 1).contiguous(), self._to_tensor(arr)
         lr_arr = _degrade(arr, self.scale)
 
         return self._to_tensor(lr_arr), self._to_tensor(arr)

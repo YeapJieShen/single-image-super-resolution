@@ -51,6 +51,10 @@ model:
       # Defaults to ssim_impl: wang, the field standard.
       eval_config:
         class_path: sisr.models.drcn.DRCNEvalConfig
+        init_args:
+          # Evaluation as the authors' DRCN.m / compute_diff.m do it: the output goes through an 8-bit PNG
+          # (round_to_uint8) and the LR input is degraded in float (float_degrade on the datasets below).
+          round_to_uint8: true
 
 data:
   train_dataset:
@@ -67,22 +71,26 @@ data:
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
+      float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
   test_datasets:
     Set5:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
+        float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
     Set14:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
+        float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
     BSD100:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale
+        float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
   train_dataloader_kwargs:
     batch_size: 64          # the paper's mini-batch of 64 patches
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.

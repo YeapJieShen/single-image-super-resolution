@@ -602,3 +602,41 @@ def test_train_dataset_patch_matches_real_div2k_at_every_corner(tmp_path: Path):
 
         assert np.array_equal(got_lr, expected_lr), f"LR mismatch at corner ({top}, {left})"
         assert np.array_equal(got_hr, expected_hr), f"HR mismatch at corner ({top}, {left})"
+
+
+# ---------------------------------------------------------------------------
+# ValidationDataset(float_degrade=True) -- eval inputs degraded in float, as VDSR.m does
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def edge_dir(tmp_path):
+    arr = np.zeros((16, 18, 3), dtype=np.uint8)
+    arr[:, 9:] = 255  # a hard edge: bicubic overshoots on it
+    arr[..., 1] = np.random.default_rng(1).integers(0, 256, (16, 18))
+    Image.fromarray(arr).save(tmp_path / "a.png")
+    return tmp_path
+
+
+def test_float_degrade_off_is_the_uint8_lr_unchanged(edge_dir):
+    from sisr.utils.imresize import resize
+
+    lr, hr = ValidationDataset(edge_dir, 2)[0]
+    arr = (hr.numpy().transpose(1, 2, 0) * 255).round().astype(np.uint8)
+    expected = resize(resize(arr, (8, 9)), (16, 18)).astype(np.float32) / 255
+    assert np.array_equal(lr.numpy().transpose(1, 2, 0), expected)
+
+
+def test_float_degrade_on_skips_every_uint8_requantization_and_the_clamp(edge_dir):
+    from sisr.utils.imresize import resize_float
+
+    ds = ValidationDataset(edge_dir, 2, float_degrade=True)
+    lr, hr = ds[0]
+    arr = (hr.numpy().transpose(1, 2, 0) * 255).round()
+    expected = resize_float(resize_float(arr, (8, 9)), (16, 18)) / 255
+    np.testing.assert_allclose(lr.numpy().transpose(1, 2, 0), expected, atol=1e-6)
+    assert lr.dtype == torch.float32
+    assert lr.max() > 1.0 or lr.min() < 0.0  # overshoot kept
+    off = ValidationDataset(edge_dir, 2)[0][0]
+    assert not torch.equal(lr, off)
+    assert torch.equal(hr, ValidationDataset(edge_dir, 2)[0][1])  # HR untouched

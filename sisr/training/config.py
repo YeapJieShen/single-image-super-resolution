@@ -430,6 +430,12 @@ class SREvalConfig:
             to read the scale from, so a multi-scale model trained at several scales
             cannot guess; it is required then and refused to be guessed. Ignored by a
             single-scale model.
+
+        round_to_uint8: Round each scored plane to 8-bit levels (``floor(x * 255 + 0.5)``,
+            ties away from zero) on **both** SR and HR before PSNR, as the MATLAB scripts of
+            SRCNN (``demo_SR.m``) and EDSR/MDSR (uint8 images) do. VDSR's ``VDSR.m`` does
+            not, so its template leaves this off. PSNR only: SSIM and the perceptual
+            metrics read the unrounded tensors. Default ``False``: every value unchanged.
     """
 
     crop_border: int | None = 0
@@ -441,6 +447,7 @@ class SREvalConfig:
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
     self_ensemble: bool = False
     predict_scale: int | None = None
+    round_to_uint8: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
@@ -487,6 +494,12 @@ class SREvalConfig:
                     f"SREvalConfig.{field_name} entries must be one of "
                     f"{list(valid)}; got unsupported {invalid}. Fix "
                     f"model.eval_config.init_args.{field_name} in your YAML."
+                )
+        for flag in ("round_to_uint8",):
+            if not isinstance(getattr(self, flag), bool):
+                raise ValueError(
+                    f"SREvalConfig.{flag} must be a bool; got {getattr(self, flag)!r}. Fix "
+                    f"model.eval_config.init_args.{flag} in your YAML."
                 )
         if self.ssim_impl not in ("wang", "daala"):
             raise ValueError(

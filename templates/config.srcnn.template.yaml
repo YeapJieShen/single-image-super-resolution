@@ -34,6 +34,9 @@ model:
       # Defaults to ssim_impl: wang, the field standard.
       eval_config:
         class_path: sisr.models.srcnn.SRCNNEvalConfig
+        init_args:
+          # Dong et al.'s released demo_SR.m rounds Y and the reconstruction to uint8 before PSNR.
+          round_to_uint8: true
 
 data:
   train_dataset:

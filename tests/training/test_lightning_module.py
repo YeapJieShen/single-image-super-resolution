@@ -1140,6 +1140,7 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
         "lpips_net": "alex",
         "self_ensemble": False,
         "predict_scale": None,
+        "round_to_uint8": False,
     }
     assert isinstance(lit.hparams["training_config"], dict)
     assert not any("/" in k for k in lit.hparams)

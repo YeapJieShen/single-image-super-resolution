@@ -35,7 +35,7 @@ import torchmetrics.functional.image
 
 from ..colorspace import rgb_to_ycbcr_studio
 from .perceptual import perceptual_score
-from .ssim import daala_ssim
+from .ssim import daala_ssim, quantize_u8
 
 if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
     # runtime import would make this package depend on `sisr.training` — which
@@ -284,6 +284,14 @@ class SRScorer:
 
         return tensors
 
+    def _rounded(
+        self, pair: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The pair on the 8-bit grid when ``round_to_uint8`` is set, else as given (PSNR only)."""
+        if not self.eval_config.round_to_uint8:
+            return pair
+        return tuple(quantize_u8(t) / 255.0 for t in pair)  # type: ignore[return-value]
+
     @staticmethod
     def psnr(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
         """Mean of the per-image PSNRs across the batch (SR-standard reduction).
@@ -371,7 +379,7 @@ class SRScorer:
 
         tensors = self.metric_tensors(sr_rgb, hr_rgb)
         return Scores(
-            psnr={k: self.psnr(*tensors[k]) for k in self.eval_config.psnr_keys},
+            psnr={k: self.psnr(*self._rounded(tensors[k])) for k in self.eval_config.psnr_keys},
             ssim={k: self.ssim(*tensors[k]) for k in self.eval_config.ssim_keys},
             perceptual={
                 name: self.perceptual(name, sr_rgb, hr_rgb)

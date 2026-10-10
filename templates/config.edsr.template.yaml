@@ -48,6 +48,10 @@ model:
       # PSNR/SSIM on Y, border = scale: the authors' own convention (except 8-bit rounding).
       eval_config:
         class_path: sisr.models.edsr.EDSREvalConfig
+        init_args:
+          # Evaluation as the authors' MATLAB scripts do it (uint8 images, NTIRE2017 evaluation.m):
+          # luma rounded to 8-bit levels.
+          round_to_uint8: true
 
 data:
   train_dataset:

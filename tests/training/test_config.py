@@ -77,6 +77,7 @@ def test_sr_eval_config_field_names():
         "lpips_net",
         "self_ensemble",
         "predict_scale",
+        "round_to_uint8",
     }
 
 
