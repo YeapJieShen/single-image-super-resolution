@@ -71,17 +71,17 @@ network plus a config dataclass, never a new Lightning module
 | Model | Paper | Parity with the paper |
 |---|---|---|
 | SRCNN | [Dong 2015](https://arxiv.org/pdf/1501.00092) | no publishable run |
-| SRResNet | [Ledig 2017](https://arxiv.org/pdf/1609.04802) | reproduced |
+| SRResNet | [Ledig 2017](https://arxiv.org/pdf/1609.04802) | reproduced, difference named |
 | SRGAN | [Ledig 2017](https://arxiv.org/pdf/1609.04802) | not reproduced (cause isolated) |
 | ESPCN | [Shi 2016](https://arxiv.org/pdf/1609.05158) | not yet reproduced |
 | DRCN | [Kim 2016](https://arxiv.org/abs/1511.04491) | reproduced |
 | VDSR | [Kim 2016](https://arxiv.org/abs/1511.04587) | reproduced |
-| ESRGAN | [Wang 2018](https://arxiv.org/abs/1809.00219) | PSNR stage reproduced |
+| ESRGAN | [Wang 2018](https://arxiv.org/abs/1809.00219) | PSNR stage reproduced; GAN stage a recorded baseline |
 | EDSR / EDSR+ | [Lim 2017](https://arxiv.org/abs/1707.02921) | reproduced |
-| MDSR / MDSR+ | [Lim 2017](https://arxiv.org/abs/1707.02921) | reproduced, difference named |
+| MDSR / MDSR+ | [Lim 2017](https://arxiv.org/abs/1707.02921) | within 0.16 dB, gaps named; not claimed as reproduced |
 
 "Reproduced" means within 0.05 dB PSNR-Y of the paper on Set5, Set14 and BSD100, using the
-authors' released weights where they exist. [`docs/models.md`](docs/models.md) has each model's
+authors' released weights where they exist; "difference named" means within 0.20 dB with the cause stated. [`docs/models.md`](docs/models.md) has each model's
 input contract, template and parity detail.
 
 ## Read before you trust a number

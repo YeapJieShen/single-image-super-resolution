@@ -8,20 +8,21 @@ rather than restating tables.
 
 **Parity status** is one of: *reproduced* (every set and scale within 0.05 dB of the paper's
 PSNR-Y), *reproduced, difference named* (within 0.20 dB, with the cause stated), or *not yet
-reproduced*. "Ported" means the authors' released weights load into this implementation; the
+reproduced*; where a result is within 0.20 dB but not claimed as a reproduction, the row says what
+was measured. "Ported" means the authors' released weights load into this implementation; the
 weights themselves are not redistributed ([licensing](weights-and-licensing.md)).
 
 | Model | Paper | LR input | Template | Parity status |
 |---|---|---|---|---|
 | SRCNN | [Dong et al. 2015](https://arxiv.org/pdf/1501.00092) | pre-upsampled | `config.srcnn.template.yaml` | not yet reproduced: no publishable run ([details](reproduction.md#srcnn-has-no-publishable-row)) |
-| SRResNet | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | native LR | `config.srresnet.template.yaml` | reproduced: within about 0.1 dB on Set5, Set14 and BSD100 ([details](reproduction.md#srresnet-reproduces-ledig-et-al)) |
+| SRResNet | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | native LR | `config.srresnet.template.yaml` | reproduced, difference named: within about 0.1 dB on Set5, Set14 and BSD100, trained on DIV2K-800 rather than the paper's 350k ImageNet images ([details](reproduction.md#srresnet-reproduces-ledig-et-al)) |
 | SRGAN | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | native LR | `config.srgan.template.yaml` | not reproduced: one constant is isolated ([details](reproduction.md#srgan-vgg54-does-not-and-the-cause-is-isolated)) |
 | ESPCN | [Shi et al. 2016](https://arxiv.org/pdf/1609.05158) | native LR | `config.espcn.template.yaml` | not yet reproduced: built and smoke-tested |
 | DRCN | [Kim et al. 2016](https://arxiv.org/abs/1511.04491) | pre-upsampled | `config.drcn.template.yaml` | reproduced (official weights ported) |
 | VDSR | [Kim et al. 2016](https://arxiv.org/abs/1511.04587) | pre-upsampled | `config.vdsr.template.yaml` | reproduced (official weights ported) |
-| ESRGAN | [Wang et al. 2018](https://arxiv.org/abs/1809.00219) | native LR | `config.esrgan.template.yaml`, `config.esrgan_psnr.template.yaml` | PSNR stage reproduced (official weights ported); GAN stage's perceptual index not yet verified |
+| ESRGAN | [Wang et al. 2018](https://arxiv.org/abs/1809.00219) | native LR | `config.esrgan.template.yaml`, `config.esrgan_psnr.template.yaml` | PSNR stage reproduced (official weights ported); GAN stage: a perceptual-index baseline is recorded (#289), deliberately not compared pass/fail against the paper |
 | EDSR, EDSR+ | [Lim et al. 2017](https://arxiv.org/abs/1707.02921) | native LR | `config.edsr.template.yaml` | reproduced (six released checkpoints ported) |
-| MDSR, MDSR+ | [Lim et al. 2017](https://arxiv.org/abs/1707.02921) | native LR | `config.mdsr.template.yaml` | reproduced, difference named (released 80-block checkpoint ported) |
+| MDSR, MDSR+ | [Lim et al. 2017](https://arxiv.org/abs/1707.02921) | native LR | `config.mdsr.template.yaml` | within 0.16 dB of the paper with the gaps named; not claimed as reproduced (released 80-block checkpoint ported) |
 
 *Native LR* means the dataset serves a true low-resolution image and the network upsamples it
 (sub-pixel convolution or nearest-neighbour). *Pre-upsampled* means the dataset bicubic-upsamples
@@ -55,7 +56,7 @@ supervision; VDSR is 20 layers with a global residual, one model for x2/x3/x4.
 **ESRGAN** is the RRDB generator (x4, nearest-neighbour upsampling), a relativistic GAN
 discriminator and VGG54 features before activation. The PSNR-stage official weights score
 within 0.05 dB of the paper's DF2K row on Set5, Set14 and BSD100. The GAN stage's perceptual
-index (PI, from `niqe` and `ma`) is not yet verified.
+index (PI, from `niqe` and `ma`) is recorded as a baseline on the benchmark sets and the paper's Fig. 7 images, with no pass/fail against the paper, whose figures are for the competition variant.
 
 **EDSR and EDSR+** are the residual trunk without BatchNorm, x2/x3/x4 with sub-pixel
 convolution; EDSR+ is the same weights with `eval_config.self_ensemble: true`. Under the paper's
@@ -67,8 +68,9 @@ a shared trunk; MDSR+ is `self_ensemble`. The released 80-block checkpoint is wi
 paper on BSD100 and within 0.16 dB on Set5 and Set14. The Set14 gap is a protocol difference: the
 paper's `evaluation.m` scores a single-channel image (Set14's `bridge`) on its raw plane, which
 moves the Set14 mean by 0.094 dB (the template sets `grey_plane_scoring`). The Set5 gap is weights
-provenance: the released PyTorch MDSR is a different network from the authors' Torch7 model that
-the paper tabulated, which has no scale-specific pre-processing.
+provenance: the released PyTorch MDSR is a different network from the authors' Torch7 paper-release model
+(`model_paper.tar`), which has no scale-specific pre-processing; that model too misses Set5 x4 by
+0.066 dB.
 
 ## Adding a model
 
