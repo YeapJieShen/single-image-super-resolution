@@ -157,3 +157,8 @@ ignore_missing_imports = true
 # The optional [perceptual] extra: unresolved in a [dev]-only install by design.
 module = ["pyiqa", "scipy.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The optional [mlflow] extra: unresolved in a [dev]-only install by design.
+module = ["mlflow.*"]
+ignore_missing_imports = true
