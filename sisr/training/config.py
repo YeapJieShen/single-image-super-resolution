@@ -432,13 +432,14 @@ class SREvalConfig:
             single-scale model.
 
         round_to_uint8: Round each scored plane to 8-bit levels (``floor(x * 255 + 0.5)``,
-            ties away from zero) on **both** SR and HR before PSNR, as the MATLAB scripts of
-            SRCNN (``demo_SR.m``) and EDSR/MDSR (uint8 images) do. VDSR's ``VDSR.m`` does
-            not, so its template leaves this off. PSNR only: SSIM and the perceptual
-            metrics read the unrounded tensors. Default ``False``: every value unchanged.
+            ties away from zero) on **both** SR and HR before PSNR, as the MATLAB evaluation of
+            VDSR, DRCN (both write an 8-bit PNG and re-read it), EDSR and MDSR (uint8 images)
+            does; the SRCNN template sets it too. PSNR only: SSIM and the perceptual metrics
+            read the unrounded tensors. Default ``False``: every value unchanged.
 
         grey_plane_scoring: Score a single-channel image on its raw plane, as the MATLAB
-            releases of DRCN, VDSR and EDSR/MDSR do (Set14's ``bridge``), instead of promoting
+            evaluation of DRCN, VDSR and MDSR does (Set14's ``bridge``; the EDSR paper's row
+            scores it through RGB, so the EDSR template leaves this off), instead of promoting
             it to RGB and scoring studio-range Y (which compresses errors by 219/255,
             +1.3219 dB). Greyness is the **file mode**, reported per image by the eval
             dataset's ``yield_is_grey=True`` third element -- never inferred from pixel

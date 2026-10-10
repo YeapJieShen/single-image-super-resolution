@@ -640,3 +640,75 @@ def test_float_degrade_on_skips_every_uint8_requantization_and_the_clamp(edge_di
     off = ValidationDataset(edge_dir, 2)[0][0]
     assert not torch.equal(lr, off)
     assert torch.equal(hr, ValidationDataset(edge_dir, 2)[0][1])  # HR untouched
+
+
+# ---------------------------------------------------------------------------
+# ValidationDataset(clamp_input_luma=True) -- VDSR.m / DRCN.m clamp the network input's Y
+# ---------------------------------------------------------------------------
+
+LO, HI = 16 / 255, 235 / 255
+
+
+def _studio_y(lr):
+    from sisr.colorspace import rgb_to_y_studio
+
+    return rgb_to_y_studio(lr[None])[0, 0]
+
+
+@pytest.fixture
+def mixed_dir(tmp_path):
+    arr = np.zeros((16, 18, 3), dtype=np.uint8)
+    arr[:, 9:] = 255  # black | white edge: float degradation overshoots past both ends of studio Y
+    arr[::2, :, 2] = arr[::2, :, 2] // 2 + 60  # blue stripes keep the chroma non-trivial
+    Image.fromarray(arr).save(tmp_path / "a_colour.png")
+    grey = np.where(np.arange(18)[None, :] > 8, 255, 0).repeat(16, 0).astype(np.uint8)
+    Image.fromarray(grey, "L").save(tmp_path / "b_grey.png")
+    return tmp_path
+
+
+def test_clamp_input_luma_pins_a_colour_images_input_y_to_the_studio_range(mixed_dir):
+    lr_off = ValidationDataset(mixed_dir, 2, float_degrade=True)[0][0]
+    lr_on = ValidationDataset(mixed_dir, 2, float_degrade=True, clamp_input_luma=True)[0][0]
+
+    y_off, y_on = _studio_y(lr_off), _studio_y(lr_on)
+    assert (
+        y_off.min() < LO - 1e-3 and y_off.max() > HI + 1e-3
+    )  # the fixture does overshoot both ways
+    assert y_on.min() >= LO - 1e-6 and y_on.max() <= HI + 1e-6
+    inside = (y_off >= LO) & (y_off <= HI)
+    assert torch.allclose(y_on[inside], y_off[inside], atol=1e-6)  # only out-of-range pixels move
+
+
+def test_clamp_input_luma_moves_luma_only_so_the_chroma_the_output_is_stitched_with_is_kept(
+    mixed_dir,
+):
+    from sisr.colorspace import rgb_to_ycbcr
+
+    off = ValidationDataset(mixed_dir, 2, float_degrade=True)[0][0]
+    on = ValidationDataset(mixed_dir, 2, float_degrade=True, clamp_input_luma=True)[0][0]
+
+    assert torch.allclose(rgb_to_ycbcr(on[None])[:, 1:], rgb_to_ycbcr(off[None])[:, 1:], atol=1e-5)
+
+
+def test_clamp_input_luma_leaves_a_single_channel_file_alone(mixed_dir):
+    off = ValidationDataset(mixed_dir, 2, float_degrade=True)[1][0]
+    on = ValidationDataset(mixed_dir, 2, float_degrade=True, clamp_input_luma=True)[1][0]
+
+    assert torch.equal(on, off)
+    assert (_studio_y(off) < LO - 1e-3).any()  # and it does leave the range, so a clamp would show
+
+
+def test_clamp_input_luma_off_is_the_unclamped_lr(mixed_dir):
+    default = ValidationDataset(mixed_dir, 2, float_degrade=True)[0][0]
+    explicit = ValidationDataset(mixed_dir, 2, float_degrade=True, clamp_input_luma=False)[0][0]
+    assert torch.equal(default, explicit)
+
+
+def test_the_training_path_has_no_such_clamp():
+    import inspect
+
+    from sisr.processors import StudioYChannelProcessor
+
+    assert "clamp_input_luma" not in inspect.signature(TrainDataset.__init__).parameters
+    rgb = torch.full((1, 3, 2, 2), 1.2)  # past white: a clamping extract would return 235/255
+    assert StudioYChannelProcessor().extract(rgb).max() > HI + 0.05

@@ -243,7 +243,7 @@ def resize_float(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray
     """MATLAB-``imresize``-compatible bicubic resize that never quantizes (``single`` / ``double``).
 
     The evaluation-side twin of :func:`matlab_imresize` for papers whose MATLAB degrades a
-    floating-point image (``VDSR.m``, ``demo_SR.m``): same weights from :func:`_contributions`,
+    floating-point image (``VDSR.m``, ``DRCN.m``): same weights from :func:`_contributions`,
     float64 throughout, **no rounding between passes and no clamp** at the end, so a bicubic
     overshoot survives. Kept separate so the uint8 path above, which every training cache
     and trained model depends on, is untouched.

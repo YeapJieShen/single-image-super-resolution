@@ -43,6 +43,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ..colorspace import rgb_to_y_studio
 from ..utils.cache import LMDBCacheBuildContext
 from ..utils.imresize import resize, resize_float, resize_window
 from .base import HRCachedTrainDataset, SRDataset, as_scales
@@ -290,10 +291,15 @@ class ValidationDataset(SRDataset):
         yield_is_grey (bool): Also yield, as a third element, whether the file is a single-channel
             image (:meth:`~SRDataset._is_grey_file`), for ``eval_config.grey_plane_scoring``.
             Default ``False``: two-element items, exactly as before.
+        clamp_input_luma (bool): Clamp a colour image's served LR luma to the studio range
+            ``[16/255, 235/255]``, as ``VDSR.m`` and ``DRCN.m`` clamp the network input's Y
+            (a single-channel file is not clamped). Only the luma moves: the shift is added to
+            R, G and B equally, so Cb/Cr, which the output is stitched with, are unchanged.
+            Evaluation only; training is untouched. Default ``False``.
         float_degrade (bool): Degrade in floating point -- no uint8 re-quantization
             between the down and up passes and no final rounding or clamp
             (:func:`~sisr.utils.imresize.resize_float`) -- as ``VDSR.m`` and
-            ``demo_SR.m`` do in ``single`` precision. The served LR is then not an 8-bit
+            ``DRCN.m`` do in ``single`` precision. The served LR is then not an 8-bit
             image and may leave ``[0, 1]`` by a bicubic overshoot. Evaluation only: the
             training dataset has no such option and the uint8 path is untouched.
             Default ``False``.
@@ -308,6 +314,7 @@ class ValidationDataset(SRDataset):
         scale: int,
         float_degrade: bool = False,
         yield_is_grey: bool = False,
+        clamp_input_luma: bool = False,
     ):
         super().__init__()
 
@@ -315,6 +322,7 @@ class ValidationDataset(SRDataset):
         self.scale = scale
         self.float_degrade = float_degrade
         self.yield_is_grey = yield_is_grey
+        self.clamp_input_luma = clamp_input_luma
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -340,6 +348,11 @@ class ValidationDataset(SRDataset):
             lr_t = lr.permute(2, 0, 1).contiguous()
         else:
             lr_t = self._to_tensor(_degrade(arr, self.scale))
+        need_mode = self.yield_is_grey or self.clamp_input_luma
+        grey = self._is_grey_file(path) if need_mode else torch.tensor(False)
+        if self.clamp_input_luma and not grey:
+            y = rgb_to_y_studio(lr_t[None])[0]
+            lr_t = lr_t + (y.clamp(16 / 255, 235 / 255) - y) * (255 / 219)  # luma only (full range)
         if self.yield_is_grey:
-            return lr_t, self._to_tensor(arr), self._is_grey_file(path)
+            return lr_t, self._to_tensor(arr), grey
         return lr_t, self._to_tensor(arr)

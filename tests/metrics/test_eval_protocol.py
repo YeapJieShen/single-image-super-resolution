@@ -62,6 +62,7 @@ def test_each_template_sets_its_papers_evaluation_protocol(name):
     assert ev.get("grey_plane_scoring", False) is grey
     for ds in _eval_datasets(cfg):
         assert ds.get("init_args", {}).get("float_degrade", False) is flt
+        assert ds.get("init_args", {}).get("clamp_input_luma", False) is flt  # VDSR/DRCN only
         assert ds.get("init_args", {}).get("yield_is_grey", False) is grey  # flag iff switch
 
 
@@ -165,3 +166,28 @@ def test_validation_step_passes_the_dataset_flag_through_to_scoring():
     assert run((lr, hr, _flag(False))) - run((lr, hr, _flag(True))) == pytest.approx(
         STUDIO_GAIN, abs=2e-3
     )
+
+
+def _round_scorer(**kw):
+    return SRScorer(SREvalConfig(crop_border=0, round_to_uint8=True, **kw))
+
+
+def test_rounding_reaches_psnr_only_not_ssim():
+    g = torch.Generator().manual_seed(12)
+    hr = torch.rand(1, 3, 16, 16, generator=g)
+    sr = (hr + 0.3 * (torch.rand(1, 3, 16, 16, generator=g) - 0.5)).clamp(0, 1)
+    kw = dict(psnr_channels=["RGB"], ssim_channels=["RGB", "Y"])
+    on = _round_scorer(**kw).score(sr, hr)
+    off = SRScorer(SREvalConfig(crop_border=0, **kw)).score(sr, hr)
+
+    assert {k: float(v) for k, v in on.ssim.items()} == {k: float(v) for k, v in off.ssim.items()}
+    assert float(on.psnr["RGB"]) != float(off.psnr["RGB"])
+
+
+def test_rounding_applies_to_the_reference_as_well_as_the_reconstruction():
+    levels = torch.randint(0, 256, (1, 3, 8, 8), generator=torch.Generator().manual_seed(13))
+    sr = levels.float() / 255  # already on the 8-bit grid
+    hr = (levels.float() + 0.4) / 255  # off-grid reference: rounds back onto sr's grid
+    out = _round_scorer(psnr_channels=["RGB"], ssim_channels=[]).score(sr, hr)
+
+    assert math.isinf(float(out.psnr["RGB"]))

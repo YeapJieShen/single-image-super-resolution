@@ -70,6 +70,7 @@ data:
       scale: *scale
       yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
       float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
+      clamp_input_luma: true   # VDSR.m/DRCN.m clamp the network input's Y to [16, 235]/255 (colour images)
   test_datasets:
     Set5:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
@@ -78,6 +79,7 @@ data:
         scale: *scale
         yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
         float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
+        clamp_input_luma: true   # VDSR.m/DRCN.m clamp the network input's Y to [16, 235]/255 (colour images)
     Set14:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
@@ -85,6 +87,7 @@ data:
         scale: *scale
         yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
         float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
+        clamp_input_luma: true   # VDSR.m/DRCN.m clamp the network input's Y to [16, 235]/255 (colour images)
     BSD100:
       class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
@@ -92,6 +95,7 @@ data:
         scale: *scale
         yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
         float_degrade: true   # VDSR.m/DRCN.m degrade the luma in single precision, never re-quantized
+        clamp_input_luma: true   # VDSR.m/DRCN.m clamp the network input's Y to [16, 235]/255 (colour images)
   train_dataloader_kwargs:
     batch_size: 64          # the paper's mini-batch of 64 patches
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.
