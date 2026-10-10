@@ -105,3 +105,21 @@ def test_hparams_hold_the_scale_list_and_the_variant_tag():
 def test_invalid_arguments_raise(kwargs):
     with pytest.raises(ValueError):
         MDSR(**kwargs)
+
+
+def test_routing_follows_the_listed_order_not_the_sorted_one():
+    """With ``scale=(4, 2, 3)``, ``pre_process[k]`` and ``up[k]`` belong to ``scales[k]``."""
+    scales = (4, 2, 3)
+    net = _net(scale=scales).eval()
+    x = torch.rand(1, 3, 5, 6)
+    with torch.no_grad():
+        before = {s: net(x, scale=s) for s in scales}
+        for s in scales:
+            assert before[s].shape == (1, 3, 5 * s, 6 * s)
+        state = {k: v.clone() for k, v in net.state_dict().items()}
+        for k, owner in enumerate(scales):
+            for p in net.pre_process[k].parameters():
+                p.zero_()
+            for s in scales:
+                assert torch.equal(net(x, scale=s), before[s]) == (s != owner)
+            net.load_state_dict(state)

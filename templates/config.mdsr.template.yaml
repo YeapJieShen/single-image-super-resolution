@@ -2,10 +2,12 @@
 # 5x5 pre-processing blocks and upsamplers around a shared trunk. The baseline MDSR is the same
 # config with num_blocks: 16. MDSR+ is the SAME weights with eval_config.self_ensemble: true at
 # test time. Settings are explained in docs/configuration.md. Config files must stay ASCII.
-# From the paper (Sec. 3-4): L1 loss, Adam (0.9, 0.999, eps 1e-8), batch 16, 48x48 LR patches,
+# From the paper (Sec. 3-4): L1 loss, Adam (0.9, 0.999, eps 1e-8), batch 16,
 # lr 1e-4 halved every 2e5 updates, no residual scaling, DIV2K, 1e6 updates for the final models,
 # a scale drawn at random for each batch (done here by the per-batch scale sampler),
-# flips/90-degree rotations as augmentation (NOT implemented by this repo's datasets). The model
+# flips/90-degree rotations as augmentation (NOT implemented by this repo's datasets). DEVIATION:
+# the paper and its code use 48x48 LR patches at every scale; one fixed HR crop (hr_crop_size)
+# gives 48/32/24 at x2/x3/x4, a dataset limit here. The model
 # takes [0, 1] and applies the 0-255 range and mean shift internally. The unsuffixed val tags
 # (psnr/val/Y) are the MEAN over the three scales; psnr/val/Y/x2 etc. are per scale.
 seed_everything: 42
@@ -56,7 +58,7 @@ data:
     init_args:
       img_dir: data/DIV2K_train_HR
       scale: *scale
-      hr_crop_size: 96   # 48x48 LR patches at x2, the paper's
+      hr_crop_size: 96   # DEVIATION: 48/32/24 LR patches at x2/x3/x4 (paper: 48 at every scale)
       crops_per_image: 1
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR

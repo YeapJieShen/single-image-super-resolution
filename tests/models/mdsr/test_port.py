@@ -11,13 +11,14 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from PIL import Image
 
 from sisr.datasets.native_lr import ValidationDataset
 from sisr.models.mdsr import MDSR, MDSREvalConfig, MDSRTrainingConfig
 from sisr.models.mdsr.port import load_official, rename_key
 from sisr.processors import RGBProcessor
 from sisr.training import SRLightning
-from tests.models.matlab_protocol import psnr_float_y, psnr_matlab
+from tests.models.matlab_protocol import psnr_float_y, psnr_matlab, psnr_matlab_eval
 
 DATA = Path(os.environ.get("SISR_DATA_DIR") or Path(__file__).resolve().parents[3] / "data")
 WEIGHTS = DATA / "weights" / "mdsr"
@@ -167,8 +168,11 @@ def _scores(name, scale, plus, metrics):
         lr, hr = (t[None].to(device) for t in ds[i])
         with torch.no_grad():
             sr, hr_cropped = lit.predict_rgb(lr, hr, self_ensemble=plus)
+        with Image.open(ds.img_paths[i]) as img:
+            grey = img.mode == "L"
         for m in metrics:
-            scores[m.__name__].append(m(sr, hr_cropped, scale))
+            extra = (grey,) if m is psnr_matlab_eval else ()
+            scores[m.__name__].append(m(sr, hr_cropped, scale, *extra))
     return {k: sum(v) / len(v) for k, v in scores.items()}
 
 
@@ -179,19 +183,21 @@ def _scores(name, scale, plus, metrics):
 def test_released_mdsr_is_within_0_2_db_of_the_papers_numbers(name, scale, plus):
     """The released 80-block checkpoint under the paper's protocol (MATLAB 8-bit luma).
 
-    The same protocol reproduces the released EDSR checkpoints to within 0.006 dB in every cell,
-    so the protocol is not what separates these numbers from the paper's. Measured deltas (MDSR |
-    MDSR+) run from -0.157 (Set5 x4) to +0.082 (Set14 x4), with mixed sign across sets: 11 of 18
-    cells are within 0.05 dB and the rest within 0.16. The 16-block checkpoint is 0.12-0.36 dB
-    below the paper, so the 80-block one is the paper's row; the residual is the checkpoint, not
-    a difference this repo can name. Bounded at 0.2 dB, the pre-registered limit, and reported
-    as such -- not as a 0.05 dB reproduction. The float-Y figure reads 0.01-0.10 dB higher.
+    Within 0.2 dB in every cell (the pre-registered limit), not a 0.05 dB reproduction; 11 of 18
+    cells are within 0.05 dB. Two differences are named. Set14: NTIRE2017's ``demo/evaluation.m``
+    (https://github.com/LimBee/NTIRE2017) scores a single-channel target on its raw plane, and
+    Set14's ``bridge`` is one; ``psnr_matlab_eval`` does the same and moves the Set14 mean by
+    -0.094 dB. Set5: the authors' PyTorch release is a different network from the Torch7 one the
+    paper tabulated (https://cv.snu.ac.kr/research/EDSR/model_paper.tar has no scale-specific
+    pre-processing and has per-scale tails), and its own README's DIV2K table sits below the
+    paper's. The float-Y figure reads 0.01-0.10 dB higher.
     """
     if not (DATA / name).exists():
         pytest.skip(f"{name} not available")
 
-    got = _scores(name, scale, plus, [psnr_matlab, psnr_float_y])
+    got = _scores(name, scale, plus, [psnr_matlab, psnr_matlab_eval, psnr_float_y])
 
     paper = PAPER[name][scale][int(plus)]
     assert got["psnr_matlab"] == pytest.approx(paper, abs=0.2)
+    assert got["psnr_matlab_eval"] == pytest.approx(paper, abs=0.2)
     assert got["psnr_float_y"] == pytest.approx(paper, abs=0.25)

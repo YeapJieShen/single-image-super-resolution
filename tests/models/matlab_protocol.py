@@ -120,3 +120,19 @@ def psnr_matlab(sr, hr, scale):
         return rgb2ycbcr(rgb)[..., 0]
 
     return psnr(luma(hr), luma(sr), scale)
+
+
+def psnr_matlab_eval(sr, hr, scale, grey):
+    """NTIRE2017 ``demo/evaluation.m``: a single-channel target is scored on its raw plane.
+
+    Colour targets go through ``psnr_matlab``. For a grey one (Set14's ``bridge``) the raw 8-bit
+    plane is compared with channel 1 of the 8-bit output, with no ``rgb2ycbcr`` on either side,
+    so the 1.3219 dB studio-range gain of the RGB route does not apply.
+    """
+    if not grey:
+        return psnr_matlab(sr, hr, scale)
+
+    def plane(t):
+        return (t[0, 0].clamp(0, 1) * 255).round().byte().cpu().numpy()
+
+    return psnr(plane(hr), plane(sr), scale)
