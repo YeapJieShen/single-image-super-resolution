@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import (
 )
 
 from ...metrics.scoring import Scores
-from ..sinks import MetricSink, TensorBoardSink, sinks_from
+from ..sinks import MetricSink, sinks_from
 from ._common import _logger_step, _sr
 
 
@@ -115,8 +115,7 @@ class BenchmarkImageLogger(Callback):
         # Resolved once in setup() rather than re-searched every batch/epoch-end;
         # None when no TensorBoard logger is attached (image/scalar emission is
         # then silently skipped, same as the previous per-flush behaviour).
-        self._tb_experiment: Any = None
-        self._extra_sinks: list[MetricSink] = []  # every attached sink but TensorBoard
+        self._sinks: list[MetricSink] = []  # one per attached logger that has one
 
     def setup(
         self,
@@ -124,7 +123,7 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ) -> None:
-        """Resolve ``dataset_names``, both dataloader_idx mappings, and the TB experiment.
+        """Resolve ``dataset_names``, both dataloader_idx mappings, and the logger sinks.
 
         Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
         when not supplied at construction time.
@@ -145,10 +144,7 @@ class BenchmarkImageLogger(Callback):
         self._val_mapping = {i + n_primary: name for i, name in enumerate(self.dataset_names)}
         self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
 
-        sinks = sinks_from(trainer)
-        tb = next((k for k in sinks if isinstance(k, TensorBoardSink)), None)
-        self._tb_experiment = tb.experiment if tb is not None else None
-        self._extra_sinks = [k for k in sinks if k is not tb]
+        self._sinks = sinks_from(trainer)
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
@@ -335,7 +331,7 @@ class BenchmarkImageLogger(Callback):
         # Resolved once per batch, and only when something will actually be
         # emitted — a trainer with no fit loop is legitimate when no TB logger
         # is attached, and the guard below already skips every emission then.
-        sinks = self._sinks()
+        sinks = self._sinks
         step = _logger_step(trainer) if sinks else 0
 
         for i in range(current_batch_size):
@@ -376,11 +372,6 @@ class BenchmarkImageLogger(Callback):
             self._emit_triptych(
                 sinks, dataset_name, filename, lr_img[i].cpu(), sr[i].cpu(), hr_img[i].cpu(), step
             )
-
-    def _sinks(self) -> list[MetricSink]:
-        """Every sink to write to: TensorBoard (when attached) then the others."""
-        tb = [TensorBoardSink(self._tb_experiment)] if self._tb_experiment is not None else []
-        return tb + self._extra_sinks
 
     def _emit_per_image_scalars(
         self,

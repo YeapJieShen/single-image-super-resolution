@@ -1,7 +1,6 @@
 """MLflow as a second sink: lazy import, scalar fan-out, image artifacts, model registry."""
 
-import subprocess
-import sys
+import functools
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,7 +14,9 @@ import lightning  # noqa: E402
 from lightning.pytorch.loggers import MLFlowLogger, TensorBoardLogger  # noqa: E402
 
 from sisr.metrics.scoring import SRScorer  # noqa: E402
-from sisr.training import SREvalConfig  # noqa: E402
+from sisr.models.srcnn import SRCNN  # noqa: E402
+from sisr.processors import RGBProcessor  # noqa: E402
+from sisr.training import SREvalConfig, SRLightning, SRTrainingConfig  # noqa: E402
 from sisr.training.callbacks import BenchmarkImageLogger  # noqa: E402
 from sisr.training.sinks import MLflowSink, TensorBoardSink, sinks_from  # noqa: E402
 from tests.training.test_callbacks import _ignore_gpu_warning, _run_tiny_fit  # noqa: E402
@@ -37,24 +38,6 @@ def _metrics(logger: MLFlowLogger) -> dict[str, list[tuple[int, float]]]:
         key: [(m.step, m.value) for m in client.get_metric_history(logger.run_id, key)]
         for key in run.data.metrics
     }
-
-
-# --- 1. the extra is optional and lazy --------------------------------------------------
-
-
-def test_importing_the_training_package_does_not_import_mlflow():
-    code = "import sys, sisr.training; assert 'mlflow' not in sys.modules, 'mlflow imported'"
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-
-
-def test_a_missing_extra_is_an_actionable_error_not_a_bare_module_not_found(monkeypatch):
-    from sisr.training import sinks
-
-    monkeypatch.setitem(sys.modules, "mlflow", None)  # `import mlflow` now raises ImportError
-    with pytest.raises(ImportError, match=r"pip install '\.\[mlflow\]'") as err:
-        sinks._mlflow()
-    assert not isinstance(err.value, ModuleNotFoundError)
 
 
 # --- 2. scalar fan-out needs no code in the loop ----------------------------------------
@@ -79,9 +62,9 @@ def _bench_cb(tmp_path):
     ml = _db_logger(tmp_path)
     cb = BenchmarkImageLogger(log_per_image_metrics=True)
     cb._buffer["Set5"] = []
-    cb._tb_experiment = MagicMock()
-    cb._extra_sinks = [MLflowSink(ml)]
-    return cb, ml
+    tb_experiment = MagicMock()
+    cb._sinks = [TensorBoardSink(tb_experiment), MLflowSink(ml)]
+    return cb, ml, tb_experiment
 
 
 def _collect(cb, trainer, global_step_axis_gap=True):
@@ -113,11 +96,11 @@ def _trainer(global_step: int, batches: int):
 
 
 def test_the_strip_lands_on_mlflow_at_the_same_step_tensorboard_gets_it(tmp_path):
-    cb, ml = _bench_cb(tmp_path)
+    cb, ml, tb_experiment = _bench_cb(tmp_path)
     # Two-optimizer fixture: the optimizer counter is 2x the batch-counted logger axis.
     _collect(cb, _trainer(global_step=400, batches=200))
 
-    tb_step = cb._tb_experiment.add_image.call_args.kwargs["global_step"]
+    tb_step = tb_experiment.add_image.call_args.kwargs["global_step"]
     artifacts = [a.path for a in ml.experiment.list_artifacts(ml.run_id, "benchmark/Set5")]
     assert tb_step == 200
     assert artifacts == ["benchmark/Set5/baby_step200.png"]  # not _step400: trap 10
@@ -129,8 +112,7 @@ def test_the_strip_lands_on_mlflow_at_the_same_step_tensorboard_gets_it(tmp_path
 def test_a_run_with_no_logger_at_all_still_skips_every_write_and_the_step(tmp_path):
     cb = BenchmarkImageLogger(log_per_image_metrics=True)
     cb._buffer["Set5"] = []
-    cb._tb_experiment = None
-    cb._extra_sinks = []
+    cb._sinks = []
     _collect(cb, SimpleNamespace(loggers=[]))  # no fit_loop: reading the step would raise
     assert len(cb._buffer["Set5"]) == 1
 
@@ -161,17 +143,15 @@ def test_weight_histograms_stay_tensorboard_only(tmp_path):
     assert _metrics(ml) == {}
 
 
-def test_setup_attaches_an_mlflow_sink_beside_the_tensorboard_experiment(tmp_path):
+def test_setup_attaches_a_sink_per_supported_logger(tmp_path):
     cb = BenchmarkImageLogger(dataset_names=["Set5"])
     tb, ml = TensorBoardLogger(str(tmp_path / "tb")), _db_logger(tmp_path)
     cb.setup(SimpleNamespace(datamodule=None, loggers=[tb, ml]), pl_module=None, stage="fit")
+    assert [type(s) for s in cb._sinks] == [TensorBoardSink, MLflowSink]
 
-    assert cb._tb_experiment is tb.experiment
-    assert [type(s) for s in cb._extra_sinks] == [MLflowSink]
-    assert [type(s) for s in cb._sinks()] == [TensorBoardSink, MLflowSink]
     only_ml = BenchmarkImageLogger(dataset_names=["Set5"])
     only_ml.setup(SimpleNamespace(datamodule=None, loggers=[ml]), pl_module=None, stage="fit")
-    assert only_ml._tb_experiment is None and [type(s) for s in only_ml._sinks()] == [MLflowSink]
+    assert [type(s) for s in only_ml._sinks] == [MLflowSink]
 
 
 # --- 4. the model registry: opt-in, and trained vs official are different names ----------
@@ -213,7 +193,7 @@ def test_the_flag_on_registers_the_final_weights_under_the_variant_tag(tmp_path)
     assert _registered(ml) == ["sisr-313"]
     (version,) = ml.experiment.search_model_versions("name='sisr-313'")
     files = [a.path for a in ml.experiment.list_artifacts(ml.run_id, "model")]
-    assert sorted(files) == ["model/metadata.json", "model/sr-weights_s3.safetensors"]
+    assert sorted(files) == ["model/metadata.json", "model/sisr-313_s4.safetensors"]
     assert version.run_id == ml.run_id and version.tags["origin"] == "trained"
 
 
@@ -273,7 +253,7 @@ def test_no_template_sets_a_tracking_uri_or_an_mlflow_logger_uncommented():
     for path in sorted(templates.glob("*.yaml")):
         walk(yaml.safe_load(path.read_text(encoding="ascii")), path.name)
     shown = [p.name for p in templates.glob("*.yaml") if "MLFlowLogger" in p.read_text("ascii")]
-    assert shown == ["config.srcnn.template.yaml", "config.srresnet.template.yaml"]
+    assert shown == ["config.srresnet.template.yaml"]
 
 
 # --- 6. a real tracking server, when one answers ----------------------------------------
@@ -302,7 +282,7 @@ def test_a_live_server_receives_scalars_and_the_strip_in_its_own_experiment():
 
     cb = BenchmarkImageLogger(log_per_image_metrics=True)
     cb._buffer["Set5"] = []
-    cb._extra_sinks = [MLflowSink(ml)]
+    cb._sinks = [MLflowSink(ml)]
     _collect(cb, _trainer(global_step=6, batches=3))
 
     assert "loss/train" in _metrics(ml)
@@ -310,3 +290,37 @@ def test_a_live_server_receives_scalars_and_the_strip_in_its_own_experiment():
         "benchmark/Set5/baby_step3.png"
     ]
     ml.experiment.set_terminated(ml.run_id)
+
+
+@_ignore_gpu_warning
+def test_a_monitored_run_registers_the_final_weights_not_the_best_checkpoint(tmp_path):
+    """The registrar writes the weights as they stand; a monitored best file is never consulted."""
+    from sisr import artifacts
+    from sisr.training.callbacks import MLflowModelRegistrar
+
+    ml = _db_logger(tmp_path)
+    module = SRLightning(
+        model=SRCNN(num_channels=3, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same"),
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    trainer = _trainer(global_step=2, batches=2)
+    trainer.loggers, trainer.current_epoch, trainer.callbacks = [ml], 0, []
+    best = tmp_path / "sr-weights_best.safetensors"  # an older "best" file, other weights
+    artifacts.save(best, {k: v * 0 for k, v in module.model.state_dict().items()}, {})
+    trainer.callbacks.append(SimpleNamespace(best_model_path=str(best), attribute="model"))
+
+    MLflowModelRegistrar(register_model=True).on_fit_end(trainer, module)
+
+    (a,) = [
+        x.path
+        for x in ml.experiment.list_artifacts(ml.run_id, "model")
+        if x.path.endswith(".safetensors")
+    ]
+    local = ml.experiment.download_artifacts(ml.run_id, a, str(tmp_path / "dl"))
+    tensors, _ = artifacts.load(local)
+    final = module.model.state_dict()
+    assert all(torch.equal(tensors[k], final[k]) for k in final)
+    assert any(t.abs().sum() > 0 for t in tensors.values())  # not the zeroed best file

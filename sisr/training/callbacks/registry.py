@@ -1,15 +1,17 @@
 """Register a weights file as an MLflow Model: the trained run's, or an official one's."""
 
+import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import lightning
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 from ... import artifacts
+from ..metadata import build_metadata
 from ..sinks import _mlflow
-from .checkpoint import SRWeightsCheckpoint
+from ._common import _logger_step, _sr
 
 __all__ = ["MLflowModelRegistrar", "register_official_weights"]
 
@@ -30,14 +32,15 @@ def _register(client: Any, run_id: str, path: Path, name: str, origin: str) -> s
 
 
 class MLflowModelRegistrar(Callback):
-    """At the end of a fit, register the run's weights as an MLflow Model. Off by default.
+    """At the end of a fit, register the run's **final** weights as an MLflow Model. Off by default.
 
-    The file is the first ``SRWeightsCheckpoint`` over the generator's own ``model``: its
-    best file when it monitors a metric, else its newest rolling file. It is logged to the
-    attached ``MLFlowLogger``'s run together with its header (``model/metadata.json``) and
-    registered as ``sisr-<variant_tag><name_suffix>`` with the tag ``origin=trained``. A run
-    never registers silently: with the flag on, a missing ``MLFlowLogger`` or weights
-    callback is an error.
+    The model registered is the weights as they stand when the fit ends -- not a monitored
+    run's best checkpoint. They are written to a temporary ``.safetensors`` file at
+    ``on_fit_end`` (so it works whether or not an ``SRWeightsCheckpoint`` kept the final
+    file, and for a monitored top-k run), logged to the attached ``MLFlowLogger``'s run with
+    their header (``model/metadata.json``), and registered as
+    ``sisr-<variant_tag><name_suffix>`` with the tag ``origin=trained``. A run never registers
+    silently: with the flag on, a missing ``MLFlowLogger`` is an error.
 
     Args:
         register_model: Register at ``on_fit_end``. Default ``False``.
@@ -76,38 +79,31 @@ class MLflowModelRegistrar(Callback):
             )
 
     def on_fit_end(self, trainer: lightning.Trainer, pl_module: lightning.LightningModule) -> None:
-        """Register the final weights when the flag is on.
+        """Write the final weights and register them when the flag is on.
 
         Args:
             trainer: The finished trainer.
             pl_module: The trained module; its ``model.variant_tag`` names the model.
-
-        Raises:
-            MisconfigurationException: If no ``SRWeightsCheckpoint`` over ``model`` holds a file.
         """
         if not self.register_model:
             return
-        ckpt = next(
-            (
-                c
-                for c in cast(Any, trainer).callbacks
-                if isinstance(c, SRWeightsCheckpoint) and c.attribute == "model"
-            ),
-            None,
+        module = _sr(pl_module)
+        tag = module.model.variant_tag
+        step = _logger_step(trainer)
+        meta = build_metadata(
+            module, global_step=trainer.global_step, batch_step=step, epoch=trainer.current_epoch
         )
-        path = (
-            (ckpt.best_model_path or (ckpt._rolling[-1] if ckpt._rolling else "")) if ckpt else ""
-        )
-        if not path:
-            raise MisconfigurationException(
-                "register_model=True found no saved weights: add an SRWeightsCheckpoint "
-                "(attribute 'model') that has written a file by the end of the fit."
-            )
         logger = self._logger(trainer)
-        tag = pl_module.model.variant_tag  # type: ignore[union-attr]
-        _register(
-            logger.experiment, logger.run_id, Path(path), f"sisr-{tag}{self.name_suffix}", "trained"
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / f"sisr-{tag}_s{step}{artifacts.SUFFIX}"
+            artifacts.save(path, module.model.state_dict(), meta)
+            _register(
+                logger.experiment,
+                logger.run_id,
+                path,
+                f"sisr-{tag}{self.name_suffix}",
+                "trained",
+            )
 
 
 def register_official_weights(

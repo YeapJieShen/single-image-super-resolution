@@ -35,6 +35,7 @@ from sisr.training import (
 )
 from sisr.training.callbacks import BenchmarkSample
 from sisr.training.metadata import build_metadata
+from sisr.training.sinks import TensorBoardSink
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -118,7 +119,8 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
     """
     cb = BenchmarkImageLogger(log_per_image_metrics=True)
     cb._buffer["Set5"] = []
-    cb._tb_experiment = MagicMock()
+    tb_experiment = MagicMock()
+    cb._sinks = [TensorBoardSink(tb_experiment)]
     trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
     dataloaders = [
         SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]), batch_size=1)
@@ -135,8 +137,8 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
         should_log_images=True,
     )
 
-    assert cb._tb_experiment.add_image.call_args.kwargs["global_step"] == 200
-    assert cb._tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
+    assert tb_experiment.add_image.call_args.kwargs["global_step"] == 200
+    assert tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
 
 
 def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():

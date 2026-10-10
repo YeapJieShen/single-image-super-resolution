@@ -150,13 +150,6 @@ trainer:
           version: baseline
         log_graph: true
         default_hp_metric: false
-    # Opt-in MLflow tracking beside TensorBoard (pip install '.[mlflow]'): scalars land in both,
-    # the benchmark strips become run artifacts at the same step, and a MLflowModelRegistrar
-    # callback with register_model: true registers the final weights. The URI is yours to set.
-    # - class_path: lightning.pytorch.loggers.MLFlowLogger
-    #   init_args:
-    #     experiment_name: sisr
-    #     tracking_uri: http://127.0.0.1:5000
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
         <<: *log_dest
