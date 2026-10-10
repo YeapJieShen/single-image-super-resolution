@@ -20,9 +20,7 @@ from ._common import _logger_step, _sr
 class BenchmarkSample(NamedTuple):
     """One buffered per-image result: PSNR/SSIM only, no image tensors.
 
-    Fields are accessed by name at every read site — a bare positional
-    tuple here previously made ``_flush_buffer``'s mean computation
-    (``s[4]``/``s[5]``) unreadable at the call site.
+    Fields are read by name at every site, so the mean in ``_flush_buffer`` stays legible.
 
     Attributes:
         filename: Stem of the source image path, used as the TensorBoard tag suffix.
@@ -346,14 +344,9 @@ class BenchmarkImageLogger(Callback):
             global_idx = batch_idx * loader_batch_size + i
             filename = dataset.img_paths[global_idx].stem
 
-            # One scorer object, shared with validation_step, so the two paths
-            # cannot disagree on the crop, the colorspace split, the PSNR
-            # reduction or which SSIM eval_config.ssim_impl names. This used to
-            # be four separate reaches into private SRLightning methods, each
-            # of which could have been "tidied" independently — PSNR in fact
-            # was, calling torchmetrics with the default dim=None (whole-batch
-            # pooling) and agreeing with validation_step only because this loop
-            # slices one image at a time.
+            # One scorer object, shared with validation_step, so the two paths cannot
+            # disagree on the crop, the colorspace split, the PSNR reduction (per image,
+            # never whole-batch pooled) or which SSIM eval_config.ssim_impl names.
             scores = _sr(pl_module).scorer.score(
                 sr[i : i + 1],
                 hr_cropped[i : i + 1],
