@@ -148,10 +148,9 @@ class _SRCheckpointBase(_RollingSaveMixin, ModelCheckpoint):
         adversarial run steps D and G per batch) that is **2x** the batch count,
         while every metric the checkpoint would be read against lands on
         ``_batches_that_stepped``. The result is an artifact whose name cannot be
-        located on any curve it should be comparable with — measured before this
-        override, ``experiments/SRGAN/golden`` held ``sr-400000`` against its own
-        ``metrics.csv`` maxing at 199,999, while every automatic-optimization run
-        was 1:1.
+        located on any curve it should be comparable with (a golden SRGAN run held
+        ``sr-400000`` against a ``metrics.csv`` maxing at 199,999), while every
+        automatic-optimization run was 1:1.
 
         Overriding here rather than at each call site is deliberate: Lightning
         routes filename formatting, top-k bookkeeping and the ``last``/``every_n``

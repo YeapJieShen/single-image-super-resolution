@@ -265,9 +265,8 @@ both are pinned:
   up to ~2.5 dB on the same data. This project uses the former (their convention (a), not
   MSE-pooling): PSNR is computed one image at a time and the per-image values are then
   averaged (`BenchmarkImageLogger._collect_batch` in `sisr/training/callbacks/images.py` computes
-  each image's PSNR and `_flush_buffer` takes the arithmetic mean over them), independently confirmed by
-  [`SRLightning._mean_psnr`](sisr/training/lightning_module.py)
-  (`sisr/training/lightning_module.py:504-515`), whose own docstring names and rejects
+  each image's PSNR and `_flush_buffer` takes the arithmetic mean over them), and `SRScorer.psnr` in
+  [`sisr/metrics/scoring.py`](sisr/metrics/scoring.py), whose docstring names and rejects
   MSE-pooling as the alternative. Wang, Chen and Hoi's
   ["Deep Learning for Image Super-resolution: A Survey"](https://arxiv.org/abs/1902.06068)
   (IEEE TPAMI 2020, arXiv:1902.06068, §II-D "Operating Channels") likewise finds no
