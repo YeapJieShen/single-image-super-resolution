@@ -53,6 +53,31 @@ single-channel images; see [Paper protocols](configuration.md#eval_config-and-th
 which keeps all 18 cells within 0.025 dB. DRCN is 16 shared recursions with recursive
 supervision; VDSR is 20 layers with a global residual, one model for x2/x3/x4.
 
+**DRCN follows the authors' released network, which differs from the paper's equations.** The
+paper (Section 3, eqs. 4-10) describes a recursion `H_d = max(0, W * H_{d-1} + b)`, a two-layer
+reconstruction net with a ReLU after each layer that only reads `H_d`, and a skip inside every
+prediction: `y_d = x + f3(H_d)`, `y = sum_d w_d * y_d`. The released network
+([DRCN_code.zip](https://cv.snu.ac.kr/research/DRCN/)) differs in three places, visible in the
+layer graph stored in `DRCN_sf{2,3,4}.mat`:
+
+| | Paper | Released network |
+|---|---|---|
+| Recursion step | shared conv + ReLU | shared conv (`filters_share`) + ReLU, then the first reconstruction conv (`filters19`), whose output is the next step's input |
+| Reconstruction ReLUs | after both layers | none (`conv_outh` and `conv_out` are linear) |
+| Input skip | inside each prediction, so the output is `(sum_d w_d) * x + sum_d w_d * f3(H_d)` | added once after the ensemble (`runDRCN.m`: `impred = imlow + impred`), so the output is `x + sum_d w_d * r_d` |
+
+The release also makes 17 predictions (one before the first recursion, then one per recursion),
+and combines them with a bias-free 1x1 conv whose raw weights sum to 1.65 (x2), 1.28 (x3) and
+1.48 (x4). The paper's skip placement would therefore scale the input by those factors.
+
+`sisr.models.drcn.DRCN` implements the released wiring, because it is the one that reproduces
+the paper's numbers. The ported official weights score within 0.025 dB of the paper's table on
+every set and scale, and within 0.016 dB of the authors' own evaluation script (#326). Training
+this model from scratch therefore trains the released architecture. A re-implementation from the
+paper's text alone is a different network, and one public re-implementation reports PSNR 0.5 to
+1.0 dB below the paper
+([deeply-recursive-cnn-tf](https://github.com/jiny2001/deeply-recursive-cnn-tf)).
+
 **ESRGAN** is the RRDB generator (x4, nearest-neighbour upsampling), a relativistic GAN
 discriminator and VGG54 features before activation. The PSNR-stage official weights score
 within 0.05 dB of the paper's DF2K row on Set5, Set14 and BSD100. The GAN stage's perceptual
