@@ -36,6 +36,6 @@ def test_the_scale_fallback_pair_lives_in_exactly_one_function():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.FunctionDef) and _reads_config_scale(node):
                 if _reads_hparam_scale(node):
-                    holders.append(f"{path.relative_to(SISR)}:{node.name}")
+                    holders.append(f"{path.relative_to(SISR).as_posix()}:{node.name}")
 
     assert holders == ["training/lightning_module.py:resolved_scales"]
