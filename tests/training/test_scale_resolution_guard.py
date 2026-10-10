@@ -33,7 +33,7 @@ def _reads_hparam_scale(fn: ast.AST) -> bool:
 def test_the_scale_fallback_pair_lives_in_exactly_one_function():
     holders = []
     for path in sorted(SISR.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.FunctionDef) and _reads_config_scale(node):
                 if _reads_hparam_scale(node):
                     holders.append(f"{path.relative_to(SISR)}:{node.name}")
