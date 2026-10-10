@@ -15,6 +15,7 @@ output to disk as PNGs.
 from .checkpoint import SRCheckpoint, SRWeightsCheckpoint
 from .images import BenchmarkImageLogger, BenchmarkSample, SRPredictionWriter
 from .progress import SRProgressBar
+from .registry import MLflowModelRegistrar, register_official_weights
 from .scalars import GradNormLogger, LossWeightScheduler, WeightHistogramLogger
 
 __all__ = [
@@ -22,9 +23,11 @@ __all__ = [
     "BenchmarkSample",
     "GradNormLogger",
     "LossWeightScheduler",
+    "MLflowModelRegistrar",
     "SRCheckpoint",
     "SRPredictionWriter",
     "SRProgressBar",
     "SRWeightsCheckpoint",
     "WeightHistogramLogger",
+    "register_official_weights",
 ]

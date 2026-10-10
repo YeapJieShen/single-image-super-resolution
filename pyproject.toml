@@ -76,6 +76,10 @@ export = [
 # DISTS needs only torchvision and ships in core. pyiqa is here for Ma's score (and
 # so PI) only: its NIQE disagrees with the MATLAB release, so NIQE is native, and
 # needs SciPy just to read the release's pristine-model .mat.
+# Opt-in experiment tracking: `mlflow` is heavy, so it is imported only where MLflow is used
+# (sisr.training.sinks), with an actionable error naming this extra when it is missing. The
+# full package, not mlflow-skinny: a local sqlite backend and the model registry need alembic.
+mlflow = ["mlflow>=3"]
 perceptual = ["lpips>=0.1", "pyiqa>=0.1.16", "scipy>=1.11"]
 # SciPy only reads MatConvNet .mat files for sisr.models.{drcn,vdsr}.port (official DRCN and VDSR weights);
 # perceptual already pulls it, but loading weights should not need LPIPS/pyiqa.
