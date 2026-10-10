@@ -723,7 +723,7 @@ class SRLightning(lightning.LightningModule):
             ``False``) and ``hr_cropped`` are RGB tensors with matching
             spatial size.
         """
-        lr_img, hr_img = batch
+        lr_img, hr_img = batch[0], batch[1]  # an eval batch may carry a third is_grey element
 
         sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=need_sr_rgb)
         hr_for_loss = self.processor.extract_target(hr_cropped)
@@ -816,7 +816,9 @@ class SRLightning(lightning.LightningModule):
         loss, lr_img, hr_img, sr, hr_cropped = self._step(batch)
 
         scale = self._primary_val_scale(dataloader_idx)
-        scores = self.scorer.score(sr, hr_cropped, scale=scale)
+        scores = self.scorer.score(
+            sr, hr_cropped, scale=scale, is_grey=batch[2] if len(batch) > 2 else None
+        )
 
         if n_primary > 1:
             assert scale is not None, "a multi-scale primary val loader must state its scale"

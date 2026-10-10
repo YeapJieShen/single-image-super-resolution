@@ -105,6 +105,16 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         return np.array(Image.open(path).convert("RGB"))
 
     @staticmethod
+    def _is_grey_file(path: str | Path) -> torch.Tensor:
+        """Whether ``path`` is a single-channel image on disk (PIL mode ``L``), as a 0-dim bool.
+
+        The file mode, not the pixel values: an RGB file whose channels happen to be equal
+        (Set14's ``man``) is a colour image to MATLAB, which reads it with three channels.
+        """
+        with Image.open(path) as img:
+            return torch.tensor(img.mode == "L")
+
+    @staticmethod
     def _to_tensor(image: np.ndarray) -> torch.Tensor:
         """Converts a ``uint8`` HWC array to a ``float32`` CHW ``[0, 1]`` tensor.
 
@@ -119,10 +129,11 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         """Return the number of items the dataset serves."""
 
     @abc.abstractmethod
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...] | torch.Tensor:
         """Return the ``(lr_tensor, hr_tensor)`` pair at ``idx``.
 
-        Paired train/validation datasets return the tuple; prediction-only
+        Paired train/validation datasets return the tuple (an eval dataset may append an
+        ``is_grey`` flag); prediction-only
         datasets (no ground-truth HR to pair with) return a lone LR tensor —
         see :class:`~sisr.datasets.predict.PredictDataset`.
         """

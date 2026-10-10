@@ -189,21 +189,25 @@ class ValidationDataset(SRDataset):
     Args:
         img_dir (str | Path): Directory containing the high-resolution images.
         scale (int): Upscaling factor.
+        yield_is_grey (bool): Also yield, as a third element, whether the file is a single-channel
+            image (:meth:`~SRDataset._is_grey_file`), for ``eval_config.grey_plane_scoring``.
+            Default ``False``: two-element items, exactly as before.
 
     Raises:
         ValueError: If no images are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int):
+    def __init__(self, img_dir: str | Path, scale: int, yield_is_grey: bool = False):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
+        self.yield_is_grey = yield_is_grey
 
     def __len__(self) -> int:
         return len(self.img_paths)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
         """Returns a ``(lr_tensor, hr_tensor)`` pair for the image at ``idx``.
 
         ``hr_tensor`` is the HR image cropped to a multiple of ``scale``,
@@ -223,4 +227,6 @@ class ValidationDataset(SRDataset):
         lr_tensor = self._to_tensor(lr_arr)
         hr_tensor = self._to_tensor(hr_arr)
 
+        if self.yield_is_grey:
+            return lr_tensor, hr_tensor, self._is_grey_file(path)
         return lr_tensor, hr_tensor

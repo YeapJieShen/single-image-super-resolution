@@ -436,6 +436,15 @@ class SREvalConfig:
             SRCNN (``demo_SR.m``) and EDSR/MDSR (uint8 images) do. VDSR's ``VDSR.m`` does
             not, so its template leaves this off. PSNR only: SSIM and the perceptual
             metrics read the unrounded tensors. Default ``False``: every value unchanged.
+
+        grey_plane_scoring: Score a single-channel image on its raw plane, as the MATLAB
+            releases of DRCN, VDSR and EDSR/MDSR do (Set14's ``bridge``), instead of promoting
+            it to RGB and scoring studio-range Y (which compresses errors by 219/255,
+            +1.3219 dB). Greyness is the **file mode**, reported per image by the eval
+            dataset's ``yield_is_grey=True`` third element -- never inferred from pixel
+            values, since an RGB file with equal channels (Set14's ``man``) is colour to
+            MATLAB. Scoring raises if this is on and the dataset yields no flag. Affects the
+            ``Y`` channel of the ``Y``/``YCbCr`` keys only. Default ``False``.
     """
 
     crop_border: int | None = 0
@@ -448,6 +457,7 @@ class SREvalConfig:
     self_ensemble: bool = False
     predict_scale: int | None = None
     round_to_uint8: bool = False
+    grey_plane_scoring: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
@@ -495,7 +505,7 @@ class SREvalConfig:
                     f"{list(valid)}; got unsupported {invalid}. Fix "
                     f"model.eval_config.init_args.{field_name} in your YAML."
                 )
-        for flag in ("round_to_uint8",):
+        for flag in ("round_to_uint8", "grey_plane_scoring"):
             if not isinstance(getattr(self, flag), bool):
                 raise ValueError(
                     f"SREvalConfig.{flag} must be a bool; got {getattr(self, flag)!r}. Fix "

@@ -50,8 +50,9 @@ model:
         class_path: sisr.models.edsr.EDSREvalConfig
         init_args:
           # Evaluation as the authors' MATLAB scripts do it (uint8 images, NTIRE2017 evaluation.m):
-          # luma rounded to 8-bit levels.
+          # luma rounded to 8-bit levels, and a single-channel image scored on its raw plane.
           round_to_uint8: true
+          grey_plane_scoring: true
 
 data:
   train_dataset:
@@ -68,22 +69,26 @@ data:
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
+      yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
   test_datasets:
     Set5:
       class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
     Set14:
       class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
     BSD100:
       class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
   train_dataloader_kwargs:
     batch_size: 16
     # Load-bearing on real data: num_workers=0 hits a hard serial floor.

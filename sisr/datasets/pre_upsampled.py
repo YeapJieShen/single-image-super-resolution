@@ -287,6 +287,9 @@ class ValidationDataset(SRDataset):
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
+        yield_is_grey (bool): Also yield, as a third element, whether the file is a single-channel
+            image (:meth:`~SRDataset._is_grey_file`), for ``eval_config.grey_plane_scoring``.
+            Default ``False``: two-element items, exactly as before.
         float_degrade (bool): Degrade in floating point -- no uint8 re-quantization
             between the down and up passes and no final rounding or clamp
             (:func:`~sisr.utils.imresize.resize_float`) -- as ``VDSR.m`` and
@@ -299,17 +302,24 @@ class ValidationDataset(SRDataset):
         ValueError: If no image files are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int, float_degrade: bool = False):
+    def __init__(
+        self,
+        img_dir: str | Path,
+        scale: int,
+        float_degrade: bool = False,
+        yield_is_grey: bool = False,
+    ):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
         self.float_degrade = float_degrade
+        self.yield_is_grey = yield_is_grey
 
     def __len__(self) -> int:
         return len(self.img_paths)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
         """Retrieves the LR/HR image pair at the given index.
 
         Args:
@@ -327,7 +337,9 @@ class ValidationDataset(SRDataset):
             h, w = arr.shape[:2]
             down = resize_float(arr.astype(np.float64), (h // self.scale, w // self.scale))
             lr = torch.from_numpy((resize_float(down, (h, w)) / 255.0).astype(np.float32))
-            return lr.permute(2, 0, 1).contiguous(), self._to_tensor(arr)
-        lr_arr = _degrade(arr, self.scale)
-
-        return self._to_tensor(lr_arr), self._to_tensor(arr)
+            lr_t = lr.permute(2, 0, 1).contiguous()
+        else:
+            lr_t = self._to_tensor(_degrade(arr, self.scale))
+        if self.yield_is_grey:
+            return lr_t, self._to_tensor(arr), self._is_grey_file(path)
+        return lr_t, self._to_tensor(arr)

@@ -78,6 +78,7 @@ def test_sr_eval_config_field_names():
         "self_ensemble",
         "predict_scale",
         "round_to_uint8",
+        "grey_plane_scoring",
     }
 
 
