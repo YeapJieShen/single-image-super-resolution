@@ -23,14 +23,14 @@ class SRCNN(SRModel):
         num_filters: Filter count per conv layer, as a list or tuple (e.g.
             ``(64, 32, 1)`` for the original architecture). Stored as a tuple.
         kernel_sizes: Kernel size per conv layer, as a list or tuple (e.g.
-            ``(9, 1, 5)`` for the original architecture). Stored as a tuple.
+            ``(9, 1, 5)`` for the original architecture). Must be odd. Stored as a tuple.
         padding: ``'valid'``, ``'same'``, or an explicit pixel count.
             Defaults to ``'valid'``.
         eval_padding: Padding to use outside training mode, or ``None``
             (default) to use ``padding`` throughout. Only ``'same'`` is
             accepted: the authors train with ``pad: 0`` and run inference
             with SAME padding, so the model is deliberately not the same
-            function in the two modes. Requires odd kernels.
+            function in the two modes.
         eval_padding_mode: Border mode for ``eval_padding``, in
             ``torch.nn.functional.pad``'s vocabulary. ``'replicate'``
             (default) is what the authors' ``imfilter`` call uses.
@@ -53,17 +53,11 @@ class SRCNN(SRModel):
         num_filters = as_int_tuple("num_filters", num_filters)
         kernel_sizes = as_int_tuple("kernel_sizes", kernel_sizes)
         self._check_architecture(num_filters, kernel_sizes)
-        if eval_padding is not None:
-            if eval_padding != "same":
-                raise ValueError(
-                    f"eval_padding must be 'same' or None, got {eval_padding!r}. Valid "
-                    f"convolution at eval is what padding={padding!r} already gives."
-                )
-            if any(k % 2 == 0 for k in kernel_sizes):
-                raise ValueError(
-                    f"eval_padding='same' needs odd kernel sizes to pad symmetrically; "
-                    f"got kernel_sizes={kernel_sizes}."
-                )
+        if eval_padding not in (None, "same"):
+            raise ValueError(
+                f"eval_padding must be 'same' or None, got {eval_padding!r}. Valid "
+                f"convolution at eval is what padding={padding!r} already gives."
+            )
 
         self.eval_padding = eval_padding
         self.eval_padding_mode = eval_padding_mode
@@ -107,7 +101,7 @@ class SRCNN(SRModel):
     def _check_architecture(
         self, num_filters: tuple[int, ...], kernel_sizes: tuple[int, ...]
     ) -> None:
-        """Validates num_filters/kernel_sizes lengths agree and their values are positive."""
+        """Validates num_filters/kernel_sizes agree in length, are positive, and are odd."""
         for i, name in zip(
             [num_filters, kernel_sizes], ["num_filters", "kernel_sizes"], strict=False
         ):
@@ -131,6 +125,16 @@ class SRCNN(SRModel):
             raise ValueError(
                 f"num_filters must have exactly one less element than kernel_sizes. "
                 f"Got num_filters={num_filters} and kernel_sizes={kernel_sizes}."
+            )
+
+        even_kernels = [k for k in kernel_sizes if k % 2 == 0]
+        if even_kernels:
+            raise ValueError(
+                f"kernel_sizes must use only odd kernel sizes — an even kernel has no "
+                f"symmetric center under valid convolution, and center_crop's "
+                f"round-half-to-even offset may misalign HR/SR by 0.5 px when an odd "
+                f"count of kernels are even. Got even kernel size(s) {even_kernels} in "
+                f"kernel_sizes={kernel_sizes}."
             )
 
     def reset_parameters(self, mean: float = 0.0, std: float = 0.001, **kwargs: Any) -> None:
