@@ -1383,7 +1383,10 @@ def _build_srgan_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
     optimization (``SRGANLightning.automatic_optimization = False``).
     ``criterion`` is plain ``MSELoss`` (never ``VGG19FeatureLoss``) so this stays
     offline, and ``training_config.init_from=None`` so no pretrained artifact is
-    required. ``discriminator.hr_input_size=16`` matches ``hr_crop_size`` (must
+    required. ``eval_config.perceptual_metrics=[]`` overrides SRGAN's
+    ``['lpips', 'dists']`` default, which would need the optional ``[perceptual]``
+    extra and pretrained backbones -- neither has anything to do with resume.
+    ``discriminator.hr_input_size=16`` matches ``hr_crop_size`` (must
     be a positive multiple of 16 -- ``SRDiscriminator``'s own constraint) and
     fits inside the 36x36 fixture images. ``drop_last=True`` on the train loader
     is load-bearing: with 3 fixture images and batch_size=2, an undropped
@@ -1417,7 +1420,10 @@ def _build_srgan_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                     "class_path": "sisr.models.srgan.SRGANTrainingConfig",
                     "init_args": {"scale": 2, "init_from": None},
                 },
-                "eval_config": {"class_path": "sisr.models.srgan.SRGANEvalConfig"},
+                "eval_config": {
+                    "class_path": "sisr.models.srgan.SRGANEvalConfig",
+                    "init_args": {"perceptual_metrics": []},
+                },
                 "discriminator_optimizer": {
                     "class_path": "torch.optim.SGD",
                     "init_args": {"lr": 1.0e-4, "momentum": 0.9},
@@ -1439,7 +1445,7 @@ def _build_srgan_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
         },
         "data": {
             "train_dataset": {
-                "class_path": "sisr.datasets.srresnet.TrainDataset",
+                "class_path": "sisr.datasets.native_lr.TrainDataset",
                 "init_args": {
                     "img_dir": str(tiny_rgb_image_dir),
                     "scale": 2,
@@ -1449,7 +1455,7 @@ def _build_srgan_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                 },
             },
             "val_dataset": {
-                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "class_path": "sisr.datasets.native_lr.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0, "drop_last": True},
