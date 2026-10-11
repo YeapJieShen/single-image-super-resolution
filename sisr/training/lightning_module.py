@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any, Literal, overload
 
 import lightning
+import numpy as np
 import torch
 import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
@@ -24,6 +25,7 @@ from ..losses import SRLoss
 from ..metrics.scoring import Scores, SRScorer, expected_tags, metric_tag
 from ..models.base import SRModel, SRModelOutput, unwrap_primary
 from ..processors import SRProcessor
+from ..utils.imresize import resize as _matlab_resize
 from .config import SREvalConfig, SRTrainingConfig
 from .metadata import build_metadata
 from .probe import probe_pair
@@ -1062,10 +1064,50 @@ class SRLightning(lightning.LightningModule):
         """
         return None
 
+    def _predict_upsample(self, lr_img: torch.Tensor) -> torch.Tensor:
+        """Bicubic-upsamples a raw predict batch for a 'pre_upsampled' input_contract.
+
+        ``PredictDataset`` serves real LR images at native resolution — nothing
+        upstream produces the bicubic-upsampled-to-HR-size input a
+        ``'pre_upsampled'`` model (SRCNN, and any future VDSR/DRCN reusing this
+        contract) requires. Training/validation get that upsample from
+        :func:`sisr.datasets.pre_upsampled._degrade`; this is the predict-time
+        equivalent, applied to genuine LR rather than a synthetic HR-derived
+        downscale, via the same :func:`~sisr.utils.imresize.resize` call so the
+        pixels are provably identical to the training path's, not merely the
+        same shape. Gated purely on ``model.input_contract``, so a
+        ``'native_lr'`` model (SRResNet et al.) passes through unchanged — its
+        own conv/pixel-shuffle stack does the upscaling instead.
+
+        Args:
+            lr_img: LR batch, RGB float32 in [0, 1], (B, 3, H, W).
+
+        Returns:
+            ``lr_img`` unchanged if ``model.input_contract == 'native_lr'``;
+            otherwise the same batch resized to ``(B, 3, H*scale, W*scale)``.
+
+        Raises:
+            ValueError: Via :meth:`resolved_scale`, if the model's
+                upscaling factor cannot be determined (neither
+                ``training_config.scale`` nor a model ``scale`` hparam is set).
+        """
+        if self.model.input_contract != "pre_upsampled":
+            return lr_img
+        scale = self.resolved_scale("predict-time upsample for a 'pre_upsampled' input_contract")
+        device, dtype = lr_img.device, lr_img.dtype
+        upsampled = []
+        for img in lr_img.detach().cpu():
+            arr = img.permute(1, 2, 0).mul(255.0).round().clamp(0.0, 255.0)
+            arr = np.ascontiguousarray(arr.to(torch.uint8).numpy())
+            h, w = arr.shape[:2]
+            up = _matlab_resize(arr, (h * scale, w * scale))
+            upsampled.append(torch.from_numpy(up).permute(2, 0, 1).float().div(255.0))
+        return torch.stack(upsampled).to(device=device, dtype=dtype)
+
     def predict_step(
         self, batch: torch.Tensor, batch_idx: int, dataloader_idx: int = 0
     ) -> torch.Tensor:
-        """Run the HR-free inference pipeline: extract → model → reconstruct.
+        """Run the HR-free inference pipeline: upsample -> extract -> model -> reconstruct.
 
         Self-ensembles (8 forward passes, averaged) when ``eval_config.self_ensemble`` is
         ``True`` — see :meth:`_forward_lr`. A multi-scale model predicts at
@@ -1074,7 +1116,11 @@ class SRLightning(lightning.LightningModule):
         Shares :meth:`_forward_lr` with :meth:`_forward_sr` (the pipeline
         backing :meth:`_step` / :meth:`predict_rgb`) — the same colorspace
         pipeline minus the HR-dependent center-crop and scoring, neither of
-        which has meaning without an HR reference. Paired with
+        which has meaning without an HR reference. :meth:`_predict_upsample`
+        runs first so a ``'pre_upsampled'``-contract model (SRCNN) sees an
+        input already brought up to HR size, exactly as it does during
+        training/validation — ``PredictDataset`` itself never does this, since
+        it has no HR to derive an upsample from (issue #279). Paired with
         :meth:`~sisr.training.SRDataModule.predict_dataloader` and typically
         consumed by :class:`~sisr.training.callbacks.SRPredictionWriter`.
 
@@ -1088,12 +1134,15 @@ class SRLightning(lightning.LightningModule):
 
         Returns:
             SR RGB tensor, ``float32`` in ``[0, 1]``, shape
-            ``(B, 3, H', W')`` — ``H'=H*scale``/``W'=W*scale`` for
-            SRResNet; for SRCNN, same size as the input only when
-            ``padding='same'``, since the default ``'valid'`` (or an
-            explicit int) shrinks H/W per conv layer (see
-            :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
+            ``(B, 3, H', W')`` — ``H'=H*scale``/``W'=W*scale`` for SRResNet
+            (its own stack upscales) and, after :meth:`_predict_upsample`, for
+            any ``'pre_upsampled'`` model too; further shrunk by a valid
+            convolution's border unless the model uses ``padding='same'`` or
+            ``eval_padding='same'`` (see
+            :meth:`~sisr.models.srcnn.model.SRCNN.forward`) — the same
+            shrinkage training/validation already center-crop HR against.
         """
+        batch = self._predict_upsample(batch)
         _, sr_rgb = self._forward_lr(
             batch,
             self_ensemble=self.eval_config.self_ensemble,
