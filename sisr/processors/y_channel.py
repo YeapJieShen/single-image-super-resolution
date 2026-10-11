@@ -10,6 +10,14 @@ from sisr.colorspace import rgb_to_ycbcr, ycbcr_to_rgb
 from .base import SRProcessor
 
 
+def stitch_y(full_y: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
+    """RGB from a full-range Y plane and ``lr_rgb``'s Cb/Cr, bicubic-upsampled to its size."""
+    cbcr = F.interpolate(
+        rgb_to_ycbcr(lr_rgb)[:, 1:], size=full_y.shape[-2:], mode="bicubic", align_corners=False
+    )
+    return ycbcr_to_rgb(torch.cat([full_y, cbcr], dim=1))
+
+
 class YChannelProcessor(SRProcessor):
     """Y-channel processor.
 
@@ -25,14 +33,7 @@ class YChannelProcessor(SRProcessor):
 
     def reconstruct(self, sr_y: torch.Tensor, lr_rgb: torch.Tensor) -> torch.Tensor:
         """Stitch sr_y with bicubic-upsampled LR Cb/Cr, then convert back to RGB."""
-        lr_ycbcr = rgb_to_ycbcr(lr_rgb)
-        cbcr = F.interpolate(
-            lr_ycbcr[:, 1:],
-            size=sr_y.shape[-2:],
-            mode="bicubic",
-            align_corners=False,
-        )
-        return ycbcr_to_rgb(torch.cat([sr_y, cbcr], dim=1))
+        return stitch_y(sr_y, lr_rgb)
 
     @property
     def model_channels(self) -> int:

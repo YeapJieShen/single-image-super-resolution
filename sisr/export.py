@@ -11,7 +11,9 @@ is expected to have ``sisr`` importable and call ``processor.extract`` /
   bare graph is already end-to-end LR-RGB -> SR-RGB.
 - :class:`~sisr.processors.RGBSignedOutputProcessor`: the same graph emits
   ``[-1, 1]``; the consumer applies ``(out + 1) / 2``. Input side unchanged.
-- :class:`~sisr.processors.YChannelProcessor` (SRCNN): **Y -> Y only.**
+- :class:`~sisr.processors.YChannelProcessor` (SRCNN) and
+  :class:`~sisr.processors.StudioYChannelProcessor` (VDSR, DRCN; studio-range Y in and out):
+  **Y -> Y only.**
   Rebuilding RGB needs the LR image's Cb/Cr bicubic-upsampled to the SR size,
   which this omits -- a non-Python consumer must reimplement that chroma path.
 

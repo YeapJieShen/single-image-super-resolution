@@ -33,7 +33,7 @@ model:
           depth: 20
           features: 64
       processor:
-        class_path: sisr.processors.YChannelProcessor
+        class_path: sisr.processors.StudioYChannelProcessor   # MATLAB studio-range Y: what the released weights were trained on
       training_config:
         class_path: sisr.models.vdsr.VDSRTrainingConfig
         init_args:

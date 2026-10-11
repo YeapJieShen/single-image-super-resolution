@@ -39,7 +39,7 @@ model:
             recursive: 1.0
             final: 0.0
       processor:
-        class_path: sisr.processors.YChannelProcessor
+        class_path: sisr.processors.StudioYChannelProcessor   # MATLAB studio-range Y: what the released weights were trained on
       training_config:
         class_path: sisr.models.drcn.DRCNTrainingConfig
         init_args:

@@ -16,7 +16,8 @@ from sisr.training.config import SREvalConfig, SRTrainingConfig
 class DRCNTrainingConfig(SRTrainingConfig):
     """DRCN-paper training defaults.
 
-    Y channel (pair with ``YChannelProcessor``). ``init_strategy='paper'``
+    Y channel (pair with ``StudioYChannelProcessor``, the MATLAB luma it was
+    trained on, or ``YChannelProcessor``). ``init_strategy='paper'``
     applies :meth:`DRCN.reset_parameters`: He init plus an identity-initialised
     recursive conv.
 
@@ -51,7 +52,8 @@ class DRCNTrainingConfig(SRTrainingConfig):
             raise ValueError(
                 f"DRCN in_out_channels={in_out_channels} does not match "
                 f"{type(processor).__name__}.model_channels={processor.model_channels}; "
-                f"pick a processor whose model_channels matches (YChannelProcessor for 1, "
+                f"pick a processor whose model_channels matches "
+                f"(YChannelProcessor or StudioYChannelProcessor for 1, "
                 f"RGBProcessor or YCbCrProcessor for 3)."
             )
         super().validate_against(model, processor)

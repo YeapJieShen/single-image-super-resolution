@@ -49,6 +49,7 @@ class SRLightning(lightning.LightningModule):
         processor: An :class:`SRProcessor` subclass (e.g.
             :class:`~sisr.processors.RGBProcessor`,
             :class:`~sisr.processors.YChannelProcessor`,
+            :class:`~sisr.processors.StudioYChannelProcessor`,
             :class:`~sisr.processors.YCbCrProcessor`). Required.
         training_config: Per-architecture training settings (layer_lrs,
             example_input_shape, init_*). Defaults to base

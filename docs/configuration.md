@@ -50,7 +50,8 @@ The processor is the colorspace adapter between the data and the network:
 | --- | --- | --- |
 | `RGBProcessor` | RGB in `[0, 1]` | pre-2026-08-02 SRResNet runs |
 | `RGBSignedOutputProcessor` | LR `[0, 1]` in, HR/target `[-1, 1]` | SRResNet, SRGAN |
-| `YChannelProcessor` | Y channel only | SRCNN |
+| `YChannelProcessor` | Full-range Y channel only | SRCNN |
+| `StudioYChannelProcessor` | MATLAB studio-range Y (16-235) only | VDSR, DRCN |
 
 `RGBSignedOutputProcessor` is the range Ledig et al. use (§3.2). **Changing the
 processor renumbers what the network is trained on**, and under SRGAN it also
