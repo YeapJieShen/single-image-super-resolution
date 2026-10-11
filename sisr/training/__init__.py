@@ -9,12 +9,13 @@ from typing import Any
 from .callbacks import (
     BenchmarkImageLogger,
     GradNormLogger,
+    LossWeightScheduler,
     SRCheckpoint,
     SRPredictionWriter,
     SRWeightsCheckpoint,
     WeightHistogramLogger,
 )
-from .config import SREvalConfig, SRTrainingConfig
+from .config import AdversarialTrainingConfig, SREvalConfig, SRTrainingConfig
 from .datamodule import SRDataModule
 from .lightning_module import SRLightning
 
@@ -23,9 +24,11 @@ __all__ = [
     "SRGANLightning",
     "SRDataModule",
     "SRTrainingConfig",
+    "AdversarialTrainingConfig",
     "SREvalConfig",
     "BenchmarkImageLogger",
     "GradNormLogger",
+    "LossWeightScheduler",
     "SRCheckpoint",
     "SRWeightsCheckpoint",
     "SRPredictionWriter",

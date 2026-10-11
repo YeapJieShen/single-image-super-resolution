@@ -11,7 +11,9 @@ is expected to have ``sisr`` importable and call ``processor.extract`` /
   bare graph is already end-to-end LR-RGB -> SR-RGB.
 - :class:`~sisr.processors.RGBSignedOutputProcessor`: the same graph emits
   ``[-1, 1]``; the consumer applies ``(out + 1) / 2``. Input side unchanged.
-- :class:`~sisr.processors.YChannelProcessor` (SRCNN): **Y -> Y only.**
+- :class:`~sisr.processors.YChannelProcessor` (SRCNN) and
+  :class:`~sisr.processors.StudioYChannelProcessor` (VDSR, DRCN; studio-range Y in and out):
+  **Y -> Y only.**
   Rebuilding RGB needs the LR image's Cb/Cr bicubic-upsampled to the SR size,
   which this omits -- a non-Python consumer must reimplement that chroma path.
 
@@ -33,6 +35,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from . import artifacts
+from .models.base import SRModelOutput, unwrap_primary
 
 if TYPE_CHECKING:
     from .training import SRLightning
@@ -49,6 +52,30 @@ def _require_onnx() -> None:
         import onnx  # noqa: F401
     except ImportError as e:
         raise ImportError(f"onnx is not installed. {_EXTRA_HINT}") from e
+
+
+class _PrimaryOnly(torch.nn.Module):
+    """Traces only a model's primary output, whichever return shape it uses.
+
+    ``torch.onnx.export``'s legacy tracer accepts only tensors (or plain
+    tuples/lists/dicts of them) as outputs -- a model returning
+    :class:`~sisr.models.base.SRModelOutput` cannot be traced directly
+    (``RuntimeError: ... unsupported type``). ``to_onnx`` only wraps a model
+    in this when it actually returns a record (see the ``wraps_output``
+    probe below), so every existing bare-tensor export is completely
+    untouched -- this shim's cosmetic cost (initializer names in the traced
+    graph gain a ``wrapped.`` prefix) is paid only when unwrapping is
+    actually needed.
+    """
+
+    def __init__(self, wrapped: torch.nn.Module, scale: int | None = None):
+        super().__init__()
+        self.wrapped = wrapped
+        self.scale = scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.wrapped(x) if self.scale is None else self.wrapped(x, scale=self.scale)
+        return unwrap_primary(out)
 
 
 def to_onnx(
@@ -124,9 +151,22 @@ def to_onnx(
         input_sample = torch.zeros(1, *shape)
 
     model = module.model
+    # A multi-scale model is one graph per scale: export the first listed (recorded in
+    # the metadata's io.scale, which stays the whole list).
+    fixed_scale = module.resolved_scales()[0] if model.multi_scale else None
     was_training = model.training
     model.eval()
     try:
+        with torch.no_grad():
+            probe = (
+                model(input_sample)
+                if fixed_scale is None
+                else model(input_sample, scale=fixed_scale)
+            )
+            wraps_output = isinstance(probe, SRModelOutput)
+        trace_target = (
+            _PrimaryOnly(model, fixed_scale) if wraps_output or fixed_scale is not None else model
+        )
         with warnings.catch_warnings():
             # dynamo=False (the legacy TorchScript exporter) is deliberate: torch's
             # newer torch.export-based path needs `onnxscript`, outside the
@@ -144,7 +184,7 @@ def to_onnx(
             warnings.filterwarnings("ignore", category=DeprecationWarning)
             warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
             torch.onnx.export(
-                model,
+                trace_target,
                 (input_sample,),
                 str(file_path),
                 input_names=["input"],

@@ -1,7 +1,7 @@
 """Checksum-validated LMDB key-value store with parallel build support.
 
-:class:`LMDBCache` is used by both :class:`~sisr.datasets.srcnn.TrainDataset`
-and :class:`~sisr.datasets.srresnet.TrainDataset` to persist whole decoded HR
+:class:`LMDBCache` is used by both :class:`~sisr.datasets.pre_upsampled.TrainDataset`
+and :class:`~sisr.datasets.native_lr.TrainDataset` to persist whole decoded HR
 images, raw uint8; each derives its LR (and, for SRCNN, its deterministic
 sub-image grid) at read time via :meth:`LMDBCache.get_buffer`.
 

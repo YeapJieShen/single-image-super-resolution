@@ -1,5 +1,6 @@
 import csv
 import functools
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -16,12 +17,14 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from PIL import Image
 
 from sisr import artifacts
+from sisr.losses import WeightedSumLoss
 from sisr.metrics.scoring import SRScorer
 from sisr.models.srcnn import SRCNN
 from sisr.processors import RGBProcessor, YChannelProcessor
 from sisr.training import (
     BenchmarkImageLogger,
     GradNormLogger,
+    LossWeightScheduler,
     SRCheckpoint,
     SREvalConfig,
     SRLightning,
@@ -32,6 +35,7 @@ from sisr.training import (
 )
 from sisr.training.callbacks import BenchmarkSample
 from sisr.training.metadata import build_metadata
+from sisr.training.sinks import TensorBoardSink
 
 # ---------------------------------------------------------------------------
 # BenchmarkImageLogger.setup auto-discovery
@@ -115,9 +119,12 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
     """
     cb = BenchmarkImageLogger(log_per_image_metrics=True)
     cb._buffer["Set5"] = []
-    cb._tb_experiment = MagicMock()
+    tb_experiment = MagicMock()
+    cb._sinks = [TensorBoardSink(tb_experiment)]
     trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
-    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+    dataloaders = [
+        SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]), batch_size=1)
+    ]
 
     cb._collect_batch(
         trainer,
@@ -130,8 +137,8 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
         should_log_images=True,
     )
 
-    assert cb._tb_experiment.add_image.call_args.kwargs["global_step"] == 200
-    assert cb._tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
+    assert tb_experiment.add_image.call_args.kwargs["global_step"] == 200
+    assert tb_experiment.add_scalar.call_args.kwargs["global_step"] == 200
 
 
 def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
@@ -155,7 +162,9 @@ def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
     cb._buffer["Set5"] = []
     pl_module = _make_benchmark_pl_module()
     pl_module.scorer.psnr = MagicMock(return_value=torch.tensor(42.0))
-    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+    dataloaders = [
+        SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]), batch_size=1)
+    ]
 
     cb._collect_batch(
         trainer=_make_step_axis_trainer(global_step=2, batches_that_stepped=1),
@@ -189,6 +198,55 @@ def test_the_two_psnr_reductions_genuinely_differ_above_batch_size_one():
         sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
     )
     assert pooled.item() != pytest.approx(per_image.item())
+
+
+def test_collect_batch_partial_last_batch_does_not_reuse_earlier_filename():
+    """Regression for #272.
+
+    Pre-fix, `_collect_batch` derived `global_idx` from the CURRENT batch's own
+    tensor size (`lr_img.size(0)`) rather than the dataloader's *configured*
+    `batch_size`. For a 3-image set at a configured batch size of 2 (batches of
+    2 then 1), the partial last batch's local `batch_size` was 1, so
+    `global_idx = batch_idx * batch_size + i = 1 * 1 + 0 = 1` -- reusing image
+    1's filename for image 2, and image 2's own filename was never produced.
+    """
+    cb = BenchmarkImageLogger()
+    cb._buffer["Set5"] = []
+    pl_module = _make_benchmark_pl_module()
+    # Identity, not the fixture's fixed 1x3x8x8 return: this test calls
+    # _collect_batch with batches of size 2 and 1, so predict_rgb's output
+    # shape must track its input shape.
+    pl_module.predict_rgb = lambda lr, hr, self_ensemble=False: (lr, hr)
+
+    ds = _stub_dataset_with_img_paths(n=3, name="Set5")
+    # batch_size=2 is the LOADER's configured size -- distinct from either
+    # call's actual tensor size below (2, then 1).
+    dataloaders = [_stub_dataloader(ds, batch_size=2)]
+    trainer = _make_step_axis_trainer(global_step=0, batches_that_stepped=0)
+
+    cb._collect_batch(
+        trainer=trainer,
+        pl_module=pl_module,
+        batch=(torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)),
+        batch_idx=0,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+    cb._collect_batch(
+        trainer=trainer,
+        pl_module=pl_module,
+        batch=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)),
+        batch_idx=1,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+
+    filenames = [s.filename for s in cb._buffer["Set5"]]
+    assert filenames == ["Set5_000", "Set5_001", "Set5_002"]
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +425,111 @@ def test_grad_norm_logger_cadence_counts_batches_not_optimizer_steps():
         _make_step_axis_trainer(global_step=14, batches_that_stepped=10), pl_module
     )
     pl_module.log.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# LossWeightScheduler
+# ---------------------------------------------------------------------------
+
+
+def _make_scheduler_pl_module() -> SimpleNamespace:
+    criterion = WeightedSumLoss(terms={"aux": torch.nn.MSELoss()}, weights={"aux": 1.0})
+    return SimpleNamespace(criterion=criterion)
+
+
+def test_loss_weight_scheduler_hits_start_middle_and_end_exactly():
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=100)
+    pl_module = _make_scheduler_pl_module()
+
+    for step, expected in [(0, 1.0), (25, 0.75), (50, 0.5), (100, 0.0)]:
+        trainer = _make_step_axis_trainer(global_step=step, batches_that_stepped=step)
+        cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+        assert pl_module.criterion.weights["aux"] == pytest.approx(expected), step
+
+
+def test_loss_weight_scheduler_reads_the_batch_axis_not_the_optimizer_axis():
+    """Same discipline as GradNormLogger's cadence test, applied to a
+    scheduled VALUE instead of a cadence gate: global_step says "past the
+    end" (200 >= duration 100); batches_that_stepped says "exactly halfway"
+    (50). Only reading the batch axis can produce the midpoint value."""
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=100)
+    pl_module = _make_scheduler_pl_module()
+    trainer = _make_step_axis_trainer(global_step=200, batches_that_stepped=50)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.5)
+
+
+def test_loss_weight_scheduler_honours_a_nonzero_start_step():
+    cb = LossWeightScheduler(
+        term="aux", start_value=1.0, end_value=0.0, duration=100, start_step=10
+    )
+    pl_module = _make_scheduler_pl_module()
+
+    trainer = _make_step_axis_trainer(global_step=5, batches_that_stepped=5)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(1.0)
+
+    trainer = _make_step_axis_trainer(global_step=35, batches_that_stepped=35)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.75)
+
+    trainer = _make_step_axis_trainer(global_step=60, batches_that_stepped=60)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.5)
+
+    trainer = _make_step_axis_trainer(global_step=500, batches_that_stepped=500)
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.0)
+
+
+def test_loss_weight_scheduler_does_not_reach_end_value_one_step_early():
+    """The ramp must still be interpolating at duration - 1, not already
+    clamped to end_value -- catches an off-by-one end clamp."""
+    cb = LossWeightScheduler(
+        term="aux", start_value=1.0, end_value=0.0, duration=100, start_step=10
+    )
+    pl_module = _make_scheduler_pl_module()
+    trainer = _make_step_axis_trainer(global_step=109, batches_that_stepped=109)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights["aux"] == pytest.approx(0.01)
+
+
+def test_loss_weight_scheduler_writes_only_the_named_term():
+    """Every other scheduler test uses a single-term criterion, which can't
+    see *which* term got written -- a scheduler pointed at "main" that
+    actually wrote the first term in sorted order ("aux"), or wrote every
+    term, would still pass all of them. "main" sorts after "aux" so this
+    also catches a scheduler that defaults to sorted(weights)[0]."""
+    criterion = WeightedSumLoss(
+        terms={"aux": torch.nn.MSELoss(), "main": torch.nn.L1Loss()},
+        weights={"aux": 0.3, "main": 1.0},
+    )
+    pl_module = SimpleNamespace(criterion=criterion)
+    cb = LossWeightScheduler(term="main", start_value=1.0, end_value=0.0, duration=100)
+    trainer = _make_step_axis_trainer(global_step=25, batches_that_stepped=25)
+
+    cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+    assert pl_module.criterion.weights == pytest.approx({"aux": 0.3, "main": 0.75})
+
+
+def test_loss_weight_scheduler_rejects_a_criterion_with_no_set_weight():
+    cb = LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=10)
+    pl_module = SimpleNamespace(criterion=torch.nn.MSELoss())
+    trainer = _make_step_axis_trainer(global_step=0, batches_that_stepped=0)
+
+    with pytest.raises(TypeError, match="set_weight"):
+        cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
+
+
+@pytest.mark.parametrize("duration", [0, -5])
+def test_loss_weight_scheduler_construction_rejects_a_non_positive_duration(duration):
+    with pytest.raises(ValueError, match="duration"):
+        LossWeightScheduler(term="aux", start_value=1.0, end_value=0.0, duration=duration)
 
 
 # ---------------------------------------------------------------------------
@@ -964,7 +1127,7 @@ def _make_srcnn_datamodule(image_dir: Path):
     from sisr.training import SRDataModule
 
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(image_dir),
             "subimg_size": 33,
@@ -975,7 +1138,7 @@ def _make_srcnn_datamodule(image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     return SRDataModule(
@@ -1452,8 +1615,8 @@ def _stub_dataset_with_img_paths(n: int, name: str) -> SimpleNamespace:
     return SimpleNamespace(img_paths=paths)
 
 
-def _stub_dataloader(dataset) -> SimpleNamespace:
-    return SimpleNamespace(dataset=dataset)
+def _stub_dataloader(dataset, batch_size: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(dataset=dataset, batch_size=batch_size)
 
 
 def test_benchmark_validation_batch_end_skips_primary_loader():
@@ -2277,6 +2440,79 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
     assert len(cb._buffer["Set5"]) == 2
 
 
+def test_benchmark_validation_batch_end_never_self_ensembles():
+    """Acceptance (#284): self-ensemble must not apply during validation-during-fit (nor a
+    bare cli validate), regardless of eval_config.self_ensemble -- the validation-stage hook
+    must always pass self_ensemble=False to predict_rgb."""
+    pl_module = _make_real_pl_module()
+    pl_module.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is False
+
+
+def test_benchmark_test_batch_end_reads_eval_config_self_ensemble():
+    """cli test must pass eval_config.self_ensemble through to predict_rgb -- the only place
+    this callback turns self-ensembling on."""
+    pl_module = _make_real_pl_module()
+    pl_module.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"])
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
+    cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(test_dataloaders=[_stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_test_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is True
+
+
+def test_benchmark_test_batch_end_off_when_eval_config_leaves_it_default():
+    pl_module = _make_real_pl_module()  # eval_config.self_ensemble defaults False
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"])
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
+    cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(test_dataloaders=[_stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_test_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is False
+
+
 def test_prediction_writer_creates_output_dir(tmp_path: Path):
     out_dir = tmp_path / "preds" / "nested"
     SRPredictionWriter(output_dir=out_dir)
@@ -2362,7 +2598,7 @@ def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir
     """The callback resolves filenames from a real SRDataset's declared
     .img_paths contract (not a duck-typed attr)."""
     from sisr.datasets.base import SRDataset
-    from sisr.datasets.srresnet import ValidationDataset
+    from sisr.datasets.native_lr import ValidationDataset
 
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert isinstance(ds, SRDataset)
@@ -2701,7 +2937,7 @@ def test_monitor_validator_follows_the_grammar_when_it_moves(monkeypatch):
     import sisr.metrics.scoring as scoring
     from sisr.training.callbacks import SRCheckpoint
 
-    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k, scale=None: f"{f}.{s}.{k}")
 
     cfg = _grammar_eval_config()
     emitted = set(_scores_for(cfg).tagged("val"))
@@ -2720,7 +2956,7 @@ def test_benchmark_means_are_tagged_by_the_grammar_owner(monkeypatch):
     benchmark hierarchy must move with the validation one."""
     import sisr.metrics.scoring as scoring
 
-    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k, scale=None: f"{f}.{s}.{k}")
     logged: dict[str, float] = {}
 
     from types import SimpleNamespace
@@ -2821,3 +3057,37 @@ def test_progress_bar_keeps_v_num_even_when_it_is_filtered_out():
 
     items = SRProgressBar(metrics=["psnr"]).get_metrics(_bar_trainer("abc-def", _BAR_METRICS), None)
     assert items["v_num"] == "abc-def"
+
+
+def test_benchmark_passes_each_images_grey_flag_to_scoring():
+    """A 3-element eval batch's ``is_grey`` reaches the scorer per image, not per batch."""
+    hr = torch.rand(1, 1, 8, 8).expand(2, 3, 8, 8).clone()  # the same image twice
+    sr = (hr + 0.02).clamp(0, 1)
+    pl_module = MagicMock()
+    eval_config = SREvalConfig(
+        crop_border=0, psnr_channels=["Y"], ssim_channels=[], grey_plane_scoring=True
+    )
+    pl_module.eval_config = eval_config
+    pl_module.predict_rgb = MagicMock(return_value=(sr, hr))
+    pl_module.scorer = SRScorer(eval_config)
+    cb = BenchmarkImageLogger()
+    cb._buffer["Set14"] = []
+    dataloaders = [
+        SimpleNamespace(
+            dataset=SimpleNamespace(img_paths=[Path("bridge.png"), Path("man.png")]), batch_size=2
+        )
+    ]
+
+    cb._collect_batch(
+        _make_step_axis_trainer(global_step=0, batches_that_stepped=0),
+        pl_module,
+        batch=(torch.rand(2, 3, 4, 4), hr, torch.tensor([True, False])),
+        batch_idx=0,
+        dataset_name="Set14",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+
+    bridge, man = cb._buffer["Set14"]
+    assert man.psnr["Y"] - bridge.psnr["Y"] == pytest.approx(20 * math.log10(255 / 219), abs=2e-3)

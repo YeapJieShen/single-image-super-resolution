@@ -7,7 +7,7 @@ import pytest
 import torch
 from PIL import Image
 
-from sisr.datasets.srresnet import TrainDataset, ValidationDataset
+from sisr.datasets.native_lr import TrainDataset, ValidationDataset
 
 
 @pytest.fixture
@@ -180,7 +180,7 @@ def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
         cache_dir=cache_dir,
         build_num_workers=1,
     )
-    with patch("sisr.datasets.srresnet._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.native_lr._process_hr_image") as mock_proc:
         TrainDataset(
             img_dir=tiny_rgb_image_dir,
             scale=2,
@@ -203,7 +203,7 @@ def test_train_dataset_cache_independent_of_crop_params(tiny_rgb_image_dir: Path
         cache_dir=cache_dir,
         build_num_workers=1,
     )
-    with patch("sisr.datasets.srresnet._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.native_lr._process_hr_image") as mock_proc:
         TrainDataset(
             img_dir=tiny_rgb_image_dir,
             scale=4,
@@ -218,10 +218,10 @@ def test_train_dataset_cache_independent_of_crop_params(tiny_rgb_image_dir: Path
 def test_train_dataset_crops_per_image_reuses_one_cached_read(tiny_rgb_image_dir: Path):
     """crops_per_image=N must decode each image exactly once at build time --
     not once per crop -- regardless of how many items are drawn."""
-    import sisr.datasets.srresnet as srresnet_mod
+    import sisr.datasets.native_lr as srresnet_mod
 
     with patch(
-        "sisr.datasets.srresnet._process_hr_image", wraps=srresnet_mod._process_hr_image
+        "sisr.datasets.native_lr._process_hr_image", wraps=srresnet_mod._process_hr_image
     ) as mock_proc:
         ds = TrainDataset(
             img_dir=tiny_rgb_image_dir,
