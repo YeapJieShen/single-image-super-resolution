@@ -14,6 +14,7 @@ from lightning.pytorch.callbacks import (
 )
 
 from ...metrics.scoring import Scores
+from ..sinks import MetricSink, sinks_from
 from ._common import _logger_step, _sr
 
 
@@ -114,7 +115,7 @@ class BenchmarkImageLogger(Callback):
         # Resolved once in setup() rather than re-searched every batch/epoch-end;
         # None when no TensorBoard logger is attached (image/scalar emission is
         # then silently skipped, same as the previous per-flush behaviour).
-        self._tb_experiment: Any = None
+        self._sinks: list[MetricSink] = []  # one per attached logger that has one
 
     def setup(
         self,
@@ -122,7 +123,7 @@ class BenchmarkImageLogger(Callback):
         pl_module: lightning.LightningModule,
         stage: str,
     ) -> None:
-        """Resolve ``dataset_names``, both dataloader_idx mappings, and the TB experiment.
+        """Resolve ``dataset_names``, both dataloader_idx mappings, and the logger sinks.
 
         Auto-discovers ``dataset_names`` from ``trainer.datamodule.test_names``
         when not supplied at construction time.
@@ -143,15 +144,7 @@ class BenchmarkImageLogger(Callback):
         self._val_mapping = {i + n_primary: name for i, name in enumerate(self.dataset_names)}
         self._test_mapping = {i: name for i, name in enumerate(self.dataset_names)}
 
-        tb_logger = next(
-            (
-                logger
-                for logger in getattr(trainer, "loggers", None) or []
-                if isinstance(logger, lightning.pytorch.loggers.TensorBoardLogger)
-            ),
-            None,
-        )
-        self._tb_experiment = tb_logger.experiment if tb_logger is not None else None
+        self._sinks = sinks_from(trainer)
 
     def on_validation_epoch_start(
         self, trainer: lightning.Trainer, pl_module: lightning.LightningModule
@@ -338,7 +331,8 @@ class BenchmarkImageLogger(Callback):
         # Resolved once per batch, and only when something will actually be
         # emitted — a trainer with no fit loop is legitimate when no TB logger
         # is attached, and the guard below already skips every emission then.
-        step = _logger_step(trainer) if self._tb_experiment is not None else 0
+        sinks = self._sinks
+        step = _logger_step(trainer) if sinks else 0
 
         for i in range(current_batch_size):
             global_idx = batch_idx * loader_batch_size + i
@@ -363,22 +357,25 @@ class BenchmarkImageLogger(Callback):
                 BenchmarkSample(filename, psnr_dict, ssim_dict, perceptual_dict)
             )
 
-            if self._tb_experiment is None:
+            if not sinks:
                 continue
 
             if self.log_per_image_metrics:
-                self._emit_per_image_scalars(dataset_name, filename, psnr_dict, ssim_dict, step)
+                self._emit_per_image_scalars(
+                    sinks, dataset_name, filename, psnr_dict, ssim_dict, step
+                )
 
             if not should_log_images:
                 continue
 
             # One host transfer per image, only on cycles that log strips.
             self._emit_triptych(
-                dataset_name, filename, lr_img[i].cpu(), sr[i].cpu(), hr_img[i].cpu(), step
+                sinks, dataset_name, filename, lr_img[i].cpu(), sr[i].cpu(), hr_img[i].cpu(), step
             )
 
     def _emit_per_image_scalars(
         self,
+        sinks: list[MetricSink],
         dataset_name: str,
         filename: str,
         psnr: dict[str, float],
@@ -392,22 +389,22 @@ class BenchmarkImageLogger(Callback):
         would bury the per-set means they are meant to explain.
 
         Args:
+            sinks: Where to write.
             dataset_name: Benchmark set the image belongs to.
             filename: Source image stem, the tag's leaf.
             psnr: ``key -> value`` for this one image.
             ssim: ``key -> value`` for this one image.
             step: Logger step to stamp, from ``_logger_step``.
         """
-        assert self._tb_experiment is not None
-        for key, value in psnr.items():
-            tag = f"per_image/{dataset_name}/psnr/{key}/{filename}"
-            self._tb_experiment.add_scalar(tag, value, global_step=step)
-        for key, value in ssim.items():
-            tag = f"per_image/{dataset_name}/ssim/{key}/{filename}"
-            self._tb_experiment.add_scalar(tag, value, global_step=step)
+        for sink in sinks:
+            for key, value in psnr.items():
+                sink.scalar(f"per_image/{dataset_name}/psnr/{key}/{filename}", value, step)
+            for key, value in ssim.items():
+                sink.scalar(f"per_image/{dataset_name}/ssim/{key}/{filename}", value, step)
 
     def _emit_triptych(
         self,
+        sinks: list[MetricSink],
         dataset_name: str,
         filename: str,
         lr_cpu: torch.Tensor,
@@ -426,6 +423,7 @@ class BenchmarkImageLogger(Callback):
         on the right rather than cropping the reference to match.
 
         Args:
+            sinks: Where to write.
             dataset_name: Benchmark set, the tag's first segment.
             filename: Source image stem, the tag's leaf.
             lr_cpu: This image's LR, already on the host.
@@ -433,14 +431,14 @@ class BenchmarkImageLogger(Callback):
             hr_cpu: This image's reference, already on the host.
             step: Logger step to stamp, from ``_logger_step``.
         """
-        assert self._tb_experiment is not None
         target_hw = hr_cpu.shape[-2:]
         bicubic = self._bicubic_to(lr_cpu, target_hw)
         sr_padded = self._pad_to_match(sr_cpu, target_hw)
         strip = torchvision.utils.make_grid(
             [bicubic, sr_padded, hr_cpu], nrow=3, padding=2, pad_value=0.5
         )
-        self._tb_experiment.add_image(f"{dataset_name}/{filename}", strip, global_step=step)
+        for sink in sinks:
+            sink.image(f"{dataset_name}/{filename}", strip, step)
 
     def _flush_buffer(self, pl_module: lightning.LightningModule) -> None:
         """Log per-set mean PSNR/SSIM/perceptual scores from the buffered samples.
