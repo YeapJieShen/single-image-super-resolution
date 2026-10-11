@@ -82,7 +82,13 @@ def _paired_lits() -> tuple[SRLightning, SRLightning]:
         num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0
     )
     record_model.load_state_dict(plain_model.state_dict())
-    kwargs = dict(processor=RGBProcessor(), eval_config=SREvalConfig(crop_border=0))
+    # scale=1: predict_step upsamples a 'pre_upsampled' model's input and needs a scale;
+    # identity keeps every shape these comparisons see unchanged.
+    kwargs = dict(
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=1),
+        eval_config=SREvalConfig(crop_border=0),
+    )
     return SRLightning(model=plain_model, **kwargs), SRLightning(model=record_model, **kwargs)
 
 
