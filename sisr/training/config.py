@@ -89,6 +89,11 @@ class SRTrainingConfig:
             contract (``PredictDataset`` has none), whereas per-paper knobs
             already live here.
 
+            **A list trains one model at several scales** (see
+            :attr:`~sisr.models.base.SRModel.multi_scale`); a one-element list is
+            the same as that int and is normalised to it, so a single-scale
+            config behaves identically however it is spelled.
+
         compile_backend: A ``torch._dynamo`` backend to compile the
             training-mode forward with; ``None`` (default) trains eager. **Only
             ``training_step`` is compiled** — validation/test/predict stay eager,
@@ -135,7 +140,7 @@ class SRTrainingConfig:
     init_strategy: Literal["default", "paper"] = "default"
     init_mean: float = 0.0
     init_std: float = 0.01
-    scale: int | None = None
+    scale: int | list[int] | None = None
     compile_backend: str | None = None
     compile_mode: str | None = None
     scale_clip_with_lr: bool = False
@@ -157,23 +162,38 @@ class SRTrainingConfig:
         Raises:
             ValueError: If ``compile_mode`` is set without
                 ``compile_backend='inductor'``; if ``scale`` is set and is not
-                a positive int; if any ``layer_lrs`` entry (or either half of
-                a ``[weight_lr, bias_lr]`` pair) is not positive; if
+                a positive int (or a list of distinct ones); if any ``layer_lrs`` entry (or
+                either half of a ``[weight_lr, bias_lr]`` pair) is not positive; if
                 ``init_std`` is not positive; or if ``init_strategy`` is
                 neither ``'default'`` nor ``'paper'``.
         """
-        if self.scale is not None and (
-            not isinstance(self.scale, int) or isinstance(self.scale, bool) or self.scale < 1
-        ):
-            raise ValueError(
-                f"training_config.scale must be a positive int; got {self.scale!r} "
-                f"({type(self.scale).__name__}). "
-                "It is not only provenance: for an architecture that declares no `scale` "
-                "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
-                "nothing else checks it, and eval_config.crop_border derives from it, so a "
-                "non-positive scale becomes a non-positive border and the metric is computed "
-                "on the uncropped image. Fix model.training_config.init_args.scale in your YAML."
-            )
+        if isinstance(self.scale, list):
+            if not self.scale:
+                raise ValueError(
+                    "training_config.scale is an empty list; give a scale or several. Fix "
+                    "model.training_config.init_args.scale in your YAML."
+                )
+            if len(self.scale) == 1:
+                self.scale = self.scale[0]
+            elif len(set(map(repr, self.scale))) != len(self.scale):
+                raise ValueError(
+                    f"training_config.scale lists a scale twice: {self.scale!r}. "
+                    "Fix model.training_config.init_args.scale in your YAML."
+                )
+        for scale in self.scale if isinstance(self.scale, list) else [self.scale]:
+            if scale is not None and (
+                not isinstance(scale, int) or isinstance(scale, bool) or scale < 1
+            ):
+                raise ValueError(
+                    f"training_config.scale must be a positive int (or a list of them); got "
+                    f"{scale!r} ({type(scale).__name__}). "
+                    "It is not only provenance: for an architecture that declares no `scale` "
+                    "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
+                    "nothing else checks it, and eval_config.crop_border derives from it, so a "
+                    "non-positive scale becomes a non-positive border and the metric is "
+                    "computed on the uncropped image. Fix model.training_config.init_args.scale "
+                    "in your YAML."
+                )
 
         if self.layer_lrs is not None:
             for i, lr in enumerate(self.layer_lrs):
@@ -221,7 +241,8 @@ class SRTrainingConfig:
         """Validate this config against the model/processor it will pair with.
 
         Universal checks: ``self.scale`` must agree with the model's ``'scale'``
-        hparam when both exist (either absent skips, rather than guessing); and
+        hparam when both exist (as sets, so an int and a one-scale list agree and a list
+        must match the model's list) (either absent skips, rather than guessing); and
         when ``example_input_shape`` is set its channel dimension must equal
         ``processor.model_channels`` and a ``no_grad`` forward of the real
         model must succeed. The probe exercises the actual ``nn.Module``, so it
@@ -243,7 +264,9 @@ class SRTrainingConfig:
         """
         if self.scale is not None and "scale" in model.hparams:
             model_scale = model.hparams["scale"]
-            if self.scale != model_scale:
+            mine = set(self.scale) if isinstance(self.scale, list) else {self.scale}
+            theirs = set(model_scale) if isinstance(model_scale, list | tuple) else {model_scale}
+            if mine != theirs:
                 raise ValueError(
                     f"training_config.scale={self.scale} does not match "
                     f"model.hparams['scale']={model_scale}. Fix training_config.scale "
@@ -401,6 +424,12 @@ class SREvalConfig:
             validation-during-fit, so a run's per-step cost is unchanged regardless of this
             setting. Costs 8x the forward-pass compute wherever it does apply. Default
             ``False``: byte-identical to today's single pass.
+
+        predict_scale: Which scale ``predict`` runs a
+            :attr:`~sisr.models.base.SRModel.multi_scale` model at. Prediction has no HR
+            to read the scale from, so a multi-scale model trained at several scales
+            cannot guess; it is required then and refused to be guessed. Ignored by a
+            single-scale model.
     """
 
     crop_border: int | None = 0
@@ -411,6 +440,7 @@ class SREvalConfig:
     perceptual_metrics: list[str] = field(default_factory=list)
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
     self_ensemble: bool = False
+    predict_scale: int | None = None
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
@@ -419,7 +449,8 @@ class SREvalConfig:
         ``ssim_impl``, ``perceptual_metrics`` and ``lpips_net``.
 
         Raises:
-            ValueError: If ``crop_border`` is negative (``None`` and ``0`` are
+            ValueError: If ``predict_scale`` is neither ``None`` nor a positive int; if
+                ``crop_border`` is negative (``None`` and ``0`` are
                 both legitimate, and mean different things); if any entry of
                 either channel field is not a
                 supported colorspace or single-channel name (see
@@ -428,6 +459,15 @@ class SREvalConfig:
                 supported metric (see ``PERCEPTUAL_METRICS``), or if
                 ``lpips_net`` is not ``'alex'``, ``'vgg'`` or ``'squeeze'``.
         """
+        if self.predict_scale is not None and (
+            not isinstance(self.predict_scale, int)
+            or isinstance(self.predict_scale, bool)
+            or self.predict_scale < 1
+        ):
+            raise ValueError(
+                f"SREvalConfig.predict_scale must be None or a positive int; got "
+                f"{self.predict_scale!r}. Fix model.eval_config.init_args.predict_scale."
+            )
         if self.crop_border is not None and self.crop_border < 0:
             raise ValueError(
                 f"SREvalConfig.crop_border must be None or >= 0; got {self.crop_border}. "

@@ -90,6 +90,15 @@ class SRModel(nn.Module, abc.ABC):
     #: silently break on a third.
     input_contract: ClassVar[Literal["pre_upsampled", "native_lr"]]
 
+    #: ``True`` for a model that serves several scales from one set of weights
+    #: (e.g. MDSR). The module then calls ``forward(x, scale=s)`` -- ``s`` is the
+    #: batch's upscaling factor -- and such a model's ``forward`` must accept
+    #: ``scale`` (``None`` meaning its first scale, for direct calls). Every other
+    #: model keeps ``forward(x)`` and is never handed a scale. Only a ``native_lr``
+    #: model can be multi-scale: a ``pre_upsampled`` one sees LR already on the HR grid
+    #: and its batches may mix scales, so there is no one scale to hand it.
+    multi_scale: ClassVar[bool] = False
+
     @property
     def hparams(self) -> dict:
         """Architecture hyperparameters dict for the Lightning HParams merge."""

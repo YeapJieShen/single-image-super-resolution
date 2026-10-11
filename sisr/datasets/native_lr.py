@@ -26,13 +26,14 @@ LR is derived via MATLAB-compatible antialiased bicubic resizing (see
 """
 
 import random
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
 
 from ..utils.cache import LMDBCacheBuildContext
 from ..utils.imresize import resize
-from .base import HRCachedTrainDataset, SRDataset
+from .base import HRCachedTrainDataset, SRDataset, as_scales
 from .hr_cache import process_hr_image as _process_hr_image
 
 
@@ -68,7 +69,13 @@ class TrainDataset(HRCachedTrainDataset):
 
     Args:
         img_dir: Directory of HR images.
-        scale: Upscaling factor. ``hr_crop_size`` must be divisible by it.
+        scale: Upscaling factor, or a list of them for multi-scale training.
+            ``hr_crop_size`` must be divisible by every one. With several,
+            **one scale is used per batch**: index with ``(idx, scale)`` (the
+            datamodule's :class:`~sisr.datasets.sampling.ScaleBatchSampler`
+            does), because a native-LR batch cannot mix input sizes. A bare
+            ``int`` index uses the first scale. One derived LR cache is built
+            per scale.
         hr_crop_size: Side length of the square HR crop.
         crops_per_image: Random crops drawn per image per epoch (the dataset
             length is ``len(images) * crops_per_image``). Each draw re-reads
@@ -83,29 +90,36 @@ class TrainDataset(HRCachedTrainDataset):
 
     Raises:
         ValueError: If no images are found, or ``hr_crop_size`` is not
-            divisible by ``scale``.
+            divisible by a ``scale``.
     """
+
+    scale_per_batch: bool
+
+    # ``scale`` is the first scale given when there is one, the list when there are several.
+    scale: int | list[int]
 
     def __init__(
         self,
         img_dir: str | Path,
-        scale: int,
+        scale: int | Sequence[int],
         hr_crop_size: int,
         crops_per_image: int = 1,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
     ):
-        if hr_crop_size % scale != 0:
-            raise ValueError(f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({scale}).")
+        self.scales = as_scales(scale)
+        for s in self.scales:
+            if hr_crop_size % s != 0:
+                raise ValueError(f"hr_crop_size ({hr_crop_size}) must be divisible by scale ({s}).")
 
-        self.scale = scale
+        self.scale = self.scales[0] if len(self.scales) == 1 else list(self.scales)
+        self.scale_per_batch = len(self.scales) > 1
         self.hr_crop_size = hr_crop_size
         self.crops_per_image = crops_per_image
-        self.lr_size = hr_crop_size // scale
         super().__init__(
             img_dir,
-            scale=scale,
+            scale=self.scales,
             derived_kind="lr",
             use_tqdm=use_tqdm,
             cache_dir=cache_dir,
@@ -119,8 +133,11 @@ class TrainDataset(HRCachedTrainDataset):
     def __len__(self) -> int:
         return len(self.img_paths) * self.crops_per_image
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int | tuple[int, int]) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns a ``(lr_tensor, hr_tensor)`` pair cropped from the whole-image planes.
+
+        ``index`` is an item index, or ``(item index, scale)`` to pick the scale of a
+        multi-scale dataset (a bare index uses the first scale).
 
         A random position is drawn in LR coordinates; ``lr_tensor`` is the
         ``hr_crop_size // scale`` square there and ``hr_tensor`` the
@@ -132,21 +149,25 @@ class TrainDataset(HRCachedTrainDataset):
             ValueError: If the image is smaller than ``hr_crop_size`` after the
                 modcrop the LR plane was derived under.
         """
+        idx, scale = index if isinstance(index, tuple) else (index, self.scales[0])
+        if scale not in self.scales:
+            raise ValueError(f"scale {scale} is not one of this dataset's scales {self.scales}.")
+        lr_size = self.hr_crop_size // scale
         img_idx = idx % len(self.img_paths)
 
-        with self._read_derived(img_idx) as lr_plane:
+        with self._read_derived(img_idx, scale) as lr_plane:
             lr_h, lr_w = lr_plane.shape[:2]
-            if lr_h < self.lr_size or lr_w < self.lr_size:
+            if lr_h < lr_size or lr_w < lr_size:
                 raise ValueError(
-                    f"Image {self.img_paths[img_idx].name} is {lr_w * self.scale}x"
-                    f"{lr_h * self.scale} after modcrop, smaller than hr_crop_size "
+                    f"Image {self.img_paths[img_idx].name} is {lr_w * scale}x"
+                    f"{lr_h * scale} after modcrop, smaller than hr_crop_size "
                     f"{self.hr_crop_size}."
                 )
-            top = random.randint(0, lr_h - self.lr_size)
-            left = random.randint(0, lr_w - self.lr_size)
-            lr_arr = lr_plane[top : top + self.lr_size, left : left + self.lr_size, :].copy()
+            top = random.randint(0, lr_h - lr_size)
+            left = random.randint(0, lr_w - lr_size)
+            lr_arr = lr_plane[top : top + lr_size, left : left + lr_size, :].copy()
 
-        hr_top, hr_left = top * self.scale, left * self.scale
+        hr_top, hr_left = top * scale, left * scale
         with self._read_hr(img_idx) as arr:
             hr_arr = arr[
                 hr_top : hr_top + self.hr_crop_size,

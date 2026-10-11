@@ -2934,7 +2934,7 @@ def test_monitor_validator_follows_the_grammar_when_it_moves(monkeypatch):
     import sisr.metrics.scoring as scoring
     from sisr.training.callbacks import SRCheckpoint
 
-    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k, scale=None: f"{f}.{s}.{k}")
 
     cfg = _grammar_eval_config()
     emitted = set(_scores_for(cfg).tagged("val"))
@@ -2953,7 +2953,7 @@ def test_benchmark_means_are_tagged_by_the_grammar_owner(monkeypatch):
     benchmark hierarchy must move with the validation one."""
     import sisr.metrics.scoring as scoring
 
-    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k: f"{f}.{s}.{k}")
+    monkeypatch.setattr(scoring, "metric_tag", lambda f, s, k, scale=None: f"{f}.{s}.{k}")
     logged: dict[str, float] = {}
 
     from types import SimpleNamespace

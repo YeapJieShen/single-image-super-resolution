@@ -35,7 +35,9 @@ low-pass filter, so no separate blur step is needed.
 """
 
 import bisect
-from collections.abc import Iterator
+import math
+import random
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +45,7 @@ import torch
 
 from ..utils.cache import LMDBCacheBuildContext
 from ..utils.imresize import resize, resize_window
-from .base import HRCachedTrainDataset, SRDataset
+from .base import HRCachedTrainDataset, SRDataset, as_scales
 from .derived_cache import modcrop as _modcrop
 from .derived_cache import modcrop_extent as _modcrop_extent
 from .hr_cache import process_hr_image as _process_hr_image
@@ -133,7 +135,13 @@ class TrainDataset(HRCachedTrainDataset):
         img_dir: Directory of HR images.
         subimg_size: Spatial size of the square sub-images to extract.
         stride: Step size of the sliding window used for sub-image extraction.
-        scale: Downscaling factor for generating LR sub-images.
+        scale: Downscaling factor for generating LR sub-images, or a list of
+            them for multi-scale training: **a scale is drawn per patch**, so a
+            batch mixes scales (fine here, every patch is on the HR grid and the
+            model never sees the scale). The patch grid then comes from the
+            modcrop of the scales' least common multiple, which is inside every
+            scale's own modcrop, so each patch is valid at each scale. One derived
+            LR cache is built per scale.
         use_tqdm: Whether to display a progress bar during the LMDB build.
         cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
         build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
@@ -151,19 +159,23 @@ class TrainDataset(HRCachedTrainDataset):
         img_dir: str | Path,
         subimg_size: int,
         stride: int,
-        scale: int,
+        scale: int | Sequence[int],
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
     ):
+        self.scales = as_scales(scale)
         # Fail here, before the cache build, rather than in the first loader worker.
-        resize_window(np.zeros((1, 1), dtype=np.uint8), (scale, scale), 0, 1, 0, 1)
+        for s in self.scales:
+            resize_window(np.zeros((1, 1), dtype=np.uint8), (s, s), 0, 1, 0, 1)
         self.sub_img_size = subimg_size
         self.stride = stride
-        self.scale = scale
+        self.scale = self.scales[0] if len(self.scales) == 1 else list(self.scales)
+        self.scale_per_batch = False
+        self._grid_scale = math.lcm(*self.scales)
         super().__init__(
             img_dir,
-            scale=scale,
+            scale=self.scales,
             derived_kind="lr",
             use_tqdm=use_tqdm,
             cache_dir=cache_dir,
@@ -188,7 +200,7 @@ class TrainDataset(HRCachedTrainDataset):
         n_cols_list: list[int] = []
         offset = 0
         for h, w in self._img_sizes:
-            n_rows, n_cols = _grid_dims(h, w, self.scale, self.sub_img_size, self.stride)
+            n_rows, n_cols = _grid_dims(h, w, self._grid_scale, self.sub_img_size, self.stride)
             n_cols_list.append(n_cols)
             offsets.append(offset)
             offset += n_rows * n_cols
@@ -239,10 +251,12 @@ class TrainDataset(HRCachedTrainDataset):
                 top : top + self.sub_img_size, left : left + self.sub_img_size, :
             ].copy()
 
+        # No draw for one scale: the RNG stream a single-scale run consumes is unchanged.
+        scale = random.choice(self.scales) if len(self.scales) > 1 else self.scales[0]
         h_full, w_full = self._img_sizes[img_idx]
-        h_crop = _modcrop_extent(h_full, self.scale)
-        w_crop = _modcrop_extent(w_full, self.scale)
-        with self._read_derived(img_idx) as plane:
+        h_crop = _modcrop_extent(h_full, scale)
+        w_crop = _modcrop_extent(w_full, scale)
+        with self._read_derived(img_idx, scale) as plane:
             lr_subimg = resize_window(
                 plane,
                 (h_crop, w_crop),

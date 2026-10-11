@@ -205,6 +205,8 @@ def stem(meta: dict[str, Any]) -> str:
         block = meta.get("model", {})
         io = meta.get("io", {})
         scale = io.get("scale")
+        if isinstance(scale, list):
+            scale = "-".join(str(s) for s in sorted(scale))
         parts = [
             block.get("class_path", "").rsplit(".", 1)[-1],
             f"x{scale}" if scale is not None else None,
