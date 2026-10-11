@@ -15,6 +15,7 @@ import lightning
 import torch
 import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch.utilities import GradClipAlgorithmType
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..losses import SRLoss
@@ -1026,3 +1027,54 @@ class SRLightning(lightning.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: int | float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """Clip gradients, optionally scaling the threshold by the optimizer's current LR.
+
+        ``Trainer(gradient_clip_val=..., gradient_clip_algorithm=...)`` stays the one place
+        the clip threshold θ itself is set. When ``training_config.scale_clip_with_lr`` is
+        ``False`` (the default), this is a pure passthrough to
+        :meth:`~lightning.pytorch.core.LightningModule.clip_gradients` — identical to
+        Lightning's own unoverridden behavior. When it is ``True``, clips to
+        ``θ / current_lr`` instead, where ``current_lr`` is this optimizer's first param
+        group's LR.
+
+        The scaled path calls ``self.trainer.precision_plugin.clip_gradients`` directly
+        rather than ``self.clip_gradients`` — the latter raises
+        ``MisconfigurationException`` whenever the value passed differs from
+        ``self.trainer.gradient_clip_val``, which a scaled value always does. That guard
+        exists to catch a human passing conflicting config by hand; it is not applicable
+        to a deliberate, documented scaling.
+
+        Args:
+            optimizer: The optimizer whose gradients are being clipped (Lightning passes
+                this in; with one optimizer, as everywhere in this codebase's automatic-
+                optimization path, it is always ``self.optimizers()``).
+            gradient_clip_val: θ, forwarded from ``Trainer.gradient_clip_val``. ``None``
+                means clipping is off.
+            gradient_clip_algorithm: ``"value"`` or ``"norm"``, forwarded from
+                ``Trainer.gradient_clip_algorithm``.
+        """
+        if not self.training_config.scale_clip_with_lr:
+            self.clip_gradients(
+                optimizer,
+                gradient_clip_val=gradient_clip_val,
+                gradient_clip_algorithm=gradient_clip_algorithm,
+            )
+            return
+        theta = gradient_clip_val
+        if theta is None:
+            theta = self.trainer.gradient_clip_val
+        if theta is None or theta <= 0:
+            return
+        current_lr = optimizer.param_groups[0]["lr"]
+        scaled = theta / current_lr
+        algo_name = gradient_clip_algorithm or self.trainer.gradient_clip_algorithm or "norm"
+        self.trainer.precision_plugin.clip_gradients(
+            optimizer, scaled, GradClipAlgorithmType(algo_name.lower())
+        )

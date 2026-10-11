@@ -59,6 +59,7 @@ def build_gan_module(
     adversarial_weight=SRGANTrainingConfig.adversarial_weight,
     layer_lrs=None,
     init_from=None,
+    scale_clip_with_lr=False,
 ):
     """A minimal but real SRGANLightning — one residual block keeps it CPU-fast."""
     return cls(
@@ -73,6 +74,7 @@ def build_gan_module(
             adversarial_weight=adversarial_weight,
             layer_lrs=layer_lrs,
             init_from=init_from,
+            scale_clip_with_lr=scale_clip_with_lr,
         ),
         eval_config=SRGANEvalConfig(perceptual_metrics=[]),
         optimizer=lambda params: torch.optim.SGD(params, lr=0.1),
@@ -795,6 +797,14 @@ def test_a_base_training_config_is_refused():
             discriminator=SRDiscriminator(),
             training_config=SRTrainingConfig(),
         )
+
+
+def test_scale_clip_with_lr_refused_under_manual_optimization():
+    """#286: SRGANLightning never receives Lightning's configure_gradient_clipping call
+    (manual optimization), so the flag must be refused at construction rather than silently
+    accepted and silently doing nothing."""
+    with pytest.raises(ValueError, match="scale_clip_with_lr"):
+        build_gan_module(scale_clip_with_lr=True)
 
 
 @_ignore_cpu_fit_warnings

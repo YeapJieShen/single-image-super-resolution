@@ -143,6 +143,16 @@ class SRGANLightning(SRLightning):
                 f"adversarial_weight and d_steps_per_g_step off it on every step."
             )
 
+        if self.training_config.scale_clip_with_lr:
+            raise ValueError(
+                "training_config.scale_clip_with_lr=True has no effect here: "
+                "SRGANLightning sets automatic_optimization=False, and Lightning never "
+                "calls configure_gradient_clipping (the hook this flag controls) for a "
+                "manually-optimized module at all. Set it back to False; call "
+                "self.clip_gradients(...) explicitly inside training_step if SRGAN needs "
+                "clipping."
+            )
+
         # The correlated check training_config.validate_against cannot do:
         # its (model, processor) signature never sees the discriminator.
         if discriminator.in_channels != processor.model_channels:

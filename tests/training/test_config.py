@@ -18,6 +18,7 @@ def test_sr_training_config_defaults():
     assert cfg.init_std == 0.01
     assert cfg.scale is None
     assert cfg.compile_backend is None
+    assert cfg.scale_clip_with_lr is False
 
 
 def test_sr_eval_config_defaults():
@@ -59,6 +60,7 @@ def test_sr_training_config_field_names():
         "scale",
         "compile_backend",
         "compile_mode",
+        "scale_clip_with_lr",
     }
 
 
