@@ -239,6 +239,39 @@ def matlab_imresize(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndar
     return arr[:, :, 0] if flag2d else arr
 
 
+def resize_float(image: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+    """MATLAB-``imresize``-compatible bicubic resize that never quantizes (``single`` / ``double``).
+
+    The evaluation-side twin of :func:`matlab_imresize` for papers whose MATLAB degrades a
+    floating-point image (``VDSR.m``, ``DRCN.m``): same weights from :func:`_contributions`,
+    float64 throughout, **no rounding between passes and no clamp** at the end, so a bicubic
+    overshoot survives. Kept separate so the uint8 path above, which every training cache
+    and trained model depends on, is untouched.
+
+    Args:
+        image: Float array, ``(H, W)`` or ``(H, W, C)``, on whatever scale the caller uses.
+        output_shape: Target ``(height, width)``.
+
+    Returns:
+        ``float64`` array of shape ``output_shape`` (with trailing ``C`` if *image* had one).
+    """
+    in_h, in_w = image.shape[0], image.shape[1]
+    out_h, out_w = output_shape
+    flag2d = image.ndim == 2
+    arr = (image[:, :, None] if flag2d else image).astype(np.float64)
+    passes = [
+        (out_h / in_h, 0, *_contributions(in_h, out_h, out_h / in_h)),
+        (out_w / in_w, 1, *_contributions(in_w, out_w, out_w / in_w)),
+    ]
+    passes.sort(key=lambda p: p[0])
+    for _, axis, weights, indices in passes:
+        if axis == 0:
+            arr = np.einsum("ij,ijkl->ikl", weights, arr[indices], optimize=True)
+        else:
+            arr = np.einsum("jk,ijkl->ijl", weights, arr[:, indices], optimize=True)
+    return arr[:, :, 0] if flag2d else arr
+
+
 def _order_free_factor(in_length: int, out_length: int) -> int | None:
     """The integer upscale factor ``out_length / in_length`` if any summation order is exact.
 

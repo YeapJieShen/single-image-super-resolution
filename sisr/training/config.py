@@ -430,6 +430,22 @@ class SREvalConfig:
             to read the scale from, so a multi-scale model trained at several scales
             cannot guess; it is required then and refused to be guessed. Ignored by a
             single-scale model.
+
+        round_to_uint8: Round each scored plane to 8-bit levels (``floor(x * 255 + 0.5)``,
+            ties away from zero) on **both** SR and HR before PSNR, as the MATLAB evaluation of
+            VDSR, DRCN (both write an 8-bit PNG and re-read it), EDSR and MDSR (uint8 images)
+            does; the SRCNN template sets it too. PSNR only: SSIM and the perceptual metrics
+            read the unrounded tensors. Default ``False``: every value unchanged.
+
+        grey_plane_scoring: Score a single-channel image on its raw plane, as the MATLAB
+            evaluation of DRCN, VDSR and MDSR does (Set14's ``bridge``; the EDSR paper's row
+            scores it through RGB, so the EDSR template leaves this off), instead of promoting
+            it to RGB and scoring studio-range Y (which compresses errors by 219/255,
+            +1.3219 dB). Greyness is the **file mode**, reported per image by the eval
+            dataset's ``yield_is_grey=True`` third element -- never inferred from pixel
+            values, since an RGB file with equal channels (Set14's ``man``) is colour to
+            MATLAB. Scoring raises if this is on and the dataset yields no flag. Affects the
+            ``Y`` channel of the ``Y``/``YCbCr`` keys only. Default ``False``.
     """
 
     crop_border: int | None = 0
@@ -441,6 +457,8 @@ class SREvalConfig:
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
     self_ensemble: bool = False
     predict_scale: int | None = None
+    round_to_uint8: bool = False
+    grey_plane_scoring: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
@@ -487,6 +505,12 @@ class SREvalConfig:
                     f"SREvalConfig.{field_name} entries must be one of "
                     f"{list(valid)}; got unsupported {invalid}. Fix "
                     f"model.eval_config.init_args.{field_name} in your YAML."
+                )
+        for flag in ("round_to_uint8", "grey_plane_scoring"):
+            if not isinstance(getattr(self, flag), bool):
+                raise ValueError(
+                    f"SREvalConfig.{flag} must be a bool; got {getattr(self, flag)!r}. Fix "
+                    f"model.eval_config.init_args.{flag} in your YAML."
                 )
         if self.ssim_impl not in ("wang", "daala"):
             raise ValueError(

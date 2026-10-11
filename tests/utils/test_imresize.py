@@ -565,3 +565,82 @@ def test_resize_window_whole_output_matches_real_matlab_upscale_reference_data()
         if up_mine.shape != up_real.shape or not np.array_equal(up_mine, up_real):
             mismatches.append(f"{dataset}/{lr_path.stem} x{scale}")
     assert not mismatches, f"{len(mismatches)}/{len(cases)} mismatched: {mismatches[:10]}"
+
+
+# ---------------------------------------------------------------------------
+# resize_float -- the eval-only path that never re-quantizes (VDSR.m / demo_SR.m in single)
+# ---------------------------------------------------------------------------
+
+
+def _keys(x):
+    ax = np.abs(x)
+    return np.where(
+        ax <= 1,
+        1.5 * ax**3 - 2.5 * ax**2 + 1,
+        np.where(ax < 2, -0.5 * ax**3 + 2.5 * ax**2 - 4 * ax + 2, 0.0),
+    )
+
+
+def _reference_axis(line, out_len):
+    """One axis by the textbook formula, written per output pixel (no shared code with the port)."""
+    n = len(line)
+    scale = out_len / n
+    width = 4.0 / scale if scale < 1 else 4.0
+    out = np.empty(out_len)
+    for o in range(out_len):
+        centre = (o + 0.5) / scale - 0.5  # 0-based source coordinate
+        lo, hi = int(np.floor(centre - width / 2)) - 1, int(np.ceil(centre + width / 2)) + 1
+        taps = np.arange(lo, hi + 1)
+        w = (scale if scale < 1 else 1.0) * _keys((centre - taps) * (scale if scale < 1 else 1.0))
+        w = w / w.sum()
+        src = np.where(taps < 0, -taps - 1, taps)
+        src = np.where(src >= n, 2 * n - 1 - src, src)
+        out[o] = (w * line[src]).sum()
+    return out
+
+
+def test_resize_float_matches_a_per_pixel_textbook_reference_and_never_quantizes():
+    from sisr.utils.imresize import resize_float
+
+    rng = np.random.default_rng(3)
+    img = rng.uniform(0, 255, (12, 15, 2))
+    for shape in [(6, 7), (24, 30)]:
+        ref = np.stack(
+            [
+                np.stack(
+                    [
+                        _reference_axis(r, shape[1])
+                        for r in _reference_axis_cols(img[..., k], shape[0])
+                    ]
+                )
+                for k in range(2)
+            ],
+            -1,
+        )
+        got = resize_float(img, shape)
+        assert got.dtype == np.float64 and got.shape == (*shape, 2)
+        np.testing.assert_allclose(got, ref, atol=1e-9)
+        assert not np.allclose(got, np.round(got))  # not requantized
+
+
+def _reference_axis_cols(plane, out_rows):
+    return np.stack([_reference_axis(plane[:, j], out_rows) for j in range(plane.shape[1])], 1)
+
+
+def test_resize_float_does_not_clamp_overshoot():
+    from sisr.utils.imresize import resize_float
+
+    edge = np.zeros((8, 8, 1))
+    edge[:, 4:] = 255.0
+    out = resize_float(edge, (16, 16))
+    assert out.max() > 255.0 and out.min() < 0.0  # bicubic ringing survives
+
+
+def test_resize_float_stays_within_one_level_of_the_uint8_path_on_a_smooth_image():
+    from sisr.utils.imresize import resize, resize_float
+
+    yy, xx = np.mgrid[0:20, 0:24]
+    img = np.stack([yy * 9 + xx, xx * 8, yy * 6 + 20], -1).astype(np.uint8)
+    assert (
+        np.abs(resize_float(img.astype(np.float64), (10, 12)) - resize(img, (10, 12))).max() <= 1.0
+    )

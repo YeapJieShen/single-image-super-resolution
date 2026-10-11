@@ -1,5 +1,6 @@
 import csv
 import functools
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -3054,3 +3055,37 @@ def test_progress_bar_keeps_v_num_even_when_it_is_filtered_out():
 
     items = SRProgressBar(metrics=["psnr"]).get_metrics(_bar_trainer("abc-def", _BAR_METRICS), None)
     assert items["v_num"] == "abc-def"
+
+
+def test_benchmark_passes_each_images_grey_flag_to_scoring():
+    """A 3-element eval batch's ``is_grey`` reaches the scorer per image, not per batch."""
+    hr = torch.rand(1, 1, 8, 8).expand(2, 3, 8, 8).clone()  # the same image twice
+    sr = (hr + 0.02).clamp(0, 1)
+    pl_module = MagicMock()
+    eval_config = SREvalConfig(
+        crop_border=0, psnr_channels=["Y"], ssim_channels=[], grey_plane_scoring=True
+    )
+    pl_module.eval_config = eval_config
+    pl_module.predict_rgb = MagicMock(return_value=(sr, hr))
+    pl_module.scorer = SRScorer(eval_config)
+    cb = BenchmarkImageLogger()
+    cb._buffer["Set14"] = []
+    dataloaders = [
+        SimpleNamespace(
+            dataset=SimpleNamespace(img_paths=[Path("bridge.png"), Path("man.png")]), batch_size=2
+        )
+    ]
+
+    cb._collect_batch(
+        _make_step_axis_trainer(global_step=0, batches_that_stepped=0),
+        pl_module,
+        batch=(torch.rand(2, 3, 4, 4), hr, torch.tensor([True, False])),
+        batch_idx=0,
+        dataset_name="Set14",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+
+    bridge, man = cb._buffer["Set14"]
+    assert man.psnr["Y"] - bridge.psnr["Y"] == pytest.approx(20 * math.log10(255 / 219), abs=2e-3)

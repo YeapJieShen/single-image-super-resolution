@@ -155,6 +155,15 @@ Other fields: `crop_border`, `psnr_channels`, `ssim_channels`, `separate_psnr`,
 own 4-pixel shave on top of `crop_border`), and `lpips_net` — a LPIPS figure is only
 comparable under the same backbone.
 
+**Paper protocols.** Three independent switches reproduce what a paper's MATLAB does; each
+paper's template sets its own. `eval_config.round_to_uint8` rounds each scored plane to 8-bit
+levels before PSNR; `eval_config.grey_plane_scoring` (with `yield_is_grey: true` on every eval
+dataset) scores a single-channel image file on its raw plane instead of studio-range Y; and
+`float_degrade: true` on a `pre_upsampled.ValidationDataset` degrades the LR input in float
+with no uint8 re-quantization, as `VDSR.m` and `DRCN.m` do. All default off, so a config that
+names none of them scores exactly as before. A figure is comparable only to one computed under
+the same switches.
+
 ---
 
 ## The `data` block

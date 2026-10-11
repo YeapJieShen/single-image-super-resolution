@@ -33,9 +33,9 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torchmetrics.functional.image
 
-from ..colorspace import rgb_to_ycbcr_studio
+from ..colorspace import rgb_to_ycbcr, rgb_to_ycbcr_studio
 from .perceptual import perceptual_score
-from .ssim import daala_ssim
+from .ssim import daala_ssim, quantize_u8
 
 if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
     # runtime import would make this package depend on `sisr.training` — which
@@ -246,7 +246,7 @@ class SRScorer:
         return tuple(t[..., n:-n, n:-n] for t in tensors)
 
     def metric_tensors(
-        self, sr: torch.Tensor, hr: torch.Tensor
+        self, sr: torch.Tensor, hr: torch.Tensor, is_grey: torch.Tensor | None = None
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """Pre-compute ``(sr, hr)`` pairs for every tracked PSNR/SSIM key.
 
@@ -261,9 +261,14 @@ class SRScorer:
         Args:
             sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
             hr: Reference, same shape.
+            is_grey: ``(B,)`` bool, per image: the reference file is single-channel. Required
+                when ``grey_plane_scoring`` is on, ignored otherwise.
 
         Returns:
             ``key -> (sr_key, hr_key)``.
+
+        Raises:
+            ValueError: If ``grey_plane_scoring`` is on and ``is_grey`` is ``None``.
         """
         keys = set(self.eval_config.psnr_keys) | set(self.eval_config.ssim_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -277,12 +282,34 @@ class SRScorer:
         if keys & {"YCbCr", "Y", "Cb", "Cr"}:
             sr_ycc = rgb_to_ycbcr_studio(sr)
             hr_ycc = rgb_to_ycbcr_studio(hr)
+            if self.eval_config.grey_plane_scoring:
+                if is_grey is None:
+                    raise ValueError(
+                        "eval_config.grey_plane_scoring is on but no is_grey flag reached "
+                        "scoring: set yield_is_grey: true on every eval dataset."
+                    )
+                # A grey file's raw plane is its full-range Y (the weights sum to 1).
+                grey = is_grey.to(hr.device).view(-1, 1, 1, 1)
+                sr_ycc = torch.cat(
+                    [torch.where(grey, rgb_to_ycbcr(sr)[:, :1], sr_ycc[:, :1]), sr_ycc[:, 1:]], 1
+                )
+                hr_ycc = torch.cat(
+                    [torch.where(grey, rgb_to_ycbcr(hr)[:, :1], hr_ycc[:, :1]), hr_ycc[:, 1:]], 1
+                )
             tensors["YCbCr"] = (sr_ycc, hr_ycc)
             tensors["Y"] = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
             tensors["Cb"] = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])
             tensors["Cr"] = (sr_ycc[:, 2:3], hr_ycc[:, 2:3])
 
         return tensors
+
+    def _rounded(
+        self, pair: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The pair on the 8-bit grid when ``round_to_uint8`` is set, else as given (PSNR only)."""
+        if not self.eval_config.round_to_uint8:
+            return pair
+        return tuple(quantize_u8(t) / 255.0 for t in pair)  # type: ignore[return-value]
 
     @staticmethod
     def psnr(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
@@ -352,6 +379,7 @@ class SRScorer:
         *,
         crop: bool = True,
         scale: int | None = None,
+        is_grey: torch.Tensor | None = None,
     ) -> Scores:
         """Score one aligned pair across every metric the config requests.
 
@@ -362,6 +390,7 @@ class SRScorer:
                 caller has already cropped — scoring an uncropped pair silently
                 changes every number.
             scale: The pair's scale, for :meth:`crop` when the border is derived from it.
+            is_grey: Per-image single-channel-file flags, see :meth:`metric_tensors`.
 
         Returns:
             The metric values, untagged.
@@ -369,9 +398,9 @@ class SRScorer:
         if crop:
             sr_rgb, hr_rgb = self.crop(sr_rgb, hr_rgb, scale=scale)
 
-        tensors = self.metric_tensors(sr_rgb, hr_rgb)
+        tensors = self.metric_tensors(sr_rgb, hr_rgb, is_grey)
         return Scores(
-            psnr={k: self.psnr(*tensors[k]) for k in self.eval_config.psnr_keys},
+            psnr={k: self.psnr(*self._rounded(tensors[k])) for k in self.eval_config.psnr_keys},
             ssim={k: self.ssim(*tensors[k]) for k in self.eval_config.ssim_keys},
             perceptual={
                 name: self.perceptual(name, sr_rgb, hr_rgb)

@@ -378,7 +378,8 @@ class BenchmarkImageLogger(Callback):
         image-shaped is buffered**; only a ``BenchmarkSample`` is kept, for
         :meth:`_flush_buffer`'s per-set mean.
         """
-        lr_img, hr_img = batch
+        lr_img, hr_img = batch[0], batch[1]
+        is_grey = batch[2] if len(batch) > 2 else None
 
         with torch.no_grad():
             sr, hr_cropped = _sr(pl_module).predict_rgb(lr_img, hr_img, self_ensemble=self_ensemble)
@@ -409,7 +410,10 @@ class BenchmarkImageLogger(Callback):
             # pooling) and agreeing with validation_step only because this loop
             # slices one image at a time.
             scores = _sr(pl_module).scorer.score(
-                sr[i : i + 1], hr_cropped[i : i + 1], scale=getattr(dataset, "scale", None)
+                sr[i : i + 1],
+                hr_cropped[i : i + 1],
+                scale=getattr(dataset, "scale", None),
+                is_grey=None if is_grey is None else is_grey[i : i + 1],
             )
             # float(), not .item(): Scores carries either tensors (this path,
             # straight from the scorer) or plain floats (the means _flush_buffer
