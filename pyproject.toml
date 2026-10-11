@@ -71,8 +71,10 @@ export = [
     "onnx>=1.16",
     "onnxruntime>=1.19",
 ]
-# LPIPS only: DISTS needs only torchvision and ships in core.
-perceptual = ["lpips>=0.1"]
+# DISTS needs only torchvision and ships in core. pyiqa is here for Ma's score (and
+# so PI) only: its NIQE disagrees with the MATLAB release, so NIQE is native, and
+# needs SciPy just to read the release's pristine-model .mat.
+perceptual = ["lpips>=0.1", "pyiqa>=0.1.16", "scipy>=1.11"]
 
 [project.scripts]
 sisr = "sisr.cli:main"
@@ -140,4 +142,9 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # The optional [export] extra: unresolved in a [dev]-only install by design.
 module = ["onnx"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The optional [perceptual] extra: unresolved in a [dev]-only install by design.
+module = ["pyiqa", "scipy.*"]
 ignore_missing_imports = true
