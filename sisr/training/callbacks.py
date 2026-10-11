@@ -372,15 +372,17 @@ class BenchmarkImageLogger(Callback):
         # Optional only because Lightning declares the loader lists for every
         # stage; the hooks that call this one fire only while theirs is set.
         assert source_dataloaders is not None, "no dataloaders for the running stage"
-        dataset = source_dataloaders[dataloader_idx].dataset
-        batch_size = lr_img.size(0)
+        loader = source_dataloaders[dataloader_idx]
+        dataset = loader.dataset
+        loader_batch_size = loader.batch_size
+        current_batch_size = lr_img.size(0)
         # Resolved once per batch, and only when something will actually be
         # emitted — a trainer with no fit loop is legitimate when no TB logger
         # is attached, and the guard below already skips every emission then.
         step = _logger_step(trainer) if self._tb_experiment is not None else 0
 
-        for i in range(batch_size):
-            global_idx = batch_idx * batch_size + i
+        for i in range(current_batch_size):
+            global_idx = batch_idx * loader_batch_size + i
             filename = dataset.img_paths[global_idx].stem
 
             # One scorer object, shared with validation_step, so the two paths

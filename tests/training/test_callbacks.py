@@ -117,7 +117,9 @@ def test_benchmark_logs_on_the_batch_counted_axis_not_global_step():
     cb._buffer["Set5"] = []
     cb._tb_experiment = MagicMock()
     trainer = _make_step_axis_trainer(global_step=400, batches_that_stepped=200)
-    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+    dataloaders = [
+        SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]), batch_size=1)
+    ]
 
     cb._collect_batch(
         trainer,
@@ -155,7 +157,9 @@ def test_benchmark_psnr_routes_through_the_module_not_torchmetrics_directly():
     cb._buffer["Set5"] = []
     pl_module = _make_benchmark_pl_module()
     pl_module.scorer.psnr = MagicMock(return_value=torch.tensor(42.0))
-    dataloaders = [SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]))]
+    dataloaders = [
+        SimpleNamespace(dataset=SimpleNamespace(img_paths=[Path("baby.png")]), batch_size=1)
+    ]
 
     cb._collect_batch(
         trainer=_make_step_axis_trainer(global_step=2, batches_that_stepped=1),
@@ -189,6 +193,55 @@ def test_the_two_psnr_reductions_genuinely_differ_above_batch_size_one():
         sr, hr, data_range=1.0, dim=(1, 2, 3), reduction="elementwise_mean"
     )
     assert pooled.item() != pytest.approx(per_image.item())
+
+
+def test_collect_batch_partial_last_batch_does_not_reuse_earlier_filename():
+    """Regression for #272.
+
+    Pre-fix, `_collect_batch` derived `global_idx` from the CURRENT batch's own
+    tensor size (`lr_img.size(0)`) rather than the dataloader's *configured*
+    `batch_size`. For a 3-image set at a configured batch size of 2 (batches of
+    2 then 1), the partial last batch's local `batch_size` was 1, so
+    `global_idx = batch_idx * batch_size + i = 1 * 1 + 0 = 1` -- reusing image
+    1's filename for image 2, and image 2's own filename was never produced.
+    """
+    cb = BenchmarkImageLogger()
+    cb._buffer["Set5"] = []
+    pl_module = _make_benchmark_pl_module()
+    # Identity, not the fixture's fixed 1x3x8x8 return: this test calls
+    # _collect_batch with batches of size 2 and 1, so predict_rgb's output
+    # shape must track its input shape.
+    pl_module.predict_rgb = lambda lr, hr: (lr, hr)
+
+    ds = _stub_dataset_with_img_paths(n=3, name="Set5")
+    # batch_size=2 is the LOADER's configured size -- distinct from either
+    # call's actual tensor size below (2, then 1).
+    dataloaders = [_stub_dataloader(ds, batch_size=2)]
+    trainer = _make_step_axis_trainer(global_step=0, batches_that_stepped=0)
+
+    cb._collect_batch(
+        trainer=trainer,
+        pl_module=pl_module,
+        batch=(torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)),
+        batch_idx=0,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+    cb._collect_batch(
+        trainer=trainer,
+        pl_module=pl_module,
+        batch=(torch.rand(1, 3, 8, 8), torch.rand(1, 3, 8, 8)),
+        batch_idx=1,
+        dataset_name="Set5",
+        source_dataloaders=dataloaders,
+        dataloader_idx=0,
+        should_log_images=False,
+    )
+
+    filenames = [s.filename for s in cb._buffer["Set5"]]
+    assert filenames == ["Set5_000", "Set5_001", "Set5_002"]
 
 
 # ---------------------------------------------------------------------------
@@ -1452,8 +1505,8 @@ def _stub_dataset_with_img_paths(n: int, name: str) -> SimpleNamespace:
     return SimpleNamespace(img_paths=paths)
 
 
-def _stub_dataloader(dataset) -> SimpleNamespace:
-    return SimpleNamespace(dataset=dataset)
+def _stub_dataloader(dataset, batch_size: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(dataset=dataset, batch_size=batch_size)
 
 
 def test_benchmark_validation_batch_end_skips_primary_loader():
