@@ -84,6 +84,7 @@ means writing a network and a config dataclass, not a new Lightning module. See
 | SRCNN | [Dong et al. 2015](https://arxiv.org/pdf/1501.00092) | pre-upsampled to HR size | none, same-resolution refinement |
 | SRResNet | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | true low-resolution | ×scale sub-pixel convolution |
 | ESPCN | [Shi et al. 2016](https://arxiv.org/pdf/1609.05158) | true low-resolution | ×scale sub-pixel convolution; built and smoke-tested, not yet reproduced |
+| DRCN | [Kim et al. 2016](https://arxiv.org/abs/1511.04491) | pre-upsampled to HR size | none, same-resolution refinement; 16 shared recursions with recursive supervision; official weights ported; PSNR-Y on Set5, Set14 and BSD100 at x2/x3/x4 within 0.05 dB of the paper |
 | SRGAN | [Ledig et al. 2017](https://arxiv.org/pdf/1609.04802) | true low-resolution | ×scale sub-pixel convolution |
 
 SRGAN's network *is* SRResNet — only how it is trained differs. See [SRGAN](#srgan).

@@ -1,0 +1,176 @@
+# DRCN -- Kim et al., deeply-recursive CNN, pre-upsampled LR, Y-channel only.
+# Built and smoke-tested. The ported official weights reproduce the paper's PSNR-Y (see the
+# README); this training recipe is NOT yet reproduced. The paper states no alpha schedule and no
+# step budget (both assumed below), and it trains on Yang's 91 images where this template uses
+# DIV2K. Its lr decay on a validation plateau is not reproduced.
+# Settings are explained in docs/configuration.md. Config files must stay ASCII.
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+optimizer:
+  class_path: torch.optim.SGD
+  init_args:
+    lr: 1.0e-2         # the paper's initial LR
+    momentum: 0.9
+    weight_decay: 1.0e-4   # the paper's beta
+
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.drcn.DRCN
+        init_args:
+          in_out_channels: 1                 # Y channel only
+          features: 256
+          recursions: 16
+      # alpha * recursive + (1 - alpha) * final. The paper gives no alpha schedule;
+      # ASSUMPTION: linear 1 -> 0 over the run (the two LossWeightScheduler callbacks below).
+      criterion:
+        class_path: sisr.losses.WeightedSumLoss
+        init_args:
+          terms:
+            recursive:
+              class_path: sisr.models.drcn.RecursiveSupervisionLoss
+            final:
+              class_path: torch.nn.MSELoss
+          weights:
+            recursive: 1.0
+            final: 0.0
+      processor:
+        class_path: sisr.processors.YChannelProcessor
+      training_config:
+        class_path: sisr.models.drcn.DRCNTrainingConfig
+        init_args:
+          scale: &scale 3
+          # ASSUMPTION, borrowed from VDSR: clip to theta / lr (gradient_clip_val below). The DRCN
+          # paper states no clipping; drop both lines to train exactly as it describes.
+          scale_clip_with_lr: true
+          example_input_shape: [1, 41, 41]
+      # Defaults to ssim_impl: wang, the field standard.
+      eval_config:
+        class_path: sisr.models.drcn.DRCNEvalConfig
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.pre_upsampled.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      subimg_size: 41       # the paper's 41x41 patches
+      stride: 21
+      scale: *scale
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.pre_upsampled.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+    Set14:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+    BSD100:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+  train_dataloader_kwargs:
+    batch_size: 64          # the paper's mini-batch of 64 patches
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  # The paper states no step budget. ASSUMPTION: 200000 steps; the LossWeightScheduler
+  # durations below must equal it.
+  max_steps: 200000
+  val_check_interval: 10000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 100
+  # ASSUMPTION: the theta / lr clipping scheme is VDSR's; theta = 0.01 is this template's own
+  # choice. Neither paper states a value, and the DRCN paper states no gradient clipping.
+  gradient_clip_val: 0.01
+  gradient_clip_algorithm: value
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  # bf16-mixed measured as a REGRESSION at these batch sizes. See the docs.
+  # precision: bf16-mixed
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.LossWeightScheduler
+      init_args:
+        term: recursive
+        start_value: 1.0
+        end_value: 0.0
+        duration: 200000
+    - class_path: sisr.training.LossWeightScheduler
+      init_args:
+        term: final
+        start_value: 0.0
+        end_value: 1.0
+        duration: 200000
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-ssim
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-weights-ssim
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        every_n_batches: 1000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: DRCN
+          version: baseline
+        log_graph: false   # TensorBoard graph tracing cannot serialise the model's output record
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest

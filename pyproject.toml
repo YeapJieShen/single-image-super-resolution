@@ -65,6 +65,8 @@ dev = [
     "mypy>=1.11",
     # Declared again outside build-isolation: the packaging test builds a real wheel.
     "hatchling>=1.27",
+    # The DRCN port's layout tests write and read synthetic MatConvNet .mat files.
+    "scipy>=1.11",
 ]
 # Opt-in, and deliberately without onnxscript: to_onnx() pins dynamo=False.
 export = [
@@ -75,6 +77,9 @@ export = [
 # so PI) only: its NIQE disagrees with the MATLAB release, so NIQE is native, and
 # needs SciPy just to read the release's pristine-model .mat.
 perceptual = ["lpips>=0.1", "pyiqa>=0.1.16", "scipy>=1.11"]
+# SciPy only reads MatConvNet .mat files for sisr.models.drcn.port (official DRCN weights);
+# perceptual already pulls it, but loading weights should not need LPIPS/pyiqa.
+weights = ["scipy>=1.11"]
 
 [project.scripts]
 sisr = "sisr.cli:main"

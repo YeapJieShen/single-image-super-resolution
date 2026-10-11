@@ -343,3 +343,29 @@ def test_to_onnx_plain_model_initializer_names_have_no_wrapped_prefix(
 
     wrapped_names = {name for name in initializer_names if name.startswith("wrapped.")}
     assert not wrapped_names
+
+
+def test_to_onnx_exports_a_real_drcn_with_its_recursions_unrolled(tmp_path):
+    """The shipped record-returning model, not a stand-in: the exported graph
+    must reproduce DRCN's ensemble output, whatever the input size."""
+    from sisr.models.drcn import DRCN, DRCNTrainingConfig
+
+    torch.manual_seed(0)
+    model = DRCN(in_out_channels=1, features=8, recursions=3)
+    with torch.no_grad():
+        model.ensemble.copy_(torch.tensor([0.5, 0.3, 0.1, 0.4]))
+    module = SRLightning(
+        model=model,
+        processor=YChannelProcessor(),
+        training_config=DRCNTrainingConfig(example_input_shape=(1, 16, 16), scale=2),
+    )
+    onnx_path = tmp_path / "drcn.onnx"
+
+    to_onnx(module, onnx_path)
+
+    model.eval()
+    for size in [(16, 16), (20, 24)]:
+        x = torch.rand(1, 1, *size)
+        with torch.no_grad():
+            expected = model(x).primary.numpy()
+        np.testing.assert_allclose(_run_ort(onnx_path, x), expected, atol=1e-4, rtol=1e-3)
