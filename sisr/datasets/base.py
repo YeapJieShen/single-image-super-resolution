@@ -14,7 +14,7 @@ torch-free :mod:`~sisr.datasets.hr_cache`, because it subclasses
 """
 
 import abc
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,6 +25,25 @@ from PIL import Image
 from ..utils.cache import LMDBCache, LMDBCacheBuildContext
 from . import derived_cache
 from .hr_cache import CACHE_NAME, FORMAT_TAG, HEADER, compute_checksum, estimate_map_size
+
+
+def as_scales(scale: int | Sequence[int]) -> tuple[int, ...]:
+    """Normalise a dataset's ``scale`` argument to a non-empty tuple of distinct positive ints.
+
+    The one owner of what a train dataset's ``scale`` may be: a single factor, or
+    several for multi-scale training.
+
+    Raises:
+        ValueError: If it is empty, holds a non-positive or non-int entry, or repeats one.
+    """
+    scales = (scale,) if isinstance(scale, int) else tuple(scale)
+    if (
+        not scales
+        or any(not isinstance(s, int) or isinstance(s, bool) or s < 1 for s in scales)
+        or len(set(scales)) != len(scales)
+    ):
+        raise ValueError(f"scale must be a positive int or a list of distinct ones; got {scale!r}.")
+    return scales
 
 
 class SRDataset(torch.utils.data.Dataset, abc.ABC):
@@ -86,6 +105,16 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         return np.array(Image.open(path).convert("RGB"))
 
     @staticmethod
+    def _is_grey_file(path: str | Path) -> torch.Tensor:
+        """Whether ``path`` is a single-channel image on disk (PIL mode ``L``), as a 0-dim bool.
+
+        The file mode, not the pixel values: an RGB file whose channels happen to be equal
+        (Set14's ``man``) is a colour image to MATLAB, which reads it with three channels.
+        """
+        with Image.open(path) as img:
+            return torch.tensor(img.mode == "L")
+
+    @staticmethod
     def _to_tensor(image: np.ndarray) -> torch.Tensor:
         """Converts a ``uint8`` HWC array to a ``float32`` CHW ``[0, 1]`` tensor.
 
@@ -100,10 +129,11 @@ class SRDataset(torch.utils.data.Dataset, abc.ABC):
         """Return the number of items the dataset serves."""
 
     @abc.abstractmethod
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...] | torch.Tensor:
         """Return the ``(lr_tensor, hr_tensor)`` pair at ``idx``.
 
-        Paired train/validation datasets return the tuple; prediction-only
+        Paired train/validation datasets return the tuple (an eval dataset may append an
+        ``is_grey`` flag); prediction-only
         datasets (no ground-truth HR to pair with) return a lone LR tensor —
         see :class:`~sisr.datasets.predict.PredictDataset`.
         """
@@ -129,7 +159,9 @@ class HRCachedTrainDataset(SRDataset):
 
     Args:
         img_dir: Directory of HR images.
-        scale: Upscaling factor the derived plane is built for.
+        scale: Upscaling factor the derived plane is built for, or several: one
+            derived cache is built per scale, and :meth:`_read_derived` takes the
+            scale to read. The first one is the default.
         derived_kind: Which plane to derive — see
             :data:`~sisr.datasets.derived_cache.KINDS`.
         use_tqdm: Whether to display a progress bar during the LMDB build.
@@ -146,7 +178,7 @@ class HRCachedTrainDataset(SRDataset):
     def __init__(
         self,
         img_dir: str | Path,
-        scale: int,
+        scale: int | Sequence[int],
         derived_kind: str,
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
@@ -173,20 +205,35 @@ class HRCachedTrainDataset(SRDataset):
         # A sibling database in the same directory, not a second value in the one
         # above: that cache's checksum deliberately ignores every derivation
         # parameter, so a scale-dependent plane stored there would never be
-        # invalidated by a scale change.
-        self._derived = LMDBCache(
+        # invalidated by a scale change. One per scale, each keyed by its own.
+        scales = [scale] if isinstance(scale, int) else list(scale)
+        self._derived_caches: dict[int, LMDBCache] = {
+            s: self._make_derived_cache(cache_dir, derived_kind, s, use_tqdm) for s in scales
+        }
+        self._derived_default_scale = scales[0]
+
+    @property
+    def _derived(self) -> LMDBCache:
+        """The default (first) scale's derived cache."""
+        return self._derived_caches[self._derived_default_scale]
+
+    def _make_derived_cache(
+        self, cache_dir: Path, kind: str, scale: int, use_tqdm: bool
+    ) -> LMDBCache:
+        """Builds the sibling LMDB cache holding the *kind* plane derived at *scale*."""
+        return LMDBCache(
             cache_dir=cache_dir,
-            name=derived_cache.cache_name(derived_kind, scale),
-            checksum=derived_cache.compute_checksum(self.img_paths, derived_kind, scale),
+            name=derived_cache.cache_name(kind, scale),
+            checksum=derived_cache.compute_checksum(self.img_paths, kind, scale),
             length=len(self.img_paths),
-            map_size=derived_cache.estimate_map_size(self._img_sizes, derived_kind, scale),
-            metadata={"format": derived_cache.cache_name(derived_kind, scale)},
+            map_size=derived_cache.estimate_map_size(self._img_sizes, kind, scale),
+            metadata={"format": derived_cache.cache_name(kind, scale)},
             build_fn=lambda ctx: ctx.parallel_build(
                 items=self.img_paths,
                 process_fn=derived_cache.process_derived_image,
-                process_args=[(i, derived_kind, scale) for i in range(len(self.img_paths))],
+                process_args=[(i, kind, scale) for i in range(len(self.img_paths))],
                 num_workers=self.build_num_workers,
-                desc=f"Building {derived_kind} cache (x{scale})",
+                desc=f"Building {kind} cache (x{scale})",
             ),
             use_tqdm=use_tqdm,
         )
@@ -262,7 +309,7 @@ class HRCachedTrainDataset(SRDataset):
             yield np.frombuffer(buf, dtype=np.uint8, offset=HEADER.size).reshape(h, w, 3)
 
     @contextmanager
-    def _read_derived(self, img_idx: int) -> Iterator[np.ndarray]:
+    def _read_derived(self, img_idx: int, scale: int | None = None) -> Iterator[np.ndarray]:
         """Yields the cached derived plane at ``img_idx`` as an ``(H, W, 3)`` uint8 view.
 
         Same zero-copy contract as :meth:`_read_hr` — the view is valid only
@@ -270,12 +317,17 @@ class HRCachedTrainDataset(SRDataset):
         image, so a slice of it is what the reference pipelines produce and a
         degraded slice of :meth:`_read_hr` is not.
 
+        Args:
+            img_idx: Index into :attr:`img_paths`.
+            scale: Which scale's plane; ``None`` is the first scale given.
+
         Raises:
             KeyError: If the backing LMDB entry is missing (a corrupt or
                 incomplete cache).
         """
         key = f"{self._derived_kind}_{img_idx:08d}"
-        with self._derived.get_buffer(key) as buf:
+        cache = self._derived_caches[self._derived_default_scale if scale is None else scale]
+        with cache.get_buffer(key) as buf:
             if buf is None:
                 raise KeyError(key)
             h, w = derived_cache.HEADER.unpack_from(buf, 0)

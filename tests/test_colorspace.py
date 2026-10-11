@@ -163,3 +163,35 @@ def test_chroma_channels_use_the_224_scale_not_the_luma_scale():
 
         delta = (_psnr(sr_studio, hr_studio) - _psnr(sr_full, hr_full)).item()
         assert delta == pytest.approx(expected_chroma_delta, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# rgb_to_y_studio / studio_y_to_full_y — the studio luma a MATLAB-trained net is fed
+# ---------------------------------------------------------------------------
+
+
+def test_rgb_to_y_studio_is_the_studio_y_plane():
+    from sisr.colorspace import rgb_to_y_studio
+
+    x = torch.rand(2, 3, 6, 7)
+    out = rgb_to_y_studio(x)
+    assert out.shape == (2, 1, 6, 7)
+    torch.testing.assert_close(out, rgb_to_ycbcr_studio(x)[:, :1], atol=1e-6, rtol=0)
+
+
+def test_rgb_to_y_studio_pins_the_matlab_endpoints():
+    from sisr.colorspace import rgb_to_y_studio
+
+    black, white = torch.zeros(1, 3, 2, 2), torch.ones(1, 3, 2, 2)
+    assert torch.allclose(rgb_to_y_studio(black), torch.tensor(16 / 255), atol=1e-6)
+    assert torch.allclose(rgb_to_y_studio(white), torch.tensor(235 / 255), atol=1e-6)
+
+
+def test_studio_y_to_full_y_inverts_the_rescale():
+    from sisr.colorspace import rgb_to_y_studio, studio_y_to_full_y
+
+    x = torch.rand(2, 3, 5, 5)
+    torch.testing.assert_close(
+        studio_y_to_full_y(rgb_to_y_studio(x)), rgb_to_ycbcr(x)[:, :1], atol=1e-6, rtol=0
+    )
+    assert torch.allclose(studio_y_to_full_y(torch.tensor(16 / 255)), torch.tensor(0.0), atol=1e-7)

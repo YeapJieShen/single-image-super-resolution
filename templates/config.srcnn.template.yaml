@@ -34,10 +34,13 @@ model:
       # Defaults to ssim_impl: wang, the field standard.
       eval_config:
         class_path: sisr.models.srcnn.SRCNNEvalConfig
+        init_args:
+          # Dong et al.'s released demo_SR.m rounds Y and the reconstruction to uint8 before PSNR.
+          round_to_uint8: true
 
 data:
   train_dataset:
-    class_path: sisr.datasets.srcnn.TrainDataset
+    class_path: sisr.datasets.pre_upsampled.TrainDataset
     init_args:
       img_dir: data/DIV2K_train_HR
       subimg_size: 33
@@ -46,23 +49,23 @@ data:
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
-    class_path: sisr.datasets.srcnn.ValidationDataset
+    class_path: sisr.datasets.pre_upsampled.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
   test_datasets:
     Set5:
-      class_path: sisr.datasets.srcnn.ValidationDataset
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
     Set14:
-      class_path: sisr.datasets.srcnn.ValidationDataset
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
     BSD100:
-      class_path: sisr.datasets.srcnn.ValidationDataset
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale

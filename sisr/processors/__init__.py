@@ -2,6 +2,7 @@
 
 from .base import SRProcessor
 from .rgb import RGBProcessor, RGBSignedOutputProcessor
+from .studio_y_channel import StudioYChannelProcessor
 from .y_channel import YChannelProcessor
 from .ycbcr import YCbCrProcessor
 
@@ -9,6 +10,7 @@ __all__ = [
     "SRProcessor",
     "RGBProcessor",
     "RGBSignedOutputProcessor",
+    "StudioYChannelProcessor",
     "YChannelProcessor",
     "YCbCrProcessor",
 ]
