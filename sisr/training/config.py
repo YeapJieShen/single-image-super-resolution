@@ -6,7 +6,9 @@ controls validation/test scoring only (border exclusion, metric colorspaces).
 
 Per-architecture defaults live in subclasses next to the model code (e.g.
 ``sisr.models.srcnn.SRCNNTrainingConfig``); YAML picks one via ``class_path``
-on ``model.training_config`` / ``model.eval_config``.
+on ``model.training_config`` / ``model.eval_config``. ``AdversarialTrainingConfig``
+is the one exception: a training-paradigm base, not tied to one architecture,
+so it lives here directly.
 
 The model's training colorspace is not a field here — it is the choice of
 processor (see ``sisr.processors``).
@@ -247,6 +249,64 @@ class SRTrainingConfig:
         dummy = torch.zeros(1, *self.example_input_shape)
         with torch.no_grad():
             model(dummy)
+
+
+@dataclass
+class AdversarialTrainingConfig(SRTrainingConfig):
+    """Generic training defaults for an adversarially-trained generator.
+
+    Any adversarial training paradigm (SRGAN's non-saturating GAN, a future
+    relativistic-average one, ...) subclasses this rather than a specific
+    architecture's training config, so these fields are validated by a shared
+    contract instead of by inheriting an unrelated architecture's own
+    hyperparameter names (e.g. SRResNet's ``in_out_channels`` correlation
+    check, which a non-SRResNet generator would not have).
+
+    Args:
+        init_from: Bare-weights ``.safetensors`` to initialise the generator
+            from. Ledig et al.'s SRGAN starts an adversarial run from an
+            MSE-trained generator; unset trains from scratch, which tests and
+            smoke runs use.
+
+        adversarial_weight: Weight on the generator's adversarial term;
+            ``1e-3`` is Ledig's SRGAN value. Total is
+            ``content + adversarial_weight * adversarial``, where content is
+            whatever ``criterion`` the module was given.
+
+        d_steps_per_g_step: Goodfellow's ``k``. ``1`` is Ledig's alternation.
+
+    Raises:
+        ValueError: If ``d_steps_per_g_step`` is below 1, or
+            ``adversarial_weight`` is negative.
+    """
+
+    init_from: str | None = None
+    adversarial_weight: float = 1e-3
+    d_steps_per_g_step: int = 1
+
+    def __post_init__(self) -> None:
+        """Reject settings this training mode cannot honour.
+
+        ``super()`` first: an override that skips it leaves the base class's
+        ``compile_mode``/``compile_backend`` guard dead for every subclass.
+
+        Raises:
+            ValueError: If ``d_steps_per_g_step`` is below 1, if
+                ``adversarial_weight`` is negative, or for anything the
+                inherited validation rejects.
+        """
+        super().__post_init__()
+        if self.d_steps_per_g_step < 1:
+            raise ValueError(f"d_steps_per_g_step must be >= 1; got {self.d_steps_per_g_step}.")
+        if self.adversarial_weight < 0:
+            raise ValueError(
+                f"adversarial_weight must be >= 0; got {self.adversarial_weight}. "
+                "The generator minimises `content + adversarial_weight * adversarial`, so a "
+                "negative weight inverts the adversarial term and trains the generator to "
+                "look MORE fake to the discriminator. Zero is legitimate -- it is the "
+                "content-only ablation. Fix "
+                "model.training_config.init_args.adversarial_weight in your YAML."
+            )
 
 
 @dataclass

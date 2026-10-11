@@ -25,9 +25,9 @@ from lightning_utilities.core.rank_zero import rank_zero_info
 from .. import artifacts
 from ..losses import AdversarialLoss
 from ..models.base import SRModel
-from ..models.srgan import SRDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
+from ..models.srgan import AdversarialDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from ..processors import SRProcessor
-from .config import SREvalConfig
+from .config import AdversarialTrainingConfig, SREvalConfig
 from .lightning_module import SRLightning
 from .metadata import build_metadata, class_path
 
@@ -69,14 +69,14 @@ class SRGANLightning(SRLightning):
             (``[-1, 1]`` under
             :class:`~sisr.processors.RGBSignedOutputProcessor`), not display
             range. Required.
-        discriminator: The critic, normally
-            :class:`~sisr.models.srgan.SRDiscriminator`. Emits logits; it is
-            paired with an ``adversarial_loss`` that applies the sigmoid
+        discriminator: An :class:`~sisr.models.srgan.AdversarialDiscriminator`,
+            normally :class:`~sisr.models.srgan.SRDiscriminator`. Emits logits;
+            it is paired with an ``adversarial_loss`` that applies the sigmoid
             itself. Required.
-        training_config: Defaults to :class:`SRGANTrainingConfig`, which
-            supplies ``adversarial_weight`` and ``d_steps_per_g_step`` — both
-            read by :meth:`training_step` — plus ``init_from`` (read by
-            :meth:`setup`, on ``fit`` only).
+        training_config: An :class:`AdversarialTrainingConfig` subclass,
+            defaults to :class:`SRGANTrainingConfig`. Supplies ``adversarial_weight``
+            and ``d_steps_per_g_step`` — both read by :meth:`training_step` — plus
+            ``init_from`` (read by :meth:`setup`, on ``fit`` only).
         eval_config: Defaults to :class:`SRGANEvalConfig` (SRResNet's scoring
             plus perceptual metrics, which are the only metrics that track what
             an adversarial objective optimises).
@@ -108,14 +108,14 @@ class SRGANLightning(SRLightning):
     # Narrowed from SRLightning's SRTrainingConfig. __init__ already refuses anything
     # else at construction, so this records a guarantee the class enforces rather than
     # adding one -- and it is what lets the adversarial-only fields below be read.
-    training_config: SRGANTrainingConfig
+    training_config: AdversarialTrainingConfig
 
     def __init__(
         self,
         model: SRModel,
         processor: SRProcessor,
-        discriminator: SRDiscriminator,
-        training_config: SRGANTrainingConfig | None = None,
+        discriminator: AdversarialDiscriminator,
+        training_config: AdversarialTrainingConfig | None = None,
         eval_config: SREvalConfig | None = None,
         criterion: torch.nn.Module | None = None,
         optimizer: OptimizerCallable = torch.optim.Adam,
@@ -136,18 +136,18 @@ class SRGANLightning(SRLightning):
         # The type hint is not enforced at runtime, and everything this module
         # asserts about its config rests on the subclass: the base carries no
         # adversarial_weight/d_steps_per_g_step.
-        if not isinstance(self.training_config, SRGANTrainingConfig):
+        if not isinstance(self.training_config, AdversarialTrainingConfig):
             raise TypeError(
-                f"training_config must be an SRGANTrainingConfig, got "
+                f"training_config must be an AdversarialTrainingConfig, got "
                 f"{type(self.training_config).__name__}. This module reads "
                 f"adversarial_weight and d_steps_per_g_step off it on every step."
             )
 
-        # The correlated check SRGANTrainingConfig.validate_against cannot do:
+        # The correlated check training_config.validate_against cannot do:
         # its (model, processor) signature never sees the discriminator.
-        if discriminator.hparams["in_channels"] != processor.model_channels:
+        if discriminator.in_channels != processor.model_channels:
             raise ValueError(
-                f"SRDiscriminator in_channels={discriminator.hparams['in_channels']} does "
+                f"discriminator in_channels={discriminator.in_channels} does "
                 f"not match {type(processor).__name__}.model_channels="
                 f"{processor.model_channels}. The discriminator scores the generator's "
                 f"output in model space, so it must accept the same channel count the "
@@ -295,7 +295,7 @@ class SRGANLightning(SRLightning):
         Raises:
             ValueError: If ``training_config.layer_lrs`` is set.
         """
-        # Inherited through SRResNetTrainingConfig, so YAML can set it; this
+        # Inherited from the base SRTrainingConfig, so YAML can set it; this
         # override never reads it, and a silent uniform-LR fallback is the one
         # unsignalled misconfiguration in a module that refuses four others.
         if self.training_config.layer_lrs is not None:
@@ -370,6 +370,16 @@ class SRGANLightning(SRLightning):
         the generator's backward then flows through a second, fresh
         discriminator forward. No ``retain_graph`` is needed anywhere.
 
+        ``generator_loss`` also receives the real-branch logits computed for
+        ``d_loss`` (detached) rather than a fresh forward: a second forward through
+        the discriminator's BatchNorm layers would update its running statistics an
+        extra time every step, for every loss including the non-saturating one that
+        never reads them. A relativistic subclass therefore sees the **pre-update**
+        discriminator's read of the real batch, one alternation behind the fresh
+        fake-branch forward it is compared against. A training-paradigm subclass
+        can override :meth:`training_step` to compute ``logits_real`` fresh
+        instead, at the cost of an extra discriminator forward.
+
         Args:
             batch: ``(lr_img, hr_img)`` tuple from the train loader. Both RGB,
                 ``float32`` in ``[0, 1]``.
@@ -387,8 +397,9 @@ class SRGANLightning(SRLightning):
         hr_for_loss = self.processor.extract_target(hr_cropped)
 
         self.toggle_optimizer(opt_d)
+        logits_real = self.discriminator(hr_for_loss)
         d_loss = self.adversarial_loss.discriminator_loss(
-            self.discriminator(hr_for_loss), self.discriminator(sr.detach())
+            logits_real, self.discriminator(sr.detach())
         )
         opt_d.zero_grad()
         self.manual_backward(d_loss)
@@ -410,7 +421,9 @@ class SRGANLightning(SRLightning):
         # gradient either way (also measured).
         self.toggle_optimizer(opt_g)
         content = self.criterion(sr, hr_for_loss)
-        adversarial = self.adversarial_loss.generator_loss(self.discriminator(sr))
+        adversarial = self.adversarial_loss.generator_loss(
+            logits_real.detach(), self.discriminator(sr)
+        )
         g_loss = content + self.training_config.adversarial_weight * adversarial
         opt_g.zero_grad()
         self.manual_backward(g_loss)
@@ -577,7 +590,9 @@ class SRGANLightning(SRLightning):
         """
         if source != "train_dataset":
             return
-        declared = self.discriminator.hparams["hr_input_size"]
+        declared = self.discriminator.input_size
+        if declared is None:
+            return
         was_training = self.training
         self.eval()
         try:
@@ -589,7 +604,7 @@ class SRGANLightning(SRLightning):
         if actual == (declared, declared):
             return
         raise ValueError(
-            f"discriminator hr_input_size={declared} does not match the HR crop it "
+            f"discriminator input_size={declared} does not match the HR crop it "
             f"would score ({actual[0]}x{actual[1]}) for the samples data.{source} "
             f"serves ({tuple(hr.shape[-2:])} before {type(self.model).__name__}'s "
             f"output size crops it). The discriminator's dense head fixes its input "

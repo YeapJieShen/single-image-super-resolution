@@ -180,10 +180,11 @@ from scratch, which is not the paper's recipe (`--...init_from=null` on the comm
 does not work — jsonargparse coerces it to the string `'None'`). A dotted CLI override
 of one field is safe on `training_config` here but not on `eval_config`, and the
 difference is the annotation each argument carries, not the field. `SRGANLightning`
-types `training_config` as `SRGANTrainingConfig | None`, so the bare-annotation rebuild
+types `training_config` as `AdversarialTrainingConfig | None`. Bare-annotation rebuilds
 described under
-[Config overrides and subclass defaults](#config-overrides-and-subclass-defaults) lands
-back on the subclass itself — overriding `adversarial_weight` or `d_steps_per_g_step`
+[Config overrides and subclass defaults](#config-overrides-and-subclass-defaults) land
+on that base class by default; the YAML template's `class_path` is what pins it to
+`SRGANTrainingConfig` — overriding `adversarial_weight` or `d_steps_per_g_step`
 alone costs nothing. `eval_config` is still typed at the base `SREvalConfig | None`,
 exactly as it is on `SRLightning`, so a dotted override of one of its fields reverts the
 rest: `perceptual_metrics` empties — silently removing the only metric family that
