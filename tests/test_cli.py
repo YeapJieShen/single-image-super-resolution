@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 SRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.srgan.template.yaml"
+ESRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.esrgan.template.yaml"
 
 _ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*:UserWarning")
 
@@ -29,7 +30,7 @@ _ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*
 def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
     """Extra ``--config`` overlay a template needs to resolve off a training box.
 
-    Only the SRGAN template needs one; every other template resolves as shipped.
+    Only the two GAN templates (SRGAN, ESRGAN) need one; every other template resolves as shipped.
     Written as an overlay rather than ``--key=null`` because jsonargparse coerces
     a ``null`` CLI value for a ``str | None`` field to the *string* ``'None'``,
     which is exactly the silent-wrong-value class these two settings guard.
@@ -39,19 +40,35 @@ def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
     ``criterion.weights`` would otherwise download ~548 MB of VGG19 weights just
     to resolve a config; ``null`` builds a random VGG (and warns).
     """
-    if template_path.name != SRGAN_TEMPLATE.name:
+    if template_path.name == ESRGAN_TEMPLATE.name:
+        criterion: dict = {
+            "class_path": "sisr.losses.WeightedSumLoss",
+            "init_args": {
+                "terms": {
+                    "vgg": {
+                        "class_path": "sisr.losses.VGG19FeatureLoss",
+                        "init_args": {"layer": "vgg54", "before_activation": True, "weights": None},
+                    },
+                    "l1": {"class_path": "torch.nn.L1Loss"},
+                },
+                "weights": {"vgg": 1.0, "l1": 0.01},
+            },
+        }
+    elif template_path.name == SRGAN_TEMPLATE.name:
+        criterion = {
+            "class_path": "sisr.losses.VGG19FeatureLoss",
+            "init_args": {"layer": "vgg54", "weights": None},
+        }
+    else:
         return []
-    overlay = tmp_path / "srgan_offline_overlay.yaml"
+    overlay = tmp_path / "gan_offline_overlay.yaml"
     overlay.write_text(
         yaml.safe_dump(
             {
                 "model": {
                     "init_args": {
                         "training_config": {"init_args": {"init_from": None}},
-                        "criterion": {
-                            "class_path": "sisr.losses.VGG19FeatureLoss",
-                            "init_args": {"layer": "vgg54", "weights": None},
-                        },
+                        "criterion": criterion,
                     }
                 }
             },
