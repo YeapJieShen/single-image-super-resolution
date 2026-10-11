@@ -170,7 +170,8 @@ def test_shared_cache_pixel_equivalence_across_architectures(varied_size_rgb_ima
     refuses to open the same environment path twice in one process (a
     same-process concern only -- separate training processes, the actual
     production scenario, each open their own handle just fine), so the first
-    dataset's env is closed before the second is constructed.
+    dataset's raw-HR and derived caches are closed before the second is
+    constructed. Both architectures now share the same LR-derived plane.
     """
     from sisr.datasets.native_lr import TrainDataset as SRResNetTrainDataset
     from sisr.datasets.pre_upsampled import TrainDataset as SRCNNTrainDataset
@@ -191,6 +192,7 @@ def test_shared_cache_pixel_equivalence_across_architectures(varied_size_rgb_ima
     hr_srcnn_uint8 = (hr_srcnn.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
     assert np.array_equal(hr_srcnn_uint8, source[:16, :16, :])
     srcnn_ds._cache.get_env().close()  # release before srresnet_ds opens the same path
+    srcnn_ds._derived.get_env().close()  # close derived cache; now shared across architectures
 
     srresnet_ds = SRResNetTrainDataset(
         img_dir=varied_size_rgb_image_dir,
@@ -209,6 +211,8 @@ def test_shared_cache_pixel_equivalence_across_architectures(varied_size_rgb_ima
         for left in range(0, w - 16 + 1)
     )
     assert found, "SRResNet crop read through the shared cache does not match its source image"
+    # Verify the derived LR plane is now shared across architectures
+    assert srcnn_ds._derived.path == srresnet_ds._derived.path
 
 
 def test_existing_cache_reopens_without_rebuild_via_either_architecture(
