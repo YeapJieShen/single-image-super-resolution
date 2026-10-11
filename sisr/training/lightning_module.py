@@ -981,8 +981,12 @@ class SRLightning(lightning.LightningModule):
         BatchNorm / PReLU); the validation below makes that explicit.
 
         Returns:
-            The constructed optimizer, or a ``([optimizer], [scheduler])``
-            tuple if ``self.lr_scheduler`` is set. Lightning accepts both.
+            The constructed optimizer, or — if ``self.lr_scheduler`` is set — a
+            dict of ``{"optimizer": ..., "lr_scheduler": {"scheduler": ...,
+            "interval": "step"}}``. ``interval: "step"`` is explicit: Lightning's
+            own default is once per *epoch*, and this steps once per optimizer
+            step instead, matching ``SRGANLightning``'s hand-stepped cadence
+            (once per batch, under manual optimization).
 
         Raises:
             ValueError: If ``training_config.layer_lrs`` length does not
@@ -1018,4 +1022,7 @@ class SRLightning(lightning.LightningModule):
         if self.lr_scheduler is None:
             return optimizer
         scheduler = self.lr_scheduler(optimizer)
-        return [optimizer], [scheduler]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }

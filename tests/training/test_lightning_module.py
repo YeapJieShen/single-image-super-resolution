@@ -329,7 +329,7 @@ def test_configure_optimizers_per_layer_with_non_conv_params_raises():
 
 
 def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
-    """When lr_scheduler is provided, returns ([opt], [sched])."""
+    """When lr_scheduler is provided, returns the dict form Lightning documents."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -340,11 +340,34 @@ def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
         lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=10),
     )
     out = lit.configure_optimizers()
-    assert isinstance(out, tuple) or isinstance(out, list)
-    opts, scheds = out
-    assert len(opts) == 1
-    assert len(scheds) == 1
-    assert isinstance(scheds[0], torch.optim.lr_scheduler.StepLR)
+    assert isinstance(out, dict)
+    assert isinstance(out["optimizer"], torch.optim.Optimizer)
+    assert isinstance(out["lr_scheduler"]["scheduler"], torch.optim.lr_scheduler.StepLR)
+
+
+def test_configure_optimizers_scheduler_steps_per_optimizer_step_not_per_epoch():
+    """Regression for #273.
+
+    Lightning's own default for the dict-return form is ``interval: "epoch"`` --
+    a scheduler tuned for per-step decay (e.g. a step-count MultiStepLR) would
+    silently decay 1/N as often as intended, N being the batches per epoch, with
+    no error and no warning. This pins the cadence explicitly rather than
+    trusting Lightning's default.
+    """
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1.0),
+        lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=1, gamma=0.5),
+    )
+    out = lit.configure_optimizers()
+
+    # Assert the exact dict shape to catch regressions like adding "frequency" key.
+    scheduler = out["lr_scheduler"]["scheduler"]
+    assert out["lr_scheduler"] == {"scheduler": scheduler, "interval": "step"}
 
 
 def test_configure_optimizers_no_scheduler_returns_bare(srcnn_rgb_lit: SRLightning):
