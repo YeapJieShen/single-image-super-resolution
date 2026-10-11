@@ -33,9 +33,9 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torchmetrics.functional.image
 
-from ..colorspace import rgb_to_ycbcr_studio
+from ..colorspace import rgb_to_ycbcr, rgb_to_ycbcr_studio
 from .perceptual import perceptual_score
-from .ssim import daala_ssim
+from .ssim import daala_ssim, quantize_u8
 
 if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
     # runtime import would make this package depend on `sisr.training` — which
@@ -45,8 +45,12 @@ if TYPE_CHECKING:  # `SREvalConfig` is referenced in annotations only, and a
 __all__ = ["SRScorer", "Scores", "metric_tag"]
 
 
-def metric_tag(family: str, scope: str, key: str) -> str:
-    """Build a metric tag: ``{family}/{scope}/{key}``.
+def _scale_suffix(scale: int | None) -> str:
+    return "" if scale is None else f"/x{scale}"
+
+
+def metric_tag(family: str, scope: str, key: str, scale: int | None = None) -> str:
+    """Build a metric tag: ``{family}/{scope}/{key}``, plus ``/x{scale}`` when a scale is given.
 
     The single implementation of the tag grammar. ``psnr/val/Y`` and
     ``psnr/Set5/Y`` differ only in ``scope``, so routing both through here is
@@ -56,11 +60,15 @@ def metric_tag(family: str, scope: str, key: str) -> str:
         family: Metric family — ``'psnr'``, ``'ssim'``, or a perceptual name.
         scope: ``'val'`` for the validation loop, else a benchmark dataset name.
         key: Colorspace or channel key, e.g. ``'RGB'`` or ``'Y'``.
+        scale: The scale this value was measured at, for a multi-scale run's
+            per-scale validation tags (``psnr/val/Y/x2``). ``None`` is the plain tag --
+            for a multi-scale run, the mean over its scales. A benchmark set instead
+            carries its scale in its *name* (``Set5_x2``), so it never needs this.
 
     Returns:
         The TensorBoard tag.
     """
-    return f"{family}/{scope}/{key}"
+    return f"{family}/{scope}/{key}{_scale_suffix(scale)}"
 
 
 #: A metric value as it travels to ``pl_module.log``. The validation path
@@ -72,8 +80,8 @@ def metric_tag(family: str, scope: str, key: str) -> str:
 ScoreValue = torch.Tensor | float
 
 
-def perceptual_tag(name: str, scope: str) -> str:
-    """Build a perceptual metric's tag: ``{name}/{scope}``.
+def perceptual_tag(name: str, scope: str, scale: int | None = None) -> str:
+    """Build a perceptual metric's tag: ``{name}/{scope}``, plus ``/x{scale}`` when given.
 
     The second rule of the grammar, and deliberately a different shape:
     LPIPS/DISTS carry no colorspace key, so they get their own family root
@@ -85,11 +93,12 @@ def perceptual_tag(name: str, scope: str) -> str:
     Args:
         name: Perceptual metric name, e.g. ``'lpips'``.
         scope: ``'val'`` for the validation loop, else a benchmark dataset name.
+        scale: See :func:`metric_tag`.
 
     Returns:
         The TensorBoard tag.
     """
-    return f"{name}/{scope}"
+    return f"{name}/{scope}{_scale_suffix(scale)}"
 
 
 def expected_tags(eval_config: SREvalConfig, scope: str) -> list[str]:
@@ -142,7 +151,7 @@ class Scores:
         self.ssim = ssim
         self.perceptual = perceptual
 
-    def tagged(self, scope: str) -> dict[str, ScoreValue]:
+    def tagged(self, scope: str, scale: int | None = None) -> dict[str, ScoreValue]:
         """Flatten to ``tag -> value`` under ``scope``.
 
         Perceptual metrics carry no colorspace key, so they tag as
@@ -151,13 +160,14 @@ class Scores:
 
         Args:
             scope: ``'val'`` or a benchmark dataset name.
+            scale: Suffix every tag with the scale it was measured at (see :func:`metric_tag`).
 
         Returns:
             Every metric under its full tag.
         """
-        tags = {metric_tag("psnr", scope, k): v for k, v in self.psnr.items()}
-        tags |= {metric_tag("ssim", scope, k): v for k, v in self.ssim.items()}
-        tags |= {perceptual_tag(name, scope): v for name, v in self.perceptual.items()}
+        tags = {metric_tag("psnr", scope, k, scale): v for k, v in self.psnr.items()}
+        tags |= {metric_tag("ssim", scope, k, scale): v for k, v in self.ssim.items()}
+        tags |= {perceptual_tag(name, scope, scale): v for name, v in self.perceptual.items()}
         return tags
 
 
@@ -174,7 +184,7 @@ class SRScorer:
     def __init__(self, eval_config: SREvalConfig) -> None:
         self.eval_config = eval_config
 
-    def crop(self, *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def crop(self, *tensors: torch.Tensor, scale: int | None = None) -> tuple[torch.Tensor, ...]:
         """Apply ``crop_border`` to each tensor, or pass them through unchanged.
 
         The single implementation of the border slice. Both scoring paths took
@@ -183,15 +193,21 @@ class SRScorer:
 
         Args:
             *tensors: ``(B, C, H, W)`` tensors to crop identically.
+            scale: The scale these tensors were produced at. Used **only** when
+                ``crop_border`` is ``None``, which is what a multi-scale run keeps (there
+                is no one border to resolve): the border is then this scale, the field
+                convention, so each scale is scored on its own border.
 
         Returns:
             The cropped tensors, in the order given.
 
         Raises:
-            ValueError: If ``crop_border`` is still ``None``. That means the
-                config never passed through ``SRLightning``, which resolves the
-                derive-from-scale sentinel; scoring against an unresolved border
-                would silently pick a different region than the run intends.
+            ValueError: If ``crop_border`` is ``None`` and no ``scale`` was given. A
+                single-scale run never reaches this: ``SRLightning`` resolves the
+                derive-from-scale sentinel to an int at construction, so ``None`` here
+                means a config that never passed through it; scoring against an
+                unresolved border would silently pick a different region than the run
+                intends.
                 Also if it is negative -- reachable only past
                 ``SREvalConfig.__post_init__``, via the sentinel resolution's
                 direct assignment -- or if twice the border would consume an
@@ -201,6 +217,8 @@ class SRScorer:
                 size rather than surfacing as a torch shape error.
         """
         n = self.eval_config.crop_border
+        if n is None:
+            n = scale
         if n is None:
             raise ValueError(
                 "eval_config.crop_border is still None at scoring time. It is a sentinel "
@@ -228,7 +246,7 @@ class SRScorer:
         return tuple(t[..., n:-n, n:-n] for t in tensors)
 
     def metric_tensors(
-        self, sr: torch.Tensor, hr: torch.Tensor
+        self, sr: torch.Tensor, hr: torch.Tensor, is_grey: torch.Tensor | None = None
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """Pre-compute ``(sr, hr)`` pairs for every tracked PSNR/SSIM key.
 
@@ -243,9 +261,14 @@ class SRScorer:
         Args:
             sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
             hr: Reference, same shape.
+            is_grey: ``(B,)`` bool, per image: the reference file is single-channel. Required
+                when ``grey_plane_scoring`` is on, ignored otherwise.
 
         Returns:
             ``key -> (sr_key, hr_key)``.
+
+        Raises:
+            ValueError: If ``grey_plane_scoring`` is on and ``is_grey`` is ``None``.
         """
         keys = set(self.eval_config.psnr_keys) | set(self.eval_config.ssim_keys)
         tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -259,12 +282,34 @@ class SRScorer:
         if keys & {"YCbCr", "Y", "Cb", "Cr"}:
             sr_ycc = rgb_to_ycbcr_studio(sr)
             hr_ycc = rgb_to_ycbcr_studio(hr)
+            if self.eval_config.grey_plane_scoring:
+                if is_grey is None:
+                    raise ValueError(
+                        "eval_config.grey_plane_scoring is on but no is_grey flag reached "
+                        "scoring: set yield_is_grey: true on every eval dataset."
+                    )
+                # A grey file's raw plane is its full-range Y (the weights sum to 1).
+                grey = is_grey.to(hr.device).view(-1, 1, 1, 1)
+                sr_ycc = torch.cat(
+                    [torch.where(grey, rgb_to_ycbcr(sr)[:, :1], sr_ycc[:, :1]), sr_ycc[:, 1:]], 1
+                )
+                hr_ycc = torch.cat(
+                    [torch.where(grey, rgb_to_ycbcr(hr)[:, :1], hr_ycc[:, :1]), hr_ycc[:, 1:]], 1
+                )
             tensors["YCbCr"] = (sr_ycc, hr_ycc)
             tensors["Y"] = (sr_ycc[:, 0:1], hr_ycc[:, 0:1])
             tensors["Cb"] = (sr_ycc[:, 1:2], hr_ycc[:, 1:2])
             tensors["Cr"] = (sr_ycc[:, 2:3], hr_ycc[:, 2:3])
 
         return tensors
+
+    def _rounded(
+        self, pair: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The pair on the 8-bit grid when ``round_to_uint8`` is set, else as given (PSNR only)."""
+        if not self.eval_config.round_to_uint8:
+            return pair
+        return tuple(quantize_u8(t) / 255.0 for t in pair)  # type: ignore[return-value]
 
     @staticmethod
     def psnr(sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
@@ -317,16 +362,25 @@ class SRScorer:
         """Mean perceptual score under the configured backbone.
 
         Args:
-            name: ``'lpips'`` or ``'dists'``.
+            name: Any key of :data:`~sisr.metrics.perceptual.PERCEPTUAL_METRICS`.
             sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
-            hr: Reference, same shape.
+            hr: Reference, same shape. Ignored by the no-reference metrics, which
+                score the same cropped ``sr`` the paired metrics see.
 
         Returns:
             0-dim tensor.
         """
         return perceptual_score(name, sr, hr, lpips_net=self.eval_config.lpips_net)
 
-    def score(self, sr_rgb: torch.Tensor, hr_rgb: torch.Tensor, *, crop: bool = True) -> Scores:
+    def score(
+        self,
+        sr_rgb: torch.Tensor,
+        hr_rgb: torch.Tensor,
+        *,
+        crop: bool = True,
+        scale: int | None = None,
+        is_grey: torch.Tensor | None = None,
+    ) -> Scores:
         """Score one aligned pair across every metric the config requests.
 
         Args:
@@ -335,16 +389,18 @@ class SRScorer:
             crop: Apply ``crop_border`` first. Pass ``False`` only when the
                 caller has already cropped — scoring an uncropped pair silently
                 changes every number.
+            scale: The pair's scale, for :meth:`crop` when the border is derived from it.
+            is_grey: Per-image single-channel-file flags, see :meth:`metric_tensors`.
 
         Returns:
             The metric values, untagged.
         """
         if crop:
-            sr_rgb, hr_rgb = self.crop(sr_rgb, hr_rgb)
+            sr_rgb, hr_rgb = self.crop(sr_rgb, hr_rgb, scale=scale)
 
-        tensors = self.metric_tensors(sr_rgb, hr_rgb)
+        tensors = self.metric_tensors(sr_rgb, hr_rgb, is_grey)
         return Scores(
-            psnr={k: self.psnr(*tensors[k]) for k in self.eval_config.psnr_keys},
+            psnr={k: self.psnr(*self._rounded(tensors[k])) for k in self.eval_config.psnr_keys},
             ssim={k: self.ssim(*tensors[k]) for k in self.eval_config.ssim_keys},
             perceptual={
                 name: self.perceptual(name, sr_rgb, hr_rgb)

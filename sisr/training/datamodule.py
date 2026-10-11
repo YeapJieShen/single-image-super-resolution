@@ -7,6 +7,7 @@ only run for the stages that need them. Test sets are surfaced through
 :meth:`test_dataloader` (for ``cli test --ckpt_path`` final eval).
 """
 
+import copy
 import importlib
 import inspect
 from typing import Any
@@ -14,7 +15,9 @@ from typing import Any
 import lightning
 import torch.distributed as dist
 from lightning.pytorch.cli import instantiate_class
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, RandomSampler, Sampler
+
+from ..datasets.sampling import ScaleBatchSampler
 
 _SPEC_KEYS = frozenset({"class_path", "init_args"})
 
@@ -81,6 +84,35 @@ def _accepted_init_args(class_path: str) -> list[str] | None:
         for name, p in params.items()
         if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD) and name != "self"
     )
+
+
+def _expand_scales(spec: dict[str, Any]) -> list[tuple[int | None, dict[str, Any]]]:
+    """Splits an eval dataset spec whose ``init_args.scale`` is a list into one spec per scale.
+
+    An eval dataset serves one scale (its LR is made at that scale), so a multi-scale
+    run evaluates the same images once per scale: this is where that happens.
+    A spec with an int ``scale`` -- or a one-element list, the same thing -- comes back
+    as itself, with ``None`` for its scale.
+
+    Args:
+        spec: A validated ``{class_path, init_args}`` spec.
+
+    Returns:
+        ``[(scale, spec)]``: one entry per scale, each spec with its ``scale`` an int.
+        ``(None, spec)`` when nothing is expanded.
+    """
+    scale = spec.get("init_args", {}).get("scale")
+    if not isinstance(scale, list | tuple) or len(scale) <= 1:
+        if isinstance(scale, list | tuple) and len(scale) == 1:
+            spec = copy.deepcopy(spec)
+            spec["init_args"]["scale"] = scale[0]
+        return [(None, spec)]
+    out = []
+    for s in scale:
+        one = copy.deepcopy(spec)
+        one["init_args"]["scale"] = s
+        out.append((s, one))
+    return out
 
 
 def _require(ds: Dataset | None, which: str, stage: str) -> Dataset:
@@ -211,8 +243,15 @@ class SRDataModule(lightning.LightningDataModule):
             _validate_spec("data.predict_dataset", predict_dataset)
 
         self._train_spec = train_dataset
-        self._val_spec = val_dataset
-        self._test_specs = test_datasets or {}
+        self._val_specs = _expand_scales(val_dataset)
+        # name -> spec, a name per (set, scale): `Set5` at scales [2, 4] is `Set5_x2` and
+        # `Set5_x4`, so every tag `psnr/{name}/...` says which scale it measured. A set at
+        # one scale keeps its plain name.
+        self._test_specs: dict[str, dict[str, Any]] = {}
+        for name, spec in (test_datasets or {}).items():
+            expanded = _expand_scales(spec)
+            for scale, one in expanded:
+                self._test_specs[name if scale is None else f"{name}_x{scale}"] = one
         self._predict_spec = predict_dataset
         self._train_dl_kwargs = train_dataloader_kwargs or {}
         self._val_dl_kwargs = val_dataloader_kwargs or {"batch_size": 1, "num_workers": 1}
@@ -224,6 +263,8 @@ class SRDataModule(lightning.LightningDataModule):
 
         self._train_ds: Dataset | None = None
         self._val_ds: Dataset | None = None
+        # The primary set's further scales (it is `_val_ds` at the first), if it lists several.
+        self._val_more: list[Dataset] = []
         self._test_ds: dict[str, Dataset] = {}
         self._predict_ds: Dataset | None = None
 
@@ -238,6 +279,25 @@ class SRDataModule(lightning.LightningDataModule):
         return list(self._test_specs.keys())
 
     @property
+    def primary_val_scales(self) -> list[int]:
+        """The scale of each primary validation loader, in loader order.
+
+        One entry per loader: ``[2, 3, 4]`` for a primary val set listed at those scales,
+        one entry for a set at a single scale, and ``[]`` when its spec states none. The
+        loaders are ``val_dataloader()[:n_primary]``; the test loaders follow them.
+        """
+        return [
+            int(scale)
+            for _, spec in self._val_specs
+            if (scale := spec.get("init_args", {}).get("scale")) is not None
+        ]
+
+    @property
+    def n_primary(self) -> int:
+        """How many leading ``val_dataloader()`` loaders are the primary val set (one per scale)."""
+        return len(self._val_specs)
+
+    @property
     def train_dataset(self) -> Dataset | None:
         """The instantiated train dataset, or ``None`` before ``setup('fit')`` runs.
 
@@ -249,7 +309,7 @@ class SRDataModule(lightning.LightningDataModule):
 
     @property
     def val_dataset(self) -> Dataset | None:
-        """The instantiated primary val dataset, or ``None`` before setup runs."""
+        """The first primary val dataset (the first scale's), or ``None`` before setup runs."""
         return self._val_ds
 
     @property
@@ -278,7 +338,8 @@ class SRDataModule(lightning.LightningDataModule):
                 for name, spec in self._test_specs.items()
             }
         if stage in ("fit", "validate", None) and self._val_ds is None:
-            self._val_ds = _instantiate_spec("data.val_dataset", self._val_spec)
+            first, *more = (_instantiate_spec("data.val_dataset", sp) for _, sp in self._val_specs)
+            self._val_ds, self._val_more = first, more
         if stage in ("predict", None) and self._predict_ds is None and self._predict_spec:
             self._predict_ds = _instantiate_spec("data.predict_dataset", self._predict_spec)
 
@@ -306,10 +367,29 @@ class SRDataModule(lightning.LightningDataModule):
             RuntimeError: If ``setup('fit')`` has not run.
         """
         train_ds = _require(self._train_ds, "train", "fit")
+        index_sampler: Sampler[int]
         if dist.is_available() and dist.is_initialized():
-            sampler: DistributedSampler[Any] = DistributedSampler(train_ds, shuffle=True)
-            return DataLoader(train_ds, sampler=sampler, **self._train_dl_kwargs)
-        return DataLoader(train_ds, shuffle=True, **self._train_dl_kwargs)
+            index_sampler = DistributedSampler(train_ds, shuffle=True)
+        else:
+            index_sampler = RandomSampler(train_ds)  # type: ignore[arg-type]
+        if getattr(train_ds, "scale_per_batch", False):
+            # A native-LR batch cannot mix input sizes, so the scale is drawn per batch
+            # and the loader is handed whole batches (which excludes batch_size/drop_last).
+            kwargs = dict(self._train_dl_kwargs)
+            if "batch_size" not in kwargs:
+                raise ValueError(
+                    "data.train_dataloader_kwargs.batch_size is required to train at several "
+                    "scales: the scale is drawn per batch, so the batch size has to be known "
+                    "to the sampler that draws it."
+                )
+            batch_sampler = ScaleBatchSampler(
+                index_sampler,
+                train_ds.scales,  # type: ignore[attr-defined]
+                batch_size=kwargs.pop("batch_size"),
+                drop_last=kwargs.pop("drop_last", False),
+            )
+            return DataLoader(train_ds, batch_sampler=batch_sampler, **kwargs)
+        return DataLoader(train_ds, sampler=index_sampler, **self._train_dl_kwargs)
 
     def val_dataloader(self) -> list[DataLoader]:
         """Primary validation loader followed by every test loader.
@@ -326,7 +406,9 @@ class SRDataModule(lightning.LightningDataModule):
             RuntimeError: If ``setup('fit')`` has not run.
         """
         val_ds = _require(self._val_ds, "val", "fit")
-        loaders = [DataLoader(val_ds, shuffle=False, **self._val_dl_kwargs)]
+        loaders = [
+            DataLoader(ds, shuffle=False, **self._val_dl_kwargs) for ds in [val_ds, *self._val_more]
+        ]
         for ds in self._test_ds.values():
             loaders.append(DataLoader(ds, shuffle=False, **self._test_dl_kwargs))
         return loaders

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import lightning
+import numpy as np
 import pytest
 import torch
 import torch._dynamo
@@ -11,6 +12,7 @@ import torchmetrics
 
 from sisr.losses import SRLoss
 from sisr.metrics.scoring import SRScorer
+from sisr.models.base import SRModelOutput, unwrap_primary
 from sisr.models.srcnn import SRCNN, SRCNNEvalConfig, SRCNNTrainingConfig
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
 from sisr.models.srresnet.model import SRResNet
@@ -61,6 +63,33 @@ def rgb_lr_hr_batch() -> tuple[torch.Tensor, torch.Tensor]:
     lr = torch.rand(2, 3, 33, 33, generator=g)
     hr = torch.rand(2, 3, 33, 33, generator=g)
     return lr, hr
+
+
+class _RecordWrappingSRCNN(SRCNN):
+    """Wraps real SRCNN's forward in SRModelOutput -- proves every downstream
+    consumer (reconstruct, shape checks, predict, a non-opted-in loss) is
+    indifferent to which return shape a model uses."""
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary + 1.0})
+
+
+def _paired_lits() -> tuple[SRLightning, SRLightning]:
+    """A plain-tensor SRCNN and a record-wrapping twin, identical weights."""
+    plain_model = SRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0)
+    record_model = _RecordWrappingSRCNN(
+        num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0
+    )
+    record_model.load_state_dict(plain_model.state_dict())
+    # scale=1: predict_step upsamples a 'pre_upsampled' model's input and needs a scale;
+    # identity keeps every shape these comparisons see unchanged.
+    kwargs = dict(
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=1),
+        eval_config=SREvalConfig(crop_border=0),
+    )
+    return SRLightning(model=plain_model, **kwargs), SRLightning(model=record_model, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +358,7 @@ def test_configure_optimizers_per_layer_with_non_conv_params_raises():
 
 
 def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
-    """When lr_scheduler is provided, returns ([opt], [sched])."""
+    """When lr_scheduler is provided, returns the dict form Lightning documents."""
     model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
     lit = SRLightning(
         model=model,
@@ -340,17 +369,128 @@ def test_configure_optimizers_with_lr_scheduler(srcnn_rgb_lit: SRLightning):
         lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=10),
     )
     out = lit.configure_optimizers()
-    assert isinstance(out, tuple) or isinstance(out, list)
-    opts, scheds = out
-    assert len(opts) == 1
-    assert len(scheds) == 1
-    assert isinstance(scheds[0], torch.optim.lr_scheduler.StepLR)
+    assert isinstance(out, dict)
+    assert isinstance(out["optimizer"], torch.optim.Optimizer)
+    assert isinstance(out["lr_scheduler"]["scheduler"], torch.optim.lr_scheduler.StepLR)
+
+
+def test_configure_optimizers_scheduler_steps_per_optimizer_step_not_per_epoch():
+    """Regression for #273.
+
+    Lightning's own default for the dict-return form is ``interval: "epoch"`` --
+    a scheduler tuned for per-step decay (e.g. a step-count MultiStepLR) would
+    silently decay 1/N as often as intended, N being the batches per epoch, with
+    no error and no warning. This pins the cadence explicitly rather than
+    trusting Lightning's default.
+    """
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(),
+        optimizer=functools.partial(torch.optim.SGD, lr=1.0),
+        lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=1, gamma=0.5),
+    )
+    out = lit.configure_optimizers()
+
+    # Assert the exact dict shape to catch regressions like adding "frequency" key.
+    scheduler = out["lr_scheduler"]["scheduler"]
+    assert out["lr_scheduler"] == {"scheduler": scheduler, "interval": "step"}
 
 
 def test_configure_optimizers_no_scheduler_returns_bare(srcnn_rgb_lit: SRLightning):
     out = srcnn_rgb_lit.configure_optimizers()
     assert not isinstance(out, tuple | list), "single optimizer when no scheduler"
     assert isinstance(out, torch.optim.Optimizer)
+
+
+def _grad_after_clip(
+    scale_clip_with_lr: bool, theta: float, initial_lr: float, gamma: float, n_batches: int
+) -> list[float]:
+    """Runs a real Trainer over ``n_batches`` (batch_size=1) with
+    ``gradient_clip_val=theta``, ``gradient_clip_algorithm="value"``, and a
+    ``StepLR(step_size=1, gamma=gamma)`` scheduler (stepped once per batch, #273). Returns
+    ``feat[0].weight.grad.abs().max()`` captured at ``on_train_batch_end`` for every batch —
+    after clipping has run (``Precision._clip_gradients`` fires before ``optimizer.step()``)
+    and before the next batch's backward overwrites ``.grad``.
+
+    HR targets are scaled far outside the model's output range (``* 1000 + 500``) so every
+    element of every gradient tensor saturates the clip in both directions tested here —
+    guaranteeing ``grad.abs().max() == grad.abs().min() == the clip value`` exactly, not just
+    an upper bound.
+    """
+    model = SRCNN(num_channels=3, num_filters=(64, 32), kernel_sizes=(9, 1, 5), padding=0)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2, scale_clip_with_lr=scale_clip_with_lr),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=initial_lr),
+        lr_scheduler=functools.partial(torch.optim.lr_scheduler.StepLR, step_size=1, gamma=gamma),
+    )
+    g = torch.Generator().manual_seed(0)
+    lr_imgs = torch.rand(n_batches, 3, 33, 33, generator=g)
+    hr_imgs = torch.rand(n_batches, 3, 33, 33, generator=g) * 1000 + 500
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(lr_imgs, hr_imgs), batch_size=1
+    )
+
+    captured: list[float] = []
+
+    class _GradSpy(lightning.Callback):
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            captured.append(pl_module.model.feat[0].weight.grad.abs().max().item())
+
+    trainer = lightning.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=0,
+        gradient_clip_val=theta,
+        gradient_clip_algorithm="value",
+        callbacks=[_GradSpy()],
+    )
+    trainer.fit(lit, loader)
+    return captured
+
+
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:You defined a `validation_step` but have no `val_dataloader`:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
+def test_configure_gradient_clipping_off_clips_at_raw_theta_regardless_of_lr():
+    """#286 regression guard: scale_clip_with_lr=False (explicit) must behave exactly like
+    Lightning's own unoverridden clipping -- unaffected by the lr schedule."""
+    grads = _grad_after_clip(
+        scale_clip_with_lr=False, theta=0.01, initial_lr=1.0, gamma=0.5, n_batches=2
+    )
+    assert grads[0] == pytest.approx(0.01)
+    assert grads[1] == pytest.approx(0.01)
+
+
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:You defined a `validation_step` but have no `val_dataloader`:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
+def test_configure_gradient_clipping_scales_by_current_lr_when_enabled():
+    """#286: scale_clip_with_lr=True clips to theta/current_lr, exercised across a real
+    scheduler step (StepLR halves lr right after batch 1). Mutation X1: using
+    theta*initial_lr/current_lr instead would give 0.01 and 0.02, which this test catches."""
+    grads = _grad_after_clip(
+        scale_clip_with_lr=True, theta=0.01, initial_lr=0.1, gamma=0.5, n_batches=2
+    )
+    assert grads[0] == pytest.approx(0.1)  # theta / lr=0.1
+    assert grads[1] == pytest.approx(0.2)  # theta / lr=0.05
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +958,38 @@ def test_predict_rgb_matches_step_forward_path_y_channel(srcnn_y_lit: SRLightnin
     torch.testing.assert_close(pred_hr, step_hr)
 
 
+def test_forward_lr_self_ensemble_calls_model_eight_times(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """self_ensemble=True must route the model call through self_ensemble_forward (8
+    dihedral transforms) instead of the single call the default path makes."""
+    lr, _ = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit._forward_lr(lr, self_ensemble=True)
+    assert spy.call_count == 8
+
+
+def test_forward_lr_self_ensemble_off_by_default_calls_model_once(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    lr, _ = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit._forward_lr(lr)
+    assert spy.call_count == 1
+
+
+def test_predict_rgb_forwards_self_ensemble_flag_to_forward_sr(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    lr, hr = rgb_lr_hr_batch
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_rgb(lr, hr, self_ensemble=True)
+    assert spy.call_count == 8
+
+
 # ---------------------------------------------------------------------------
 # Metric-path clamp to [0, 1], applied once in _forward_lr
 # ---------------------------------------------------------------------------
@@ -973,6 +1145,10 @@ def test_hparams_stay_nested_plain_dicts_for_checkpoint_reload():
         "ssim_impl": "wang",
         "perceptual_metrics": [],
         "lpips_net": "alex",
+        "self_ensemble": False,
+        "predict_scale": None,
+        "round_to_uint8": False,
+        "grey_plane_scoring": False,
     }
     assert isinstance(lit.hparams["training_config"], dict)
     assert not any("/" in k for k in lit.hparams)
@@ -999,20 +1175,84 @@ def test_forward_lr_matches_forward_sr_sr_component(srcnn_rgb_lit: SRLightning, 
 
 
 def test_predict_step_matches_forward_lr_rgb_path(srcnn_rgb_lit: SRLightning):
+    """predict_step composes _predict_upsample -> _forward_lr; kept in
+    sync with real predict_step behavior after #279 (previously
+    predict_step == _forward_lr(lr) directly, with no upsample)."""
     lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(0))
-    _, expected_sr = srcnn_rgb_lit._forward_lr(lr)
+    _, expected_sr = srcnn_rgb_lit._forward_lr(srcnn_rgb_lit._predict_upsample(lr))
     out = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    torch.testing.assert_close(out, expected_sr)
+
+
+@pytest.mark.parametrize("scale", [2, 3])
+def test_predict_step_pre_upsampled_contract_upscales_to_scale_x_input(scale: int):
+    """Regression for #279: PredictDataset serves raw, native-resolution LR
+    with no HR to derive an upsample from. predict_step must bicubic-upsample
+    it to scale x its size before a 'pre_upsampled'-contract model sees it —
+    previously the raw batch went straight into the model and the output was
+    never larger than the input, no matter what scale the model was trained
+    for. eval_padding='same' + .eval() isolates the upsample: with same
+    padding active at eval time the model's own conv stack doesn't change
+    H/W, so the only way the output can be exactly scale x the input is if
+    the upsample actually ran."""
+    model = SRCNN(
+        num_channels=3,
+        num_filters=(4, 4),
+        kernel_sizes=(3, 1, 3),
+        padding=0,
+        eval_padding="same",
+    )
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=scale),
+        eval_config=SREvalConfig(crop_border=0),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lit.eval()
+    lr = torch.rand(1, 3, 10, 12, generator=torch.Generator().manual_seed(0))
+
+    out = lit.predict_step(lr, batch_idx=0)
+
+    assert out.shape == (1, 3, 10 * scale, 12 * scale)
+
+
+def test_predict_step_pre_upsampled_upsample_matches_direct_imresize_call(
+    srcnn_rgb_lit: SRLightning,
+):
+    """The predict-time upsample must be pixel-identical to the one that
+    builds training/validation LR (sisr.utils.imresize.resize), not merely
+    produce the right shape -- a different resize implementation (e.g.
+    torch.nn.functional.interpolate) could match the size with the wrong
+    pixels. Feeds a uint8-quantized LR image (not raw torch.rand floats) so
+    the float<->uint8 round trip in both the fixture and the code under test
+    is exact, not lossy through independent rounding."""
+    from sisr.utils.imresize import resize
+
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 256, size=(20, 24, 3), dtype=np.uint8)
+    lr = torch.from_numpy(arr).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
+
+    expected_up = resize(arr, (40, 48))  # srcnn_rgb_lit fixture: scale=2
+    expected_up_t = torch.from_numpy(expected_up).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
+    _, expected_sr = srcnn_rgb_lit._forward_lr(expected_up_t)
+
+    out = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+
     torch.testing.assert_close(out, expected_sr)
 
 
 def test_predict_step_y_channel_reconstructs_rgb(srcnn_y_lit: SRLightning):
     """Y-channel model output is 1-channel; predict_step must still return
-    RGB — the processor.reconstruct step stitches back bicubic LR Cb/Cr.
-    srcnn_y_lit uses 'valid' padding (33 -> 21), so the size check locks that
-    same shrinkage; the channel check is the actual regression guard."""
+    RGB -- the processor.reconstruct step stitches back bicubic LR Cb/Cr.
+    srcnn_y_lit's scale=2 upsamples 33 -> 66 before the model
+    (input_contract='pre_upsampled'); its 'valid' padding kernels
+    (9, 1, 5) then shrink 66 -> 54. The channel check is the actual
+    regression guard; the shape locks the post-#279 upsample + shrinkage
+    math."""
     lr = torch.rand(2, 3, 33, 33, generator=torch.Generator().manual_seed(1))
     out = srcnn_y_lit.predict_step(lr, batch_idx=0)
-    assert out.shape == (2, 3, 21, 21)
+    assert out.shape == (2, 3, 54, 54)
 
 
 def test_predict_step_srresnet_upsamples_by_scale():
@@ -1036,6 +1276,130 @@ def test_predict_step_dataloader_idx_default_is_ignored(srcnn_rgb_lit: SRLightni
     out_default = srcnn_rgb_lit.predict_step(lr, batch_idx=0)
     out_explicit = srcnn_rgb_lit.predict_step(lr, batch_idx=0, dataloader_idx=0)
     torch.testing.assert_close(out_default, out_explicit)
+
+
+def test_predict_step_self_ensembles_when_eval_config_enables_it(srcnn_rgb_lit: SRLightning):
+    """predict_step must read eval_config.self_ensemble itself -- this is the only knob
+    'sisr predict' has for turning self-ensembling on."""
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    lr = torch.rand(1, 3, 33, 33, generator=torch.Generator().manual_seed(3))
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    assert spy.call_count == 8
+
+
+def test_predict_step_single_pass_when_self_ensemble_off(srcnn_rgb_lit: SRLightning):
+    """Regression guard: eval_config.self_ensemble defaults to False, so predict_step's
+    existing single-pass behavior (test_predict_step_matches_forward_lr_rgb_path above) is
+    unchanged."""
+    lr = torch.rand(1, 3, 33, 33, generator=torch.Generator().manual_seed(3))
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.predict_step(lr, batch_idx=0)
+    assert spy.call_count == 1
+
+
+def test_predict_step_self_ensemble_works_for_native_lr_contract_srresnet():
+    """Acceptance (#284): self-ensemble must work for the native-LR (spatially-scaling)
+    contract too, not just pre-upsampled. Non-square input (12x16→24x32) is required
+    because the 4 dihedral transforms that swap H and W would crash torch.stack on
+    shape mismatches if the transpose branch of _transform or _untransform were
+    skipped — a square input would pass even with transpose disabled,
+    since (H, W) == (W, H). This test guards the output shape is correct for all
+    transforms, including those that transpose."""
+    model = SRResNet(scale=2, num_residual_blocks=1)
+    lit = SRLightning(
+        model=model,
+        processor=RGBProcessor(),
+        training_config=SRTrainingConfig(scale=2),
+        eval_config=SREvalConfig(self_ensemble=True),
+        optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
+    )
+    lr = torch.rand(1, 3, 12, 16)
+    out = lit.predict_step(lr, batch_idx=0)
+    assert out.shape == (1, 3, 24, 32)
+
+
+def test_training_step_never_self_ensembles_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """Acceptance (#284): self-ensemble must never apply during training or
+    validation-during-fit, even when eval_config.self_ensemble=True. training_step
+    must call the model exactly once, not 8 times. This catches mutations
+    (_forward_lr reading eval_config.self_ensemble unconditionally) that
+    would silently break training speed."""
+    lr, hr = rgb_lr_hr_batch
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.log = MagicMock()  # Mock logging to avoid trainer warnings
+    srcnn_rgb_lit.training_step((lr, hr), batch_idx=0)
+    assert spy.call_count == 1
+
+
+def test_validation_step_never_self_ensembles_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch
+):
+    """Acceptance (#284): self-ensemble must never apply during validation-during-fit,
+    even when eval_config.self_ensemble=True. Called in the state Lightning validates in
+    (eval mode, no grad), so a gate keyed on ``not self.training`` is caught too."""
+    lr, hr = rgb_lr_hr_batch
+    srcnn_rgb_lit.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=srcnn_rgb_lit.model.forward)
+    srcnn_rgb_lit.model.forward = spy
+    srcnn_rgb_lit.log = MagicMock()  # Mock logging to avoid trainer warnings
+    srcnn_rgb_lit.eval()
+    with torch.no_grad():
+        srcnn_rgb_lit.validation_step((lr, hr), batch_idx=0)
+    assert spy.call_count == 1
+
+
+@pytest.mark.filterwarnings(
+    "ignore:GPU available but not used:lightning.pytorch.utilities.warnings.PossibleUserWarning",
+    "ignore:The '.*' does not have many workers:"
+    "lightning.pytorch.utilities.warnings.PossibleUserWarning",
+)
+@pytest.mark.parametrize(
+    ("entry_point", "expected"),
+    [("fit", {"train": 1, "eval": 1}), ("validate", {"train": 0, "eval": 1})],
+)
+def test_fit_and_validate_never_self_ensemble_even_when_eval_config_enables_it(
+    srcnn_rgb_lit: SRLightning, rgb_lr_hr_batch, entry_point, expected
+):
+    """Acceptance (#284): a real fit or a standalone validate, where Lightning sets the
+    train/eval mode, grad and inference-mode state itself, calls the model once per
+    training step and once per validation step, even when eval_config.self_ensemble=True.
+    Both entry points, because fit validates under no_grad and a standalone validate under
+    inference_mode -- a gate keyed on either state is caught by one of them."""
+    lit = srcnn_rgb_lit
+    lit.eval_config.self_ensemble = True
+    calls = {"train": 0, "eval": 0}
+    forward = lit.model.forward
+
+    def counting_forward(x: torch.Tensor) -> torch.Tensor:
+        calls["train" if lit.training else "eval"] += 1
+        return forward(x)
+
+    lit.model.forward = counting_forward
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(*rgb_lr_hr_batch), batch_size=2
+    )
+    trainer = lightning.Trainer(
+        max_steps=1,
+        limit_val_batches=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=0,
+    )
+    if entry_point == "fit":
+        trainer.fit(lit, loader, loader)
+    else:
+        trainer.validate(lit, loader)
+    assert calls == expected
 
 
 def test_val_psnr_is_per_image_mean_not_batch_pooled():
@@ -1449,7 +1813,7 @@ def test_on_save_checkpoint_round_trips_weights_only(tmp_path, srcnn_rgb_lit: SR
 def _srcnn_datamodule(tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2) -> SRDataModule:
     """SRDataModule over srcnn's pre-upsampled datasets (lr.shape == hr.shape)."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "subimg_size": 33,
@@ -1461,7 +1825,7 @@ def _srcnn_datamodule(tiny_rgb_image_dir: Path, tmp_path: Path, scale: int = 2) 
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
     }
     return SRDataModule(
@@ -1477,7 +1841,7 @@ def _srresnet_datamodule(
 ) -> SRDataModule:
     """SRDataModule over srresnet's native-LR datasets (hr.shape == lr.shape * scale)."""
     train_spec = {
-        "class_path": "sisr.datasets.srresnet.TrainDataset",
+        "class_path": "sisr.datasets.native_lr.TrainDataset",
         "init_args": {
             "img_dir": str(tiny_rgb_image_dir),
             "scale": scale,
@@ -1488,7 +1852,7 @@ def _srresnet_datamodule(
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srresnet.ValidationDataset",
+        "class_path": "sisr.datasets.native_lr.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": scale},
     }
     return SRDataModule(
@@ -1593,7 +1957,7 @@ def test_setup_skips_pair_check_for_predict_only_datamodule(
     all unbuilt) must not raise even for a would-be-mismatched model."""
     lit = _srresnet_lit(scale=2)
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
     }
     dm = SRDataModule(
@@ -2192,3 +2556,203 @@ def test_eval_padding_makes_the_scored_region_the_authors():
 
     assert sr.shape == hr.shape, "same-padded inference must not shrink the SR field"
     assert hr_aligned.shape == hr.shape, "so center_crop must have nothing left to take"
+
+
+# ---------------------------------------------------------------------------
+# SRModelOutput — record-returning model
+# ---------------------------------------------------------------------------
+
+
+def test_step_loss_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss_plain, *_ = plain._step((lr, hr))
+    loss_record, *_ = record._step((lr, hr))
+
+    assert torch.equal(loss_plain, loss_record)
+
+
+def test_predict_step_output_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr = torch.rand(2, 3, 8, 8)
+
+    assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
+
+
+def test_predict_rgb_output_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    plain, record = _paired_lits()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    sr_plain, hr_plain = plain.predict_rgb(lr, hr)
+    sr_record, hr_record = record.predict_rgb(lr, hr)
+
+    assert torch.equal(sr_plain, sr_record)
+    assert torch.equal(hr_plain, hr_record)
+
+
+def test_self_ensembled_predict_is_identical_whether_the_model_returns_a_tensor_or_a_record():
+    """Self-ensembling averages the primary only -- the one field predict, metrics and
+    export read -- so a record-returning model ensembles exactly like its plain twin.
+    Compared unclamped too: a tiny random SRCNN can clamp to all zeros, which would make
+    the clamped comparisons vacuous."""
+    torch.manual_seed(0)
+    plain, record = _paired_lits()
+    plain.eval_config.self_ensemble = record.eval_config.self_ensemble = True
+    lr, hr = torch.rand(2, 3, 8, 6), torch.rand(2, 3, 8, 6)
+
+    raw_plain, _ = plain._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    raw_record, _ = record._forward_lr(lr, need_sr_rgb=False, self_ensemble=True)
+    assert torch.equal(raw_plain, raw_record)
+    single_pass, _ = plain._forward_lr(lr, need_sr_rgb=False)
+    assert not torch.equal(raw_plain, single_pass)
+    assert torch.equal(plain.predict_step(lr, 0), record.predict_step(lr, 0))
+    sr_plain, _ = plain.predict_rgb(lr, hr, self_ensemble=True)
+    sr_record, _ = record.predict_rgb(lr, hr, self_ensemble=True)
+    assert torch.equal(sr_plain, sr_record)
+    assert not torch.equal(sr_plain, plain.predict_rgb(lr, hr)[0])
+
+
+class _RecordAwareLoss(SRLoss):
+    """Test double: opts in to the full model output and records what it saw."""
+
+    wants_model_output = True
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        primary = unwrap_primary(pred)
+        extra = pred.extras["echo"] if isinstance(pred, SRModelOutput) else primary
+        return torch.nn.functional.mse_loss(primary, target) + torch.nn.functional.mse_loss(
+            extra, target
+        )
+
+
+class _InstanceOptInLoss(_RecordAwareLoss):
+    """Opts in on the instance only; the class attribute says False."""
+
+    wants_model_output = False
+
+    def __init__(self):
+        super().__init__()
+        self.wants_model_output = True
+
+
+@pytest.mark.parametrize("loss_cls", [_RecordAwareLoss, _InstanceOptInLoss])
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_opts_in_receives_the_full_record_not_only_primary(need_sr_rgb, loss_cls):
+    """wants_model_output=True is the opt-in -- such a loss must see the
+    SRModelOutput itself, extras included, not only its primary field,
+    whether the class or the instance sets it.
+
+    Parametrized over need_sr_rgb: training_step calls _step with False,
+    every other caller with the True default, and the record must survive
+    _forward_lr's early return the same way in both."""
+    _, record = _paired_lits()
+    record.criterion = loss_cls()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert len(record.criterion.received) == 1
+    assert isinstance(record.criterion.received[0], SRModelOutput)
+
+
+class _ExtraHeadSRCNN(SRCNN):
+    """SRCNN whose only extra depends on a parameter the primary never touches."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_gain = torch.nn.Parameter(torch.tensor(2.0))
+
+    def forward(self, x):
+        primary = super().forward(x)
+        return SRModelOutput(primary=primary, extras={"echo": primary * self.extra_gain})
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_an_opted_in_loss_backpropagates_through_the_extras(need_sr_rgb):
+    """A loss term on an extra must train the model: gradient has to reach a
+    parameter used only by that extra. A record handed over detached would train
+    as if the term were not there."""
+    model = _ExtraHeadSRCNN(num_channels=3, num_filters=(4, 4), kernel_sizes=(3, 1, 3), padding=0)
+    lit = SRLightning(
+        model=model, processor=RGBProcessor(), eval_config=SREvalConfig(crop_border=0)
+    )
+    lit.criterion = _RecordAwareLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    loss, *_ = lit._step((lr, hr), need_sr_rgb=need_sr_rgb)
+    loss.backward()
+
+    assert model.extra_gain.grad is not None
+    assert model.extra_gain.grad.abs().item() > 0
+
+
+class _PlainCapturingLoss(SRLoss):
+    """Test double with NO wants_model_output -- the default, opted-out case."""
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_does_not_opt_in_never_sees_the_record(need_sr_rgb):
+    """No wants_model_output attribute -> the criterion must keep getting
+    exactly today's bare primary tensor, even when the model returns a
+    record with extras, on either need_sr_rgb path."""
+    _, record = _paired_lits()
+    record.criterion = _PlainCapturingLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert not isinstance(record.criterion.received[0], SRModelOutput)
+
+
+class _ExplicitOptOutLoss(SRLoss):
+    """Test double with wants_model_output SET to False, not merely absent --
+    the third member of the True/absent/explicit-False trio. A check using
+    hasattr instead of getattr(..., False) would treat this the same as
+    wants_model_output = True, since the attribute exists either way."""
+
+    wants_model_output = False
+
+    def __init__(self):
+        super().__init__()
+        self.received: list = []
+
+    def bind(self, processor):
+        pass
+
+    def forward(self, pred, target):
+        self.received.append(pred)
+        return torch.nn.functional.mse_loss(pred, target)
+
+
+@pytest.mark.parametrize("need_sr_rgb", [True, False])
+def test_a_loss_that_explicitly_sets_wants_model_output_false_never_sees_the_record(need_sr_rgb):
+    """wants_model_output = False, set explicitly rather than left absent,
+    must behave exactly like the opted-out default, on either need_sr_rgb
+    path."""
+    _, record = _paired_lits()
+    record.criterion = _ExplicitOptOutLoss()
+    lr, hr = torch.rand(2, 3, 8, 8), torch.rand(2, 3, 8, 8)
+
+    record._step((lr, hr), need_sr_rgb=need_sr_rgb)
+
+    assert not isinstance(record.criterion.received[0], SRModelOutput)

@@ -65,14 +65,25 @@ dev = [
     "mypy>=1.11",
     # Declared again outside build-isolation: the packaging test builds a real wheel.
     "hatchling>=1.27",
+    # The DRCN port's layout tests write and read synthetic MatConvNet .mat files.
+    "scipy>=1.11",
 ]
 # Opt-in, and deliberately without onnxscript: to_onnx() pins dynamo=False.
 export = [
     "onnx>=1.16",
     "onnxruntime>=1.19",
 ]
-# LPIPS only: DISTS needs only torchvision and ships in core.
-perceptual = ["lpips>=0.1"]
+# DISTS needs only torchvision and ships in core. pyiqa is here for Ma's score (and
+# so PI) only: its NIQE disagrees with the MATLAB release, so NIQE is native, and
+# needs SciPy just to read the release's pristine-model .mat.
+# Opt-in experiment tracking: `mlflow` is heavy, so it is imported only where MLflow is used
+# (sisr.training.sinks), with an actionable error naming this extra when it is missing. The
+# full package, not mlflow-skinny: a local sqlite backend and the model registry need alembic.
+mlflow = ["mlflow>=3"]
+perceptual = ["lpips>=0.1", "pyiqa>=0.1.16", "scipy>=1.11"]
+# SciPy only reads MatConvNet .mat files for sisr.models.{drcn,vdsr}.port (official DRCN and VDSR weights);
+# perceptual already pulls it, but loading weights should not need LPIPS/pyiqa.
+weights = ["scipy>=1.11"]
 
 [project.scripts]
 sisr = "sisr.cli:main"
@@ -140,4 +151,14 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # The optional [export] extra: unresolved in a [dev]-only install by design.
 module = ["onnx"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The optional [perceptual] extra: unresolved in a [dev]-only install by design.
+module = ["pyiqa", "scipy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The optional [mlflow] extra: unresolved in a [dev]-only install by design.
+module = ["mlflow.*"]
 ignore_missing_imports = true

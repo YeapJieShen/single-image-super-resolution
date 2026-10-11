@@ -154,7 +154,13 @@ def test_unknown_metric_names_the_supported_set():
 
 def test_every_metric_declares_a_direction():
     """A metric with no declared direction would be monitored with the wrong mode."""
-    assert PERCEPTUAL_METRICS == {"lpips": True, "dists": True}
+    assert PERCEPTUAL_METRICS == {
+        "lpips": True,
+        "dists": True,
+        "niqe": True,
+        "ma": False,
+        "pi": True,
+    }
 
 
 def test_missing_lpips_extra_names_the_install_command(monkeypatch):

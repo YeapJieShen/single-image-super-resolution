@@ -30,6 +30,7 @@ from sisr.training import (
     SREvalConfig,
     SRLightning,
     SRPredictionWriter,
+    SRTrainingConfig,
 )
 
 
@@ -47,7 +48,7 @@ def _make_srcnn_module() -> SRLightning:
 def _make_datamodule(image_dir: Path) -> SRDataModule:
     """SRDataModule over one tiny image dir: train + primary val + one Set5 test set."""
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(image_dir),
             "subimg_size": 33,
@@ -58,7 +59,7 @@ def _make_datamodule(image_dir: Path) -> SRDataModule:
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     return SRDataModule(
@@ -211,14 +212,16 @@ def _make_predict_datamodule(image_dir: Path, arch: str) -> SRDataModule:
 def test_predict_end_to_end_srcnn_y_channel_same_size_output(
     tiny_rgb_image_dir: Path, tmp_path: Path
 ):
-    """SRCNN's pre-upsampled, Y-channel path: predict output must be the same
-    H/W as the input (scale=1x) and land as one PNG per input file."""
+    """SRCNN's pre-upsampled, Y-channel path with an explicit scale=1 (identity)
+    upsample: predict output must be the same H/W as the input, and land as one
+    PNG per input file."""
     from PIL import Image
 
     model = SRCNN(num_channels=1, num_filters=(8, 4), kernel_sizes=(3, 1, 3), padding="same")
     module = SRLightning(
         model=model,
         processor=YChannelProcessor(),
+        training_config=SRTrainingConfig(scale=1),
         optimizer=functools.partial(torch.optim.SGD, lr=1e-4),
     )
     datamodule = _make_predict_datamodule(tiny_rgb_image_dir, arch="srcnn")

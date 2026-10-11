@@ -3,7 +3,7 @@
 Sampling a dataset to check something about it sounds trivial and is not. Two
 guarantees have to hold, and neither is visible at the call site:
 
-* **RNG transparency.** :class:`~sisr.datasets.srresnet.TrainDataset` draws its
+* **RNG transparency.** :class:`~sisr.datasets.native_lr.TrainDataset` draws its
   random crop with ``random.randint`` in ``__getitem__``. An unguarded probe
   read consumes draws from the same global sequence the training loop uses, so
   every seeded crop after it shifts. In a paper-reproduction repo that is a

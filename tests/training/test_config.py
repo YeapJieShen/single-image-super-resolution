@@ -6,7 +6,7 @@ import pytest
 from sisr.models.srcnn import SRCNN
 from sisr.models.srresnet import SRResNet
 from sisr.processors import RGBProcessor
-from sisr.training import SREvalConfig, SRTrainingConfig
+from sisr.training import AdversarialTrainingConfig, SREvalConfig, SRTrainingConfig
 
 
 def test_sr_training_config_defaults():
@@ -18,6 +18,7 @@ def test_sr_training_config_defaults():
     assert cfg.init_std == 0.01
     assert cfg.scale is None
     assert cfg.compile_backend is None
+    assert cfg.scale_clip_with_lr is False
 
 
 def test_sr_eval_config_defaults():
@@ -30,6 +31,7 @@ def test_sr_eval_config_defaults():
     # Y-SSIM ships without waiting for an architecture subclass to add it.
     assert cfg.ssim_channels == ["RGB", "Y"]
     assert cfg.ssim_impl == "wang"
+    assert cfg.self_ensemble is False
 
 
 def test_sr_eval_config_psnr_channels_isolated_per_instance():
@@ -59,6 +61,7 @@ def test_sr_training_config_field_names():
         "scale",
         "compile_backend",
         "compile_mode",
+        "scale_clip_with_lr",
     }
 
 
@@ -72,6 +75,10 @@ def test_sr_eval_config_field_names():
         "ssim_impl",
         "perceptual_metrics",
         "lpips_net",
+        "self_ensemble",
+        "predict_scale",
+        "round_to_uint8",
+        "grey_plane_scoring",
     }
 
 
@@ -377,6 +384,42 @@ def test_training_config_rejects_a_non_integer_scale_with_an_actionable_message(
     config key -- the exact unhelpful failure this validation exists to remove.
     bool is excluded on purpose: `isinstance(True, int)` is True, and
     `scale: true` in YAML is not an upscaling factor."""
-    for bad in ("4", 4.0, True, [4]):
+    for bad in ("4", 4.0, True, [], [4, 4], [2, "x"]):
         with pytest.raises(ValueError, match="scale"):
             SRTrainingConfig(scale=bad)
+
+
+# ---------------------------------------------------------------------------
+# AdversarialTrainingConfig — the generic adversarial-paradigm contract (#274)
+# ---------------------------------------------------------------------------
+
+
+def test_adversarial_training_config_defaults():
+    cfg = AdversarialTrainingConfig()
+    assert cfg.init_from is None
+    assert cfg.adversarial_weight == pytest.approx(1e-3)
+    assert cfg.d_steps_per_g_step == 1
+    assert cfg.scale is None  # generic base has no opinion; SRGANTrainingConfig sets 4
+
+
+def test_adversarial_training_config_is_an_sr_training_config():
+    assert issubclass(AdversarialTrainingConfig, SRTrainingConfig)
+
+
+def test_adversarial_training_config_rejects_non_positive_k():
+    with pytest.raises(ValueError, match="d_steps_per_g_step"):
+        AdversarialTrainingConfig(d_steps_per_g_step=0)
+
+
+def test_adversarial_training_config_rejects_negative_weight():
+    AdversarialTrainingConfig(adversarial_weight=0.0)  # valid -- must not raise
+    with pytest.raises(ValueError, match="adversarial_weight"):
+        AdversarialTrainingConfig(adversarial_weight=-1e-3)
+
+
+def test_adversarial_training_config_runs_the_base_post_init():
+    """super().__post_init__() must fire -- same class of bug
+    SRGANTrainingConfig's own regression test guarded before (an override that
+    replaces the parent's checks instead of extending them)."""
+    with pytest.raises(ValueError, match="compile_mode"):
+        AdversarialTrainingConfig(compile_mode="max-autotune", compile_backend=None)

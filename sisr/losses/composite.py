@@ -2,6 +2,7 @@
 
 import torch
 
+from ..models.base import SRModelOutput, unwrap_primary
 from ..processors import SRProcessor
 from .base import SRLoss
 
@@ -21,6 +22,12 @@ class WeightedSumLoss(SRLoss):
     A multi-layer perceptual loss is two
     :class:`~sisr.losses.vgg.VGG19FeatureLoss` terms at different layers —
     there is deliberately no second construction path inside the VGG loss.
+
+    **Output-record forwarding.** :attr:`wants_model_output` is true iff any
+    term opts in (see :class:`~sisr.losses.base.SRLoss`); the composite then
+    receives the model's full return and hands it only to the terms that opted
+    in, giving every other term the bare primary tensor. A recursive-supervision
+    term can therefore sit beside a plain pixel term under one weighted sum.
 
     Args:
         terms: Named loss modules, each called as ``term(pred, target)``.
@@ -62,17 +69,46 @@ class WeightedSumLoss(SRLoss):
         #: rebound each call.
         self.last_terms: dict[str, torch.Tensor] = {}
 
+    @property
+    def wants_model_output(self) -> bool:
+        """Whether any term opted in to the model's full output record."""
+        return any(getattr(term, "wants_model_output", False) for term in self.terms.values())
+
+    def set_weight(self, name: str, value: float) -> None:
+        """Update one term's weight in place -- the seam a schedule callback uses.
+
+        Same fail-loud rule ``__init__`` already applies to ``weights``: an
+        unknown name is an error, not a silent no-op that leaves the run
+        training at whatever weight was already there.
+
+        Args:
+            name: An existing term name.
+            value: The new weight.
+
+        Raises:
+            ValueError: If ``name`` is not one of this loss's terms.
+        """
+        if name not in self.weights:
+            raise ValueError(f"no such term: {name!r}; terms are {sorted(self.weights)}")
+        self.weights[name] = float(value)
+
     def bind(self, processor: SRProcessor) -> None:
         """Forward the bind to every term that is an :class:`SRLoss`."""
         for term in self.terms.values():
             if isinstance(term, SRLoss):
                 term.bind(processor)
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Weighted sum of every term, recording each contribution."""
+    def forward(self, pred: torch.Tensor | SRModelOutput, target: torch.Tensor) -> torch.Tensor:
+        """Weighted sum of every term, recording each contribution.
+
+        Terms that opted in to the model's output record get ``pred`` as
+        received; every other term gets its primary tensor.
+        """
         total = None
+        primary = unwrap_primary(pred)
         for name, term in self.terms.items():
-            contribution = term(pred, target) * self.weights[name]
+            term_pred = pred if getattr(term, "wants_model_output", False) else primary
+            contribution = term(term_pred, target) * self.weights[name]
             value = contribution.detach()
             prior = self.last_terms.get(name)
             # A buffer created under torch.inference_mode() (trainer.validate()

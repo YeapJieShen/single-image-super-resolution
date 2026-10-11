@@ -117,7 +117,7 @@ def make_real_planes(case: dict) -> tuple[np.ndarray, np.ndarray]:
     Reproduces the SRResNet validation scoring pipeline exactly, substituting
     the bicubic baseline for model output (see module docstring):
 
-    1. Mod-crop HR to a multiple of ``scale`` (:class:`sisr.datasets.srresnet.
+    1. Mod-crop HR to a multiple of ``scale`` (:class:`sisr.datasets.native_lr.
        ValidationDataset`'s convention).
     2. :func:`sisr.utils.imresize.resize` down by ``scale``, then back up by
        ``scale`` -- the model-free reconstruction.
