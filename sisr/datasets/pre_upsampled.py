@@ -4,34 +4,29 @@ LR is generated from HR via bicubic-down → bicubic-up so the LR patches share
 the spatial size of the HR patches (pre-upsampled SRCNN formulation).
 :class:`TrainDataset` caches whole decoded HR images (raw, uint8, headered)
 through :mod:`~sisr.datasets.hr_cache`, shared verbatim with
-:mod:`sisr.datasets.srresnet` — the same image directory produces exactly one
+:mod:`sisr.datasets.native_lr` — the same image directory produces exactly one
 cache regardless of which architecture builds it first. Decoding a source
 image once and slicing its deterministic sub-images out at load time is far
 cheaper than re-decoding, and it decouples that cache from the sub-image
 grid (``subimg_size``, ``stride``): neither affects the raw bytes stored.
 
-**The whole image is degraded once and both sub-images are sliced from the
-result**, which is the order the authors' released ``demo_SR.m`` uses —
-``modcrop`` then ``imresize`` down then up, and only then patch extraction.
-Degrading an already-extracted patch instead resolves the bicubic kernel's
-edge taps against the patch border: at x3 the interior is bit-identical and
-the entire difference is a 4px border, 43% of a 33x33 patch. The degraded
-plane is cached separately by :mod:`~sisr.datasets.derived_cache`, whose key
-*does* carry ``scale``.
+**The whole image is downscaled once and cached** — the order the authors'
+released ``demo_SR.m`` uses: ``modcrop`` then ``imresize`` down → up, and only
+then patch extraction. Degrading an already-extracted patch instead resolves the
+bicubic kernel's edge taps against the patch border: at x3 the interior is
+bit-identical and the entire difference is a 4px border, 43% of a 33x33 patch.
+That order is mandatory, not just cached this way for convenience — it is the
+only way to get correct pixel values at a patch border, where the bicubic
+kernel reaches outside the patch. :class:`TrainDataset` caches the LR-sized
+downscale (``1/scale**2`` of HR pixels) and upsamples each training patch back
+to HR size **at load time** with :func:`~sisr.utils.imresize.resize_window`,
+which computes only the patch's window of the whole-image upsample and is
+byte-identical to upsampling the whole image first and slicing it. The cached
+working set is roughly HR bytes x ``(1 + 1/scale**2)`` instead of ``2x`` HR
+bytes; the price is one small ``resize_window`` call per item instead of a
+slice-copy. ``resize_window`` supports odd and power-of-two scales, so those are
+the scales :class:`TrainDataset` accepts.
 
-**🚨 This plane needs RAM, and running short of it is catastrophic rather than
-gradual.** SRCNN is pre-upsampled, so the degraded plane is HR-sized rather
-than ``1/scale**2`` of it — caching it roughly **doubles the working set** a
-shuffling loader touches. While that set fits in page cache the cost is a
-memory read; once it does not, every item becomes a disk seek. Measured on a
-12 GB box with a 12.6 GB working set: a real training loop fell from **21.6 to
-1.0 it/s, a 21x regression**, with the GPU at 13% and 36% iowait.
-
-**Budget roughly two bytes of RAM per HR pixel in the dataset, plus headroom.**
-For DIV2K-800 that is ~12.6 GB, so a 16 GB machine is the practical floor and
-12 GB is not enough. The symptom is unmistakable once you look for it: low GPU
-utilisation with high iowait and sustained disk read. It cannot be seen in a
-per-item benchmark, because per-item *work* is not what changed.
 :class:`ValidationDataset` generates LR pairs on the fly for full images.
 
 LR degradation uses MATLAB-compatible antialiased bicubic resizing (see
@@ -40,15 +35,18 @@ low-pass filter, so no separate blur step is needed.
 """
 
 import bisect
-from collections.abc import Iterator
+import math
+import random
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from ..colorspace import rgb_to_y_studio
 from ..utils.cache import LMDBCacheBuildContext
-from ..utils.imresize import resize
-from .base import HRCachedTrainDataset, SRDataset
+from ..utils.imresize import resize, resize_float, resize_window
+from .base import HRCachedTrainDataset, SRDataset, as_scales
 from .derived_cache import modcrop as _modcrop
 from .derived_cache import modcrop_extent as _modcrop_extent
 from .hr_cache import process_hr_image as _process_hr_image
@@ -96,10 +94,10 @@ def _degrade(hr_arr: np.ndarray, scale: int) -> np.ndarray:
     """Derives an LR array from an HR array: bicubic-down → bicubic-up.
 
     Restores *hr_arr*'s original spatial size (SRCNN's pre-upsampled
-    formulation). :class:`ValidationDataset` applies it per full image;
-    :class:`TrainDataset` reads the same round trip out of the cached
-    whole-image plane instead of recomputing it per sub-image, so both see a
-    degradation computed over a whole modcropped image and cannot drift.
+    formulation). :class:`ValidationDataset` applies this per full image.
+    :class:`TrainDataset` applies the downscale (down part) over the whole
+    modcropped image and caches the result, then upsamples each sub-image
+    patch at load time via :func:`~sisr.utils.imresize.resize_window`.
     """
     h, w = hr_arr.shape[:2]
     down = resize(hr_arr, (h // scale, w // scale))
@@ -112,15 +110,19 @@ class TrainDataset(HRCachedTrainDataset):
     Every HR image is decoded once into an LMDB cache (uint8 RGB, whole) — see
     :mod:`~sisr.datasets.base` for why. Each ``__getitem__`` maps its flat index
     to a source image and a deterministic ``(top, left)`` grid position in O(1),
-    and slices the ``subimg_size`` square out of **both** whole-image planes at
-    that position — the degraded one already computed over the whole image, so
-    no kernel ever reaches past a patch edge.
+    and slices the ``subimg_size`` square directly out of the cached raw HR image
+    at that position. The LR sub-image is upsampled from the cached whole-image
+    LR downscale (1/scale**2 of HR) back to HR size **at load time** via
+    :func:`~sisr.utils.imresize.resize_window` — byte-identical to upsampling
+    the whole image first and slicing the same window, without materializing
+    the full HR-sized plane.
     **The grid is derived from exactly one place** (:func:`_grid_dims`), so
     indices can never silently misalign.
 
-    Because the degradation now happens before extraction, ``subimg_size`` and
-    ``scale`` are no longer coupled: there is no per-patch sampling grid left to
-    shift, so ``33 % scale`` stops mattering.
+    Because the downscale (HR→LR) happens over the whole image before extraction
+    (see module docstring), ``subimg_size`` and ``scale`` are no longer coupled:
+    there is no per-patch sampling grid left to shift, so ``33 % scale`` stops
+    mattering.
 
     **The checksum keys only on the file manifest** (plus a format tag), not on
     ``subimg_size``/``stride``/``scale`` — none of those affect the bytes
@@ -134,7 +136,13 @@ class TrainDataset(HRCachedTrainDataset):
         img_dir: Directory of HR images.
         subimg_size: Spatial size of the square sub-images to extract.
         stride: Step size of the sliding window used for sub-image extraction.
-        scale: Downscaling factor for generating LR sub-images.
+        scale: Downscaling factor for generating LR sub-images, or a list of
+            them for multi-scale training: **a scale is drawn per patch**, so a
+            batch mixes scales (fine here, every patch is on the HR grid and the
+            model never sees the scale). The patch grid then comes from the
+            modcrop of the scales' least common multiple, which is inside every
+            scale's own modcrop, so each patch is valid at each scale. One derived
+            LR cache is built per scale.
         use_tqdm: Whether to display a progress bar during the LMDB build.
         cache_dir: Defaults to ``img_dir / '.lmdb_cache'``.
         build_num_workers: ``None`` (default) uses ``min(os.cpu_count() or
@@ -143,7 +151,8 @@ class TrainDataset(HRCachedTrainDataset):
             loading.
 
     Raises:
-        ValueError: If no image files are found in ``img_dir``.
+        ValueError: If no image files are found in ``img_dir``, or *scale* is
+            neither odd nor a power of two.
     """
 
     def __init__(
@@ -151,18 +160,24 @@ class TrainDataset(HRCachedTrainDataset):
         img_dir: str | Path,
         subimg_size: int,
         stride: int,
-        scale: int,
+        scale: int | Sequence[int],
         use_tqdm: bool = False,
         cache_dir: str | Path | None = None,
         build_num_workers: int | None = None,
     ):
+        self.scales = as_scales(scale)
+        # Fail here, before the cache build, rather than in the first loader worker.
+        for s in self.scales:
+            resize_window(np.zeros((1, 1), dtype=np.uint8), (s, s), 0, 1, 0, 1)
         self.sub_img_size = subimg_size
         self.stride = stride
-        self.scale = scale
+        self.scale = self.scales[0] if len(self.scales) == 1 else list(self.scales)
+        self.scale_per_batch = False
+        self._grid_scale = math.lcm(*self.scales)
         super().__init__(
             img_dir,
-            scale=scale,
-            derived_kind="bicubic",
+            scale=self.scales,
+            derived_kind="lr",
             use_tqdm=use_tqdm,
             cache_dir=cache_dir,
             build_num_workers=build_num_workers,
@@ -186,7 +201,7 @@ class TrainDataset(HRCachedTrainDataset):
         n_cols_list: list[int] = []
         offset = 0
         for h, w in self._img_sizes:
-            n_rows, n_cols = _grid_dims(h, w, self.scale, self.sub_img_size, self.stride)
+            n_rows, n_cols = _grid_dims(h, w, self._grid_scale, self.sub_img_size, self.stride)
             n_cols_list.append(n_cols)
             offsets.append(offset)
             offset += n_rows * n_cols
@@ -203,13 +218,14 @@ class TrainDataset(HRCachedTrainDataset):
         """Retrieves the LR/HR sub-image pair at the given index.
 
         Locates *idx*'s source image and grid position in O(1) via
-        :attr:`_img_offsets`/:attr:`_img_n_cols`, slices the HR sub-image out
-        of that image's cached raw bytes (via
-        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`) and the LR
-        sub-image out of the whole-image degraded plane (via
-        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_derived`) at the
-        same position. Both planes are modcropped identically, so the two
-        slices are aligned by construction.
+        :attr:`_img_offsets`/:attr:`_img_n_cols`, slices the HR sub-image
+        directly out of that image's cached raw bytes (via
+        :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_hr`), and
+        upsamples the LR sub-image from the cached whole-image LR downscale
+        (via :meth:`~sisr.datasets.base.HRCachedTrainDataset._read_derived`
+        and :func:`~sisr.utils.imresize.resize_window`). The downscale and
+        upsample slicing are aligned to the same grid position, so both results
+        correspond to the correct spatial patch.
 
         Args:
             idx (int): Zero-based sub-image index.
@@ -236,10 +252,20 @@ class TrainDataset(HRCachedTrainDataset):
                 top : top + self.sub_img_size, left : left + self.sub_img_size, :
             ].copy()
 
-        with self._read_derived(img_idx) as plane:
-            lr_subimg = plane[
-                top : top + self.sub_img_size, left : left + self.sub_img_size, :
-            ].copy()
+        # No draw for one scale: the RNG stream a single-scale run consumes is unchanged.
+        scale = random.choice(self.scales) if len(self.scales) > 1 else self.scales[0]
+        h_full, w_full = self._img_sizes[img_idx]
+        h_crop = _modcrop_extent(h_full, scale)
+        w_crop = _modcrop_extent(w_full, scale)
+        with self._read_derived(img_idx, scale) as plane:
+            lr_subimg = resize_window(
+                plane,
+                (h_crop, w_crop),
+                top,
+                self.sub_img_size,
+                left,
+                self.sub_img_size,
+            )
 
         return self._to_tensor(lr_subimg), self._to_tensor(hr_subimg)
 
@@ -262,21 +288,46 @@ class ValidationDataset(SRDataset):
         img_dir (str | Path): Directory containing the high-resolution
             images.
         scale (int): Downscaling factor for generating low-resolution images.
+        yield_is_grey (bool): Also yield, as a third element, whether the file is a single-channel
+            image (:meth:`~SRDataset._is_grey_file`), for ``eval_config.grey_plane_scoring``.
+            Default ``False``: two-element items, exactly as before.
+        clamp_input_luma (bool): Clamp a colour image's served LR luma to the studio range
+            ``[16/255, 235/255]``, as ``VDSR.m`` and ``DRCN.m`` clamp the network input's Y
+            (a single-channel file is not clamped). Only the luma moves: the shift is added to
+            R, G and B equally, so Cb/Cr, which the output is stitched with, are unchanged.
+            Evaluation only; training is untouched. Default ``False``.
+        float_degrade (bool): Degrade in floating point -- no uint8 re-quantization
+            between the down and up passes and no final rounding or clamp
+            (:func:`~sisr.utils.imresize.resize_float`) -- as ``VDSR.m`` and
+            ``DRCN.m`` do in ``single`` precision. The served LR is then not an 8-bit
+            image and may leave ``[0, 1]`` by a bicubic overshoot. Evaluation only: the
+            training dataset has no such option and the uint8 path is untouched.
+            Default ``False``.
 
     Raises:
         ValueError: If no image files are found in ``img_dir``.
     """
 
-    def __init__(self, img_dir: str | Path, scale: int):
+    def __init__(
+        self,
+        img_dir: str | Path,
+        scale: int,
+        float_degrade: bool = False,
+        yield_is_grey: bool = False,
+        clamp_input_luma: bool = False,
+    ):
         super().__init__()
 
         self._index_images(img_dir)
         self.scale = scale
+        self.float_degrade = float_degrade
+        self.yield_is_grey = yield_is_grey
+        self.clamp_input_luma = clamp_input_luma
 
     def __len__(self) -> int:
         return len(self.img_paths)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
         """Retrieves the LR/HR image pair at the given index.
 
         Args:
@@ -290,6 +341,18 @@ class ValidationDataset(SRDataset):
         """
         path = self.img_paths[idx]
         arr = _modcrop(self._load_rgb(path), self.scale)  # HWC uint8 RGB
-        lr_arr = _degrade(arr, self.scale)
-
-        return self._to_tensor(lr_arr), self._to_tensor(arr)
+        if self.float_degrade:
+            h, w = arr.shape[:2]
+            down = resize_float(arr.astype(np.float64), (h // self.scale, w // self.scale))
+            lr = torch.from_numpy((resize_float(down, (h, w)) / 255.0).astype(np.float32))
+            lr_t = lr.permute(2, 0, 1).contiguous()
+        else:
+            lr_t = self._to_tensor(_degrade(arr, self.scale))
+        need_mode = self.yield_is_grey or self.clamp_input_luma
+        grey = self._is_grey_file(path) if need_mode else torch.tensor(False)
+        if self.clamp_input_luma and not grey:
+            y = rgb_to_y_studio(lr_t[None])[0]
+            lr_t = lr_t + (y.clamp(16 / 255, 235 / 255) - y) * (255 / 219)  # luma only (full range)
+        if self.yield_is_grey:
+            return lr_t, self._to_tensor(arr), grey
+        return lr_t, self._to_tensor(arr)

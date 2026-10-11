@@ -1,0 +1,186 @@
+# ESRGAN stage 2 -- Wang et al.: RRDB generator, relativistic-average GAN, VGG54 features taken
+# BEFORE activation. The generator starts from stage 1's weights (config.esrgan_psnr.template.yaml).
+# Settings are explained in docs/configuration.md, which covers the two-optimizer layout and
+# the global-step vs batch units below. Config files must stay ASCII.
+# From the paper (Sec. 4.1, eq. 3): L_G = L_percep + lambda * L_Ra + eta * L1 with lambda = 5e-3,
+# eta = 1e-2; Adam lr 1e-4 halved at [50k, 100k, 200k, 300k] iterations; batch 16, 128 patches.
+# ASSUMPTIONS (not stated by the paper): the VGG feature distance is L1 and unscaled (the
+# released code's), the discriminator is BasicSR's VGGStyleDiscriminator at 128 (the released
+# training code's; other sizes differ from it, see its docstring), the total length, and the
+# L_Ra sum-of-two-terms convention (see RelativisticAverageLoss).
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+# The GENERATOR's optimizer; the discriminator's is nested under model.init_args.
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 1.0e-4
+
+# SRGANLightning steps schedulers by hand once per batch -- milestones are counted in BATCHES.
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.MultiStepLR
+  init_args:
+    milestones: [50000, 100000, 200000, 300000]
+    gamma: 0.5
+
+model:
+  class_path: sisr.training.SRGANLightning
+  init_args:
+      model:
+        class_path: sisr.models.esrgan.RRDBNet
+        init_args:
+          scale: &scale 4
+          in_out_channels: 3
+          features: 64
+          growth: 32
+          num_blocks: 23
+          residual_scale: 0.2
+      processor:
+        class_path: sisr.processors.RGBProcessor
+      # L_percep (weight 1) + eta * L1 (eta = 1e-2). First use downloads ~548 MB of VGG19 weights.
+      criterion:
+        class_path: sisr.losses.WeightedSumLoss
+        init_args:
+          terms:
+            vgg:
+              class_path: sisr.losses.VGG19FeatureLoss
+              init_args:
+                layer: vgg54
+                before_activation: true
+                distance: l1
+                feature_scale: 1.0
+            l1:
+              class_path: torch.nn.L1Loss
+          weights:
+            vgg: 1.0
+            l1: 1.0e-2
+      # Must equal the HR crop the data serves; hr_crop_size below is anchored to it.
+      discriminator:
+        class_path: sisr.models.esrgan.VGGStyleDiscriminator
+        init_args:
+          hr_input_size: &hr_crop 128
+      discriminator_optimizer:
+        class_path: torch.optim.Adam
+        init_args:
+          lr: 1.0e-4
+      discriminator_lr_scheduler:
+        class_path: torch.optim.lr_scheduler.MultiStepLR
+        init_args:
+          milestones: [50000, 100000, 200000, 300000]
+          gamma: 0.5
+      adversarial_loss:
+        class_path: sisr.losses.RelativisticAverageLoss
+      training_config:
+        class_path: sisr.models.esrgan.ESRGANTrainingConfig
+        init_args:
+          scale: *scale
+          example_input_shape: [3, 32, 32]
+          # Stage 1's generator weights (bare .safetensors, never the sibling .ckpt).
+          # s999999 for a 1e6-step stage 1: the step in an artifact name is the index of
+          # the step just completed.
+          init_from: "experiments/RRDBNet/baseline/checkpoints/RRDBNet_x4_RGB_23B32G_s999999.safetensors"
+          # adversarial_weight 5.0e-3 (lambda) and d_steps_per_g_step 1 are the defaults.
+      # Defaults add lpips + dists; 'lpips' needs the [perceptual] extra.
+      eval_config:
+        class_path: sisr.models.esrgan.ESRGANEvalConfig
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.native_lr.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      scale: *scale
+      hr_crop_size: *hr_crop   # the paper's 128x128 patches
+      crops_per_image: 1
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.native_lr.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+    Set14:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+    BSD100:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+  train_dataloader_kwargs:
+    batch_size: 16
+    # !! These counts have OOM'd host RAM on a 16-worker box. Lower them if you do.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  # Optimizer steps (2 per batch: D then G). ASSUMPTION: 400,000 batches, past the last
+  # halving at 300k.
+  max_steps: 800000
+  val_check_interval: 5000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 1000
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  accelerator: cuda
+  devices: [0]                 # SRGANLightning refuses world_size > 1
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    # Rolling and monitor-free: a PSNR/SSIM top-k would keep the least adversarial state.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: null
+        keep_last: 3
+        every_n_train_steps: 10000
+    # Both networks. The generator's is what init_from consumes.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: null
+        keep_last: 3
+        every_n_train_steps: 10000
+        attribute: model
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: null
+        keep_last: 3
+        every_n_train_steps: 10000
+        attribute: discriminator
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    # GradNormLogger is deliberately absent: one scalar would mix both networks.
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: ESRGAN
+          version: baseline
+        log_graph: true
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest

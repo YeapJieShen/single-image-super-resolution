@@ -1,0 +1,166 @@
+# MDSR (80 blocks, 64 features) -- Lim et al. 2017: ONE model for x2/x3/x4 with scale-specific
+# 5x5 pre-processing blocks and upsamplers around a shared trunk. The baseline MDSR is the same
+# config with num_blocks: 16. MDSR+ is the SAME weights with eval_config.self_ensemble: true at
+# test time. Settings are explained in docs/configuration.md. Config files must stay ASCII.
+# From the paper (Sec. 3-4): L1 loss, Adam (0.9, 0.999, eps 1e-8), batch 16,
+# lr 1e-4 halved every 2e5 updates, no residual scaling, DIV2K, 1e6 updates for the final models,
+# a scale drawn at random for each batch (done here by the per-batch scale sampler),
+# flips/90-degree rotations as augmentation (NOT implemented by this repo's datasets). DEVIATION:
+# the paper and its code use 48x48 LR patches at every scale; one fixed HR crop (hr_crop_size)
+# gives 48/32/24 at x2/x3/x4, a dataset limit here. The model
+# takes [0, 1] and applies the 0-255 range and mean shift internally. The unsuffixed val tags
+# (psnr/val/Y) are the MEAN over the three scales; psnr/val/Y/x2 etc. are per scale.
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 1.0e-4
+    eps: 1.0e-8
+
+# Counted in optimizer steps (interval: step).
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.StepLR
+  init_args:
+    step_size: 200000
+    gamma: 0.5
+
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.mdsr.MDSR
+        init_args:
+          scale: &scale [2, 3, 4]
+          in_out_channels: 3
+          features: 64
+          num_blocks: 80
+      processor:
+        class_path: sisr.processors.RGBProcessor
+      criterion:
+        class_path: torch.nn.L1Loss
+      training_config:
+        class_path: sisr.models.mdsr.MDSRTrainingConfig
+        init_args:
+          scale: *scale
+          # The LR patch is 96 // scale, so it differs by scale; the shape is only a probe.
+          example_input_shape: [3, 48, 48]
+      # PSNR/SSIM on Y, border = scale: the authors' own convention (except 8-bit rounding).
+      eval_config:
+        class_path: sisr.models.mdsr.MDSREvalConfig
+        init_args:
+          # Evaluation as the authors' MATLAB scripts do it (uint8 images, NTIRE2017 evaluation.m):
+          # luma rounded to 8-bit levels, and a single-channel image scored on its raw plane.
+          round_to_uint8: true
+          grey_plane_scoring: true
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.native_lr.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      scale: *scale
+      hr_crop_size: 96   # DEVIATION: 48/32/24 LR patches at x2/x3/x4 (paper: 48 at every scale)
+      crops_per_image: 1
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.native_lr.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+      yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
+    Set14:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
+    BSD100:
+      class_path: sisr.datasets.native_lr.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+        yield_is_grey: true   # the file mode, for grey_plane_scoring (a single-channel file is scored on its raw plane)
+  train_dataloader_kwargs:
+    batch_size: 16
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  # The paper's 1e6 updates for the final models; the schedule above is counted in the same unit.
+  max_steps: 1000000
+  val_check_interval: 50000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 1000
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-ssim
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-weights-ssim
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        every_n_batches: 5000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: MDSR
+          version: baseline
+        log_graph: true
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest

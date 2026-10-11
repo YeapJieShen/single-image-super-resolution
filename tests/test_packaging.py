@@ -61,6 +61,16 @@ def test_perceptual_extra_declares_lpips():
     assert any(dep.startswith("lpips") for dep in extras["perceptual"])
 
 
+def test_perceptual_extra_declares_pyiqa_and_scipy():
+    """Ma's score (and so PI) comes from pyiqa; the native NIQE reads its pristine
+    model with SciPy. Both are imported directly, so both are declared, not left to
+    arrive transitively."""
+    pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    extras = pyproject["project"]["optional-dependencies"]
+    assert any(dep.startswith("pyiqa") for dep in extras["perceptual"])
+    assert any(dep.startswith("scipy") for dep in extras["perceptual"])
+
+
 def test_wheel_ships_py_typed(tmp_path):
     """sisr/py.typed (PEP 561) makes the package's type annotations a checked
     promise to consumers of the wheel, not just an internal convention.

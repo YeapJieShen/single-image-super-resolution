@@ -120,12 +120,21 @@ trains one network needs no new module.
    `input_contract` class var and `variant_tag` property, and optionally
    `reset_parameters(**kwargs)` for a paper-faithful init. Normalize sequence
    hyperparameters (kernel sizes, filter counts) with `as_int_tuple`, as every existing
-   architecture does.
+   architecture does. A model that serves several scales sets `multi_scale = True` and takes
+   `forward(x, scale=...)`.
 2. Add `<Arch>TrainingConfig` / `<Arch>EvalConfig` with the paper's defaults, copying the
    shape of `sisr/models/srcnn/config.py`.
 3. Pick a processor (`RGBProcessor`, `RGBSignedOutputProcessor`, `YChannelProcessor`,
    `YCbCrProcessor`) or write one.
 4. Copy a template, repoint the `class_path`s, run `sisr fit`.
+
+## Layout and optional extras
+
+Callbacks live in the package `sisr/training/callbacks/`, one module per concern (`checkpoint`,
+`images`, `scalars`, `progress`, `registry`); anything that writes to a logger's client stamps its
+step with `_logger_step` from `_common`, never `trainer.global_step`. A heavy optional dependency
+(`mlflow`, `pyiqa`) is a pyproject extra and is imported only inside the code path that needs it,
+with an error naming the extra when it is missing.
 
 ## License
 

@@ -1,13 +1,11 @@
 # Reproduction reference
 
-Everything about **whether the numbers reproduce, and under exactly what convention**. Split out
-of the README on 2026-09-01 (#198), because this is reference material a reader consults with a
-specific question rather than narrative anyone reads top to bottom, and it was the section that
-kept growing.
+Everything about **whether the numbers reproduce, and under exactly what convention**: reference
+material to consult with a specific question. Per-model parity status is summarised in
+[models.md](models.md).
 
-**This file is the single owner of these figures and conventions.** The README carries the
-headline numbers and links here; it does not restate the tables. If you are adding a result,
-add it here.
+**This file is the single owner of these figures and conventions.** The README and models.md link
+here and do not restate the tables. If you are adding a result, add it here.
 
 ## Reproduction results
 
@@ -242,7 +240,7 @@ both are pinned:
   standard. The switch is **in place**: `ssim/val/RGB` and `ssim/val/Y` name the
   metric identically either way, and checkpoint filenames
   (`{prefix}_s{step}.ckpt`, built by
-  [`SRCheckpoint`](../sisr/training/callbacks.py)) carry no metric value at all — so
+  [`SRCheckpoint`](../sisr/training/callbacks/checkpoint.py)) carry no metric value at all — so
   neither the tag nor the filename reveals which convention produced a given value.
   It is recorded in `hparams` and in every artifact's `sisr_meta` instead. Consequently, an
   SRResNet SSIM figure is comparable to Ledig et al. and **not** to Wang-based tables
@@ -264,12 +262,10 @@ both are pinned:
   per-image PSNR values versus a single PSNR from pooled MSE — with the two diverging by
   up to ~2.5 dB on the same data. This project uses the former (their convention (a), not
   MSE-pooling): PSNR is computed one image at a time and the per-image values are then
-  averaged ([`sisr/metrics/scoring.py`](../sisr/metrics/scoring.py)'s `SRScorer.psnr`
-  computes each image's PSNR per-image before any mean is taken;
-  `sisr/training/callbacks.py`'s `_flush_buffer` takes the arithmetic mean over a
-  benchmark set's buffered per-image scores), independently confirmed by
-  `SRScorer.psnr`'s own docstring, which names and rejects MSE-pooling as the
-  alternative. Wang, Chen and Hoi's
+  averaged (`BenchmarkImageLogger._collect_batch` in `sisr/training/callbacks/images.py` computes
+  each image's PSNR and `_flush_buffer` takes the arithmetic mean over them), independently confirmed by `SRScorer.psnr` in
+  [`sisr/metrics/scoring.py`](../sisr/metrics/scoring.py), whose docstring names and rejects
+  MSE-pooling as the alternative. Wang, Chen and Hoi's
   ["Deep Learning for Image Super-resolution: A Survey"](https://arxiv.org/abs/1902.06068)
   (IEEE TPAMI 2020, arXiv:1902.06068, §II-D "Operating Channels") likewise finds no
   accepted best practice for which color space or channels to score SR on, with reported
