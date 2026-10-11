@@ -1,0 +1,159 @@
+# VDSR -- Kim et al., very deep SR network, pre-upsampled LR, Y-channel only, ONE model for
+# x2/x3/x4. Built and smoke-tested; the ported official weights reproduce the paper's PSNR-Y
+# (see the README). This training recipe is NOT yet reproduced: the paper trains on 291 images
+# (91 Yang + 200 BSD) and this template uses DIV2K, and it states no clipping threshold.
+# Settings are explained in docs/configuration.md. Config files must stay ASCII.
+seed_everything: 42
+
+# No-op on this repo's conv stacks; kept for matmul-heavy architectures.
+matmul_precision: high
+
+optimizer:
+  class_path: torch.optim.SGD
+  init_args:
+    lr: 0.1               # the paper's initial LR
+    momentum: 0.9
+    weight_decay: 1.0e-4  # the paper's L2 penalty
+
+# The paper divides the LR by 10 every 20 epochs, 80 epochs in all = 9960 iterations of 64
+# patches, so 20 epochs = 2490 iterations. Counted in optimizer steps (interval: step).
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.StepLR
+  init_args:
+    step_size: 2490
+    gamma: 0.1
+
+model:
+  class_path: sisr.training.SRLightning
+  init_args:
+      model:
+        class_path: sisr.models.vdsr.VDSR
+        init_args:
+          in_out_channels: 1                 # Y channel only
+          depth: 20
+          features: 64
+      processor:
+        class_path: sisr.processors.YChannelProcessor
+      training_config:
+        class_path: sisr.models.vdsr.VDSRTrainingConfig
+        init_args:
+          # One multi-scale model: a scale is drawn per 41x41 patch, and every val/test set is
+          # scored once per scale (Set5_x2, Set5_x3, ...). The plain psnr/val/Y is their mean.
+          scale: &scale [2, 3, 4]
+          # Adjustable gradient clipping (gradient_clip_val below is theta): clip to theta / lr.
+          scale_clip_with_lr: true
+          example_input_shape: [1, 41, 41]
+      # Defaults to ssim_impl: wang, the field standard.
+      eval_config:
+        class_path: sisr.models.vdsr.VDSREvalConfig
+
+data:
+  train_dataset:
+    class_path: sisr.datasets.pre_upsampled.TrainDataset
+    init_args:
+      img_dir: data/DIV2K_train_HR
+      subimg_size: 41       # the paper's 41x41 patches (the receptive field)
+      stride: 41            # non-overlapping, as the paper
+      scale: *scale
+      use_tqdm: true
+      cache_dir: .lmdb_cache/DIV2K_train_HR
+  val_dataset:
+    class_path: sisr.datasets.pre_upsampled.ValidationDataset
+    init_args:
+      img_dir: data/DIV2K_valid_HR
+      scale: *scale
+  test_datasets:
+    Set5:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/Set5_HR
+        scale: *scale
+    Set14:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/Set14_HR
+        scale: *scale
+    BSD100:
+      class_path: sisr.datasets.pre_upsampled.ValidationDataset
+      init_args:
+        img_dir: data/BSD100_HR
+        scale: *scale
+  train_dataloader_kwargs:
+    batch_size: 64          # the paper's mini-batch of 64 patches
+    # Load-bearing on real data: num_workers=0 hits a hard serial floor.
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+  val_dataloader_kwargs:
+    batch_size: 1
+    num_workers: 2
+    persistent_workers: true
+
+trainer:
+  max_epochs: -1
+  # The paper's 80 epochs = 9960 iterations (batch 64), so 9960 steps; the lr schedule above
+  # is counted in the same unit.
+  max_steps: 9960
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  num_sanity_val_steps: -1
+  log_every_n_steps: 100
+  # ASSUMPTION: theta = 0.01 is this template's own choice. The paper defines the scheme
+  # (clip to [-theta/lr, theta/lr]) and states no value for theta.
+  gradient_clip_val: 0.01
+  gradient_clip_algorithm: value
+  deterministic: false
+  # Free here: every training step feeds the same fixed crop shape.
+  benchmark: true
+  # bf16-mixed measured as a REGRESSION at these batch sizes. See the docs.
+  # precision: bf16-mixed
+  accelerator: cuda
+  devices: [0]
+  enable_progress_bar: true
+  enable_model_summary: true
+  callbacks:
+    - class_path: sisr.training.BenchmarkImageLogger
+      init_args:
+        every_n_val_runs: 1
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    # A distinct prefix, because the derived name is a projection of the *model*'s
+    # provenance and says nothing about which metric selected the file. Without it
+    # this callback and the PSNR one above write the same name and Lightning
+    # suffixes one `-v1` by save order. Startup now refuses that rather than
+    # publishing two artifacts whose names cannot tell you which is which.
+    - class_path: sisr.training.SRCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-ssim
+    # Distributable, optimizer-free weights alongside the resumable .ckpt files.
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: psnr/val/Y
+        save_top_k: 3
+    - class_path: sisr.training.SRWeightsCheckpoint
+      init_args:
+        monitor_metric: ssim/val/RGB
+        save_top_k: 3
+        filename_prefix: sr-weights-ssim
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+    - class_path: sisr.training.GradNormLogger
+      init_args:
+        every_n_batches: 1000
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args:
+        <<: &log_dest
+          save_dir: experiments
+          name: VDSR
+          version: baseline
+        log_graph: true
+        default_hp_metric: false
+    - class_path: lightning.pytorch.loggers.CSVLogger
+      init_args:
+        <<: *log_dest

@@ -16,7 +16,10 @@ from PIL import Image
 
 from sisr.models.drcn import DRCN
 from sisr.models.drcn.port import load_matconvnet
-from sisr.utils.imresize import _contributions
+from tests.models.matlab_protocol import prepare as _prepare
+from tests.models.matlab_protocol import psnr as _psnr
+from tests.models.matlab_protocol import u8 as _u8
+from tests.models.matlab_protocol import ycbcr2rgb as _ycbcr2rgb
 
 scipy_io = pytest.importorskip("scipy.io")
 
@@ -83,68 +86,6 @@ def test_load_matconvnet_names_the_missing_parameter(tmp_path):
 
     with pytest.raises(ValueError, match="ensemble_weight"):
         load_matconvnet(tmp_path / "bad.mat")
-
-
-# --- the authors' own protocol (DRCN.m, compute_diff.m), reproduced test-side only ----
-
-
-def _rgb2ycbcr(rgb):
-    r, g, b = (rgb[..., i].astype(np.float64) for i in range(3))
-    ycc = np.stack(
-        [
-            16 + (65.481 * r + 128.553 * g + 24.966 * b) / 255,
-            128 + (-37.797 * r - 74.203 * g + 112.0 * b) / 255,
-            128 + (112.0 * r - 93.786 * g - 18.214 * b) / 255,
-        ],
-        -1,
-    )
-    return np.floor(np.clip(ycc, 0, 255) + 0.5).astype(np.uint8)
-
-
-def _ycbcr2rgb(ycc):
-    y, cb, cr = (ycc[..., i].astype(np.float64) for i in range(3))
-    y = 1.164384 * (y - 16)
-    rgb = np.stack(
-        [
-            y + 1.596027 * (cr - 128),
-            y - 0.391762 * (cb - 128) - 0.812968 * (cr - 128),
-            y + 2.017232 * (cb - 128),
-        ],
-        -1,
-    )
-    return np.floor(np.clip(rgb, 0, 255) + 0.5).astype(np.uint8)
-
-
-def _resize(plane, shape):
-    """MATLAB imresize bicubic on a float plane: no uint8 between passes, as for ``single``."""
-    wh, ih = _contributions(plane.shape[0], shape[0], shape[0] / plane.shape[0])
-    ww, iw = _contributions(plane.shape[1], shape[1], shape[1] / plane.shape[1])
-    plane = np.einsum("ij,ijk->ik", wh, plane[ih])
-    return np.einsum("jk,ijk->ij", ww, plane[:, iw])
-
-
-def _prepare(path, sf):
-    """(ground-truth plane uint8, network input, Cb, Cr or None) for one image at scale ``sf``."""
-    img = Image.open(path)
-    grey = img.mode == "L"
-    rgb = np.asarray(img if grey else img.convert("RGB"))
-    h, w = rgb.shape[0] - rgb.shape[0] % sf, rgb.shape[1] - rgb.shape[1] % sf
-    if grey:
-        gt = rgb[:h, :w]
-        up = _resize(_resize(gt / 255.0, (h // sf, w // sf)), (h, w))
-        return gt, up, None, None
-    ycc = _rgb2ycbcr(rgb[:h, :w])
-    up = [_resize(_resize(ycc[..., i] / 255.0, (h // sf, w // sf)), (h, w)) for i in range(3)]
-    return ycc[..., 0], np.clip(up[0], 16 / 255, 235 / 255), up[1], up[2]
-
-
-def _u8(x):
-    return np.floor(np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8)
-
-
-def _psnr(a, b, sf):
-    a, b = a[sf:-sf, sf:-sf].astype(np.float64), b[sf:-sf, sf:-sf].astype(np.float64)
-    return float(20 * np.log10(255 / np.sqrt(np.mean((a - b) ** 2))))
 
 
 def _device():
