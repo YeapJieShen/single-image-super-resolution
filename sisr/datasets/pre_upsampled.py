@@ -4,7 +4,7 @@ LR is generated from HR via bicubic-down → bicubic-up so the LR patches share
 the spatial size of the HR patches (pre-upsampled SRCNN formulation).
 :class:`TrainDataset` caches whole decoded HR images (raw, uint8, headered)
 through :mod:`~sisr.datasets.hr_cache`, shared verbatim with
-:mod:`sisr.datasets.srresnet` — the same image directory produces exactly one
+:mod:`sisr.datasets.native_lr` — the same image directory produces exactly one
 cache regardless of which architecture builds it first. Decoding a source
 image once and slicing its deterministic sub-images out at load time is far
 cheaper than re-decoding, and it decouples that cache from the sub-image

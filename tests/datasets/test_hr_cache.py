@@ -102,8 +102,8 @@ def varied_size_rgb_image_dir(tmp_path: Path) -> Path:
 def test_srresnet_build_is_reused_by_srcnn_same_files(varied_size_rgb_image_dir: Path):
     """Building via one architecture must be reused, not rebuilt, by the other
     over the identical file set -- the point of unifying the cache."""
-    from sisr.datasets.srcnn import TrainDataset as SRCNNTrainDataset
-    from sisr.datasets.srresnet import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.native_lr import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.pre_upsampled import TrainDataset as SRCNNTrainDataset
 
     cache_dir = varied_size_rgb_image_dir / ".lmdb_cache"
 
@@ -115,7 +115,7 @@ def test_srresnet_build_is_reused_by_srcnn_same_files(varied_size_rgb_image_dir:
         build_num_workers=1,
     )
 
-    with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.pre_upsampled._process_hr_image") as mock_proc:
         srcnn_ds = SRCNNTrainDataset(
             img_dir=varied_size_rgb_image_dir,
             subimg_size=16,
@@ -133,8 +133,8 @@ def test_srresnet_build_is_reused_by_srcnn_same_files(varied_size_rgb_image_dir:
 def test_srcnn_build_is_reused_by_srresnet_same_files(varied_size_rgb_image_dir: Path):
     """Same guarantee in the other build order -- whichever architecture
     builds first, the other must find and reuse it."""
-    from sisr.datasets.srcnn import TrainDataset as SRCNNTrainDataset
-    from sisr.datasets.srresnet import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.native_lr import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.pre_upsampled import TrainDataset as SRCNNTrainDataset
 
     cache_dir = varied_size_rgb_image_dir / ".lmdb_cache"
 
@@ -147,7 +147,7 @@ def test_srcnn_build_is_reused_by_srresnet_same_files(varied_size_rgb_image_dir:
         build_num_workers=1,
     )
 
-    with patch("sisr.datasets.srresnet._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.native_lr._process_hr_image") as mock_proc:
         srresnet_ds = SRResNetTrainDataset(
             img_dir=varied_size_rgb_image_dir,
             scale=2,
@@ -172,8 +172,8 @@ def test_shared_cache_pixel_equivalence_across_architectures(varied_size_rgb_ima
     production scenario, each open their own handle just fine), so the first
     dataset's env is closed before the second is constructed.
     """
-    from sisr.datasets.srcnn import TrainDataset as SRCNNTrainDataset
-    from sisr.datasets.srresnet import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.native_lr import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.pre_upsampled import TrainDataset as SRCNNTrainDataset
 
     cache_dir = varied_size_rgb_image_dir / ".lmdb_cache"
     source = np.array(Image.open(sorted(varied_size_rgb_image_dir.glob("*.png"))[0]).convert("RGB"))
@@ -220,8 +220,8 @@ def test_existing_cache_reopens_without_rebuild_via_either_architecture(
     which exercise the sharing design rather than a persisted directory
     surviving the internal restructuring of how each dataset wires it up.
     """
-    from sisr.datasets.srcnn import TrainDataset as SRCNNTrainDataset
-    from sisr.datasets.srresnet import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.native_lr import TrainDataset as SRResNetTrainDataset
+    from sisr.datasets.pre_upsampled import TrainDataset as SRCNNTrainDataset
 
     cache_dir = varied_size_rgb_image_dir / ".lmdb_cache"
 
@@ -235,8 +235,8 @@ def test_existing_cache_reopens_without_rebuild_via_either_architecture(
     built._cache.get_env().close()  # release before reopening the same path
 
     with (
-        patch("sisr.datasets.srresnet._process_hr_image") as mock_srresnet,
-        patch("sisr.datasets.srcnn._process_hr_image") as mock_srcnn,
+        patch("sisr.datasets.native_lr._process_hr_image") as mock_srresnet,
+        patch("sisr.datasets.pre_upsampled._process_hr_image") as mock_srcnn,
     ):
         reopened_srresnet = SRResNetTrainDataset(
             img_dir=varied_size_rgb_image_dir,

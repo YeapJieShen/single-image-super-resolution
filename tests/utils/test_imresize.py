@@ -38,7 +38,7 @@ a remote host, and ``--wildcards`` for the subtree globs to expand)::
 then move all three dirs under ``data/reference/``.
 
 SRCNN's degradation is bicubic-down *then* bicubic-up (see
-:func:`sisr.datasets.srcnn._degrade`) -- the benchmark distribution above
+:func:`sisr.datasets.pre_upsampled._degrade`) -- the benchmark distribution above
 only covers the downscale leg. To also cover the upscale leg, generate, in
 MATLAB, for every ``LR_bicubic/X{s}/<stem>x{s}.png`` produced above::
 
@@ -409,7 +409,7 @@ def test_matlab_imresize_upscale_matches_real_matlab_reference_data():
     """Byte-equality against MATLAB-generated ``Bicubic_up`` pairs.
 
     Covers SRCNN's second (upscale) degradation step -- see
-    :func:`sisr.datasets.srcnn._degrade` -- which the downscale test above
+    :func:`sisr.datasets.pre_upsampled._degrade` -- which the downscale test above
     does not exercise at all: that test only proves HR-to-LR byte-equality,
     but ``_degrade`` also resizes the LR back up to the HR's own size, and
     until now nothing checked that leg against real MATLAB output. No

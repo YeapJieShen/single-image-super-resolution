@@ -7,7 +7,7 @@ import pytest
 import torch
 from PIL import Image
 
-from sisr.datasets.srcnn import TrainDataset, ValidationDataset
+from sisr.datasets.pre_upsampled import TrainDataset, ValidationDataset
 
 # ---------------------------------------------------------------------------
 # TrainDataset
@@ -95,7 +95,7 @@ def test_train_dataset_missing_key_raises_keyerror(tiny_rgb_image_dir: Path):
 def test_train_dataset_cache_reuse_skips_rebuild(tiny_rgb_image_dir: Path):
     """Second instantiation with the same file set must not re-decode images."""
     _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
-    with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.pre_upsampled._process_hr_image") as mock_proc:
         _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8)
         mock_proc.assert_not_called()
 
@@ -106,7 +106,7 @@ def test_train_dataset_cache_independent_of_grid_params(tiny_rgb_image_dir: Path
     pre-HR-only cache, whose checksum baked all of those in)."""
     cache_dir = tiny_rgb_image_dir / ".lmdb_cache_shared_grid"
     _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2, cache_dir=cache_dir)
-    with patch("sisr.datasets.srcnn._process_hr_image") as mock_proc:
+    with patch("sisr.datasets.pre_upsampled._process_hr_image") as mock_proc:
         ds_b = _make_train(
             tiny_rgb_image_dir,
             subimg_size=24,
@@ -195,7 +195,7 @@ def test_patch_grid_enumeration_matches_grid_dims(tiny_rgb_image_dir: Path):
     """_iter_patch_origins and _compute_grid must derive the sliding-window
     grid from the same _grid_dims helper, so their patch counts and ordering
     can never silently disagree."""
-    from sisr.datasets.srcnn import _grid_dims, _iter_patch_origins
+    from sisr.datasets.pre_upsampled import _grid_dims, _iter_patch_origins
 
     ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, build_num_workers=1)
 
@@ -218,7 +218,7 @@ def test_grid_index_mapping_matches_iteration_order(tiny_rgb_image_dir: Path):
     sub-image (the single-source-of-truth guarantee this design established)."""
     import bisect
 
-    from sisr.datasets.srcnn import _iter_patch_origins
+    from sisr.datasets.pre_upsampled import _iter_patch_origins
 
     ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2)
 
@@ -247,7 +247,7 @@ def test_grid_index_mapping_across_differently_sized_images(tmp_path: Path):
     """
     import bisect
 
-    from sisr.datasets.srcnn import _iter_patch_origins
+    from sisr.datasets.pre_upsampled import _iter_patch_origins
 
     rng = np.random.default_rng(7)
     for i, (h, w) in enumerate([(37, 53), (64, 41), (29, 29), (100, 67)]):
@@ -277,7 +277,7 @@ def test_train_dataset_hr_subimage_matches_exact_grid_position(tiny_rgb_image_di
     pixels at its deterministic (top, left) grid position -- not merely
     'somewhere' in the image, since (unlike SRResNet) SRCNN's positions are
     fixed, not random."""
-    from sisr.datasets.srcnn import _iter_patch_origins
+    from sisr.datasets.pre_upsampled import _iter_patch_origins
 
     ds = _make_train(tiny_rgb_image_dir, subimg_size=20, stride=8, scale=2)
     origins = list(_iter_patch_origins(36, 36, 2, 20, 8))
@@ -379,7 +379,7 @@ def test_validation_hr_is_cropped_to_a_multiple_of_scale(non_divisible_image_dir
 
 def test_validation_lr_matches_the_authors_degradation_order(non_divisible_image_dir: Path):
     """Byte-exact against modcrop-then-degrade, computed independently here."""
-    from sisr.datasets.srcnn import _degrade
+    from sisr.datasets.pre_upsampled import _degrade
 
     arr = np.array(Image.open(next(non_divisible_image_dir.iterdir())).convert("RGB"))
     h, w = arr.shape[:2]
@@ -396,7 +396,7 @@ def test_validation_lr_matches_the_authors_degradation_order(non_divisible_image
 def test_train_and_validation_share_one_modcrop_implementation():
     """The convention had three sites and two answers. It must now have one
     owner that the training grid and the validation loader both call."""
-    from sisr.datasets.srcnn import _modcrop, _modcrop_extent
+    from sisr.datasets.pre_upsampled import _modcrop, _modcrop_extent
 
     assert _modcrop_extent(481, 3) == 480
     assert _modcrop_extent(321, 3) == 321  # already a multiple -- unchanged
@@ -421,7 +421,7 @@ def test_train_lr_is_sliced_from_the_whole_image_degradation_not_degraded_per_pa
     would pass on either implementation wherever the two happen to agree.
     """
     from sisr.datasets.derived_cache import derive
-    from sisr.datasets.srcnn import _degrade
+    from sisr.datasets.pre_upsampled import _degrade
 
     ds = shared_srcnn_train_ds
     # An interior patch: at the image corner the out-of-patch taps and the

@@ -1017,7 +1017,7 @@ def _make_srcnn_datamodule(image_dir: Path):
     from sisr.training import SRDataModule
 
     train_spec = {
-        "class_path": "sisr.datasets.srcnn.TrainDataset",
+        "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
         "init_args": {
             "img_dir": str(image_dir),
             "subimg_size": 33,
@@ -1028,7 +1028,7 @@ def _make_srcnn_datamodule(image_dir: Path):
         },
     }
     val_spec = {
-        "class_path": "sisr.datasets.srcnn.ValidationDataset",
+        "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
         "init_args": {"img_dir": str(image_dir), "scale": 2},
     }
     return SRDataModule(
@@ -2415,7 +2415,7 @@ def test_benchmark_collect_batch_consumes_srdataset_img_paths(tiny_rgb_image_dir
     """The callback resolves filenames from a real SRDataset's declared
     .img_paths contract (not a duck-typed attr)."""
     from sisr.datasets.base import SRDataset
-    from sisr.datasets.srresnet import ValidationDataset
+    from sisr.datasets.native_lr import ValidationDataset
 
     ds = ValidationDataset(img_dir=tiny_rgb_image_dir, scale=2)
     assert isinstance(ds, SRDataset)
