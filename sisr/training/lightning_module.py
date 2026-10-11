@@ -1027,7 +1027,7 @@ class SRLightning(lightning.LightningModule):
         metric uses, and therefore the one that locates this file on a curve —
         ``global_step`` beside it is the optimizer count, which an adversarial
         run advances twice per batch. See
-        :meth:`~sisr.training.callbacks._SRCheckpointBase._monitor_candidates`
+        :meth:`~sisr.training.callbacks.checkpoint._SRCheckpointBase._monitor_candidates`
         for the matching correction to the *filename*.
 
         Args:
@@ -1123,12 +1123,9 @@ class SRLightning(lightning.LightningModule):
     def resolved_scales(self, why: str = "a scale is needed") -> list[int]:
         """The run's upscaling factors, from the training config or the model.
 
-        The single implementation of the three-step resolution --
-        ``training_config.scale``, else the model's ``scale`` hparam, else
-        raise. :func:`~sisr.training.metadata.build_metadata` carried its own
-        copy and the two had already diverged: this one coerces to ``int``, that
-        one did not, so one config could write a ``str`` into artifact
-        provenance and an ``int`` into the evaluation crop border.
+        The single implementation of the resolution -- ``training_config.scale``, else the
+        model's ``scale`` hparam, else raise -- shared by the crop border, the input-contract
+        check and artifact provenance, so all of them see the same ``int`` factors.
 
         Args:
             why: What needed the scale, for the error message.
@@ -1161,10 +1158,8 @@ class SRLightning(lightning.LightningModule):
     def resolved_scale(self, why: str) -> int:
         """The run's one upscaling factor -- :meth:`resolved_scales` for a single-scale run.
 
-        Public rather than underscored precisely because it has a second module
-        as a caller. A private helper with an outside caller is how a helper
-        quietly becomes unchangeable: the underscore says "free to change" and
-        the second caller says otherwise.
+        Public because other modules call it (a private helper with an outside caller
+        is one nobody dares change).
 
         Args:
             why: What needed the scale, for the error message.
