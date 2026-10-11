@@ -13,6 +13,8 @@ optimizer:
     lr: 1.0e-4
 
 # The generator's schedule. The discriminator's mirrors it so both decay together.
+# SRGANLightning steps schedulers by hand once per batch (manual optimization
+# skips Lightning's own per-epoch default) -- milestones are counted in BATCHES.
 lr_scheduler:
   class_path: torch.optim.lr_scheduler.MultiStepLR
   init_args:
@@ -72,7 +74,7 @@ model:
 
 data:
   train_dataset:
-    class_path: sisr.datasets.srresnet.TrainDataset
+    class_path: sisr.datasets.native_lr.TrainDataset
     init_args:
       img_dir: data/DIV2K_train_HR
       scale: *scale
@@ -81,28 +83,28 @@ data:
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
-    class_path: sisr.datasets.srresnet.ValidationDataset
+    class_path: sisr.datasets.native_lr.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
   test_datasets:
     Set5:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
     Set14:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
     BSD100:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale
     Urban100:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Urban100_HR
         scale: *scale

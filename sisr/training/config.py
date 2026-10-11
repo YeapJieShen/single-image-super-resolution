@@ -6,7 +6,9 @@ controls validation/test scoring only (border exclusion, metric colorspaces).
 
 Per-architecture defaults live in subclasses next to the model code (e.g.
 ``sisr.models.srcnn.SRCNNTrainingConfig``); YAML picks one via ``class_path``
-on ``model.training_config`` / ``model.eval_config``.
+on ``model.training_config`` / ``model.eval_config``. ``AdversarialTrainingConfig``
+is the one exception: a training-paradigm base, not tied to one architecture,
+so it lives here directly.
 
 The model's training colorspace is not a field here — it is the choice of
 processor (see ``sisr.processors``).
@@ -87,6 +89,11 @@ class SRTrainingConfig:
             contract (``PredictDataset`` has none), whereas per-paper knobs
             already live here.
 
+            **A list trains one model at several scales** (see
+            :attr:`~sisr.models.base.SRModel.multi_scale`); a one-element list is
+            the same as that int and is normalised to it, so a single-scale
+            config behaves identically however it is spelled.
+
         compile_backend: A ``torch._dynamo`` backend to compile the
             training-mode forward with; ``None`` (default) trains eager. **Only
             ``training_step`` is compiled** — validation/test/predict stay eager,
@@ -112,6 +119,20 @@ class SRTrainingConfig:
             does not hold across precisions**: ``'max-autotune'`` beat
             ``'reduce-overhead'`` under bf16 and lost under fp32 — measure per
             configuration, never assume.
+
+        scale_clip_with_lr: When ``True``, ``SRLightning.configure_gradient_clipping``
+            clips gradients to ``gradient_clip_val / current_lr`` instead of the trainer's
+            raw ``gradient_clip_val`` — so the gradient bound widens as the LR decays,
+            and the update ``lr · g`` stays bounded by the threshold (VDSR's adjustable
+            gradient clipping). ``Trainer(gradient_clip_val=..., gradient_clip_algorithm=...)``
+            stays the one place the threshold itself is set; this only changes what it scales by.
+            Default ``False`` is Lightning's own unscaled behavior, unchanged. Reads the *first*
+            optimizer param group's ``lr`` — the uniform-LR case this flag is meant for;
+            combining it with ``layer_lrs`` (per-``Conv2d`` param groups) is unsupported and
+            untested. **Manual optimization refuses this flag outright** —
+            ``SRGANLightning`` raises at construction if it is set, because Lightning never
+            calls ``configure_gradient_clipping`` under manual optimization at all, so the
+            flag would otherwise be silently accepted and silently do nothing.
     """
 
     layer_lrs: list[float | list[float]] | None = None
@@ -119,9 +140,10 @@ class SRTrainingConfig:
     init_strategy: Literal["default", "paper"] = "default"
     init_mean: float = 0.0
     init_std: float = 0.01
-    scale: int | None = None
+    scale: int | list[int] | None = None
     compile_backend: str | None = None
     compile_mode: str | None = None
+    scale_clip_with_lr: bool = False
 
     def __post_init__(self) -> None:
         """Reject a compile mode that nothing will apply, and values that mean nothing.
@@ -140,23 +162,38 @@ class SRTrainingConfig:
         Raises:
             ValueError: If ``compile_mode`` is set without
                 ``compile_backend='inductor'``; if ``scale`` is set and is not
-                a positive int; if any ``layer_lrs`` entry (or either half of
-                a ``[weight_lr, bias_lr]`` pair) is not positive; if
+                a positive int (or a list of distinct ones); if any ``layer_lrs`` entry (or
+                either half of a ``[weight_lr, bias_lr]`` pair) is not positive; if
                 ``init_std`` is not positive; or if ``init_strategy`` is
                 neither ``'default'`` nor ``'paper'``.
         """
-        if self.scale is not None and (
-            not isinstance(self.scale, int) or isinstance(self.scale, bool) or self.scale < 1
-        ):
-            raise ValueError(
-                f"training_config.scale must be a positive int; got {self.scale!r} "
-                f"({type(self.scale).__name__}). "
-                "It is not only provenance: for an architecture that declares no `scale` "
-                "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
-                "nothing else checks it, and eval_config.crop_border derives from it, so a "
-                "non-positive scale becomes a non-positive border and the metric is computed "
-                "on the uncropped image. Fix model.training_config.init_args.scale in your YAML."
-            )
+        if isinstance(self.scale, list):
+            if not self.scale:
+                raise ValueError(
+                    "training_config.scale is an empty list; give a scale or several. Fix "
+                    "model.training_config.init_args.scale in your YAML."
+                )
+            if len(self.scale) == 1:
+                self.scale = self.scale[0]
+            elif len(set(map(repr, self.scale))) != len(self.scale):
+                raise ValueError(
+                    f"training_config.scale lists a scale twice: {self.scale!r}. "
+                    "Fix model.training_config.init_args.scale in your YAML."
+                )
+        for scale in self.scale if isinstance(self.scale, list) else [self.scale]:
+            if scale is not None and (
+                not isinstance(scale, int) or isinstance(scale, bool) or scale < 1
+            ):
+                raise ValueError(
+                    f"training_config.scale must be a positive int (or a list of them); got "
+                    f"{scale!r} ({type(scale).__name__}). "
+                    "It is not only provenance: for an architecture that declares no `scale` "
+                    "hparam of its own (SRCNN, deliberately -- it is resolution-preserving) "
+                    "nothing else checks it, and eval_config.crop_border derives from it, so a "
+                    "non-positive scale becomes a non-positive border and the metric is "
+                    "computed on the uncropped image. Fix model.training_config.init_args.scale "
+                    "in your YAML."
+                )
 
         if self.layer_lrs is not None:
             for i, lr in enumerate(self.layer_lrs):
@@ -204,7 +241,8 @@ class SRTrainingConfig:
         """Validate this config against the model/processor it will pair with.
 
         Universal checks: ``self.scale`` must agree with the model's ``'scale'``
-        hparam when both exist (either absent skips, rather than guessing); and
+        hparam when both exist (as sets, so an int and a one-scale list agree and a list
+        must match the model's list) (either absent skips, rather than guessing); and
         when ``example_input_shape`` is set its channel dimension must equal
         ``processor.model_channels`` and a ``no_grad`` forward of the real
         model must succeed. The probe exercises the actual ``nn.Module``, so it
@@ -226,7 +264,9 @@ class SRTrainingConfig:
         """
         if self.scale is not None and "scale" in model.hparams:
             model_scale = model.hparams["scale"]
-            if self.scale != model_scale:
+            mine = set(self.scale) if isinstance(self.scale, list) else {self.scale}
+            theirs = set(model_scale) if isinstance(model_scale, list | tuple) else {model_scale}
+            if mine != theirs:
                 raise ValueError(
                     f"training_config.scale={self.scale} does not match "
                     f"model.hparams['scale']={model_scale}. Fix training_config.scale "
@@ -247,6 +287,64 @@ class SRTrainingConfig:
         dummy = torch.zeros(1, *self.example_input_shape)
         with torch.no_grad():
             model(dummy)
+
+
+@dataclass
+class AdversarialTrainingConfig(SRTrainingConfig):
+    """Generic training defaults for an adversarially-trained generator.
+
+    Any adversarial training paradigm (SRGAN's non-saturating GAN, a future
+    relativistic-average one, ...) subclasses this rather than a specific
+    architecture's training config, so these fields are validated by a shared
+    contract instead of by inheriting an unrelated architecture's own
+    hyperparameter names (e.g. SRResNet's ``in_out_channels`` correlation
+    check, which a non-SRResNet generator would not have).
+
+    Args:
+        init_from: Bare-weights ``.safetensors`` to initialise the generator
+            from. Ledig et al.'s SRGAN starts an adversarial run from an
+            MSE-trained generator; unset trains from scratch, which tests and
+            smoke runs use.
+
+        adversarial_weight: Weight on the generator's adversarial term;
+            ``1e-3`` is Ledig's SRGAN value. Total is
+            ``content + adversarial_weight * adversarial``, where content is
+            whatever ``criterion`` the module was given.
+
+        d_steps_per_g_step: Goodfellow's ``k``. ``1`` is Ledig's alternation.
+
+    Raises:
+        ValueError: If ``d_steps_per_g_step`` is below 1, or
+            ``adversarial_weight`` is negative.
+    """
+
+    init_from: str | None = None
+    adversarial_weight: float = 1e-3
+    d_steps_per_g_step: int = 1
+
+    def __post_init__(self) -> None:
+        """Reject settings this training mode cannot honour.
+
+        ``super()`` first: an override that skips it leaves the base class's
+        ``compile_mode``/``compile_backend`` guard dead for every subclass.
+
+        Raises:
+            ValueError: If ``d_steps_per_g_step`` is below 1, if
+                ``adversarial_weight`` is negative, or for anything the
+                inherited validation rejects.
+        """
+        super().__post_init__()
+        if self.d_steps_per_g_step < 1:
+            raise ValueError(f"d_steps_per_g_step must be >= 1; got {self.d_steps_per_g_step}.")
+        if self.adversarial_weight < 0:
+            raise ValueError(
+                f"adversarial_weight must be >= 0; got {self.adversarial_weight}. "
+                "The generator minimises `content + adversarial_weight * adversarial`, so a "
+                "negative weight inverts the adversarial term and trains the generator to "
+                "look MORE fake to the discriminator. Zero is legitimate -- it is the "
+                "content-only ablation. Fix "
+                "model.training_config.init_args.adversarial_weight in your YAML."
+            )
 
 
 @dataclass
@@ -301,13 +399,14 @@ class SREvalConfig:
             same setting. The value is recorded in ``hparams`` and in every
             artifact's ``sisr_meta`` so any checkpoint can be traced back.
 
-        perceptual_metrics: Perceptual metrics to report, from ``'lpips'`` and
-            ``'dists'``. Empty by default, so an architecture that never asks
-            for them logs exactly the tags it logged before. Both are
-            lower-is-better and RGB-only (no colorspace decomposition), so they
-            get their own tag families ``lpips/val`` / ``dists/val`` rather than
-            a key under the PSNR/SSIM scheme. ``'lpips'`` requires the
-            ``[perceptual]`` extra.
+        perceptual_metrics: Perceptual metrics to report: the paired ``'lpips'`` and
+            ``'dists'``, and the no-reference ``'niqe'``, ``'ma'`` and ``'pi'`` (see
+            :mod:`sisr.metrics.perceptual`). Empty by default, so an architecture
+            that never asks for them logs exactly the tags it logged before. All are
+            lower-is-better except ``'ma'``, and none has a colorspace
+            decomposition, so each gets its own tag family (``lpips/val``,
+            ``niqe/val``, ...) rather than a key under the PSNR/SSIM scheme. All but
+            ``'dists'`` require the ``[perceptual]`` extra.
 
         lpips_net: LPIPS backbone — ``'alex'`` (default, and what the SR
             literature usually reports), ``'vgg'`` or ``'squeeze'``. **A LPIPS
@@ -315,6 +414,38 @@ class SREvalConfig:
             exactly as an SSIM figure is comparable only within one
             ``ssim_impl``. Recorded in ``hparams`` and in every artifact's
             ``sisr_meta``, so any number can be traced back. Ignored by DISTS.
+
+        self_ensemble: Test-time "x8" self-ensemble — average the model's output over its 8
+            dihedral (flip/rotation) transforms of the input, each inverse-transformed back
+            before averaging (see :mod:`sisr.training.self_ensemble`). Applied only at test
+            and predict time — :meth:`~sisr.training.lightning_module.SRLightning.predict_step`,
+            and the *test*-stage hook of
+            :class:`~sisr.training.callbacks.BenchmarkImageLogger` — never during training or
+            validation-during-fit, so a run's per-step cost is unchanged regardless of this
+            setting. Costs 8x the forward-pass compute wherever it does apply. Default
+            ``False``: byte-identical to today's single pass.
+
+        predict_scale: Which scale ``predict`` runs a
+            :attr:`~sisr.models.base.SRModel.multi_scale` model at. Prediction has no HR
+            to read the scale from, so a multi-scale model trained at several scales
+            cannot guess; it is required then and refused to be guessed. Ignored by a
+            single-scale model.
+
+        round_to_uint8: Round each scored plane to 8-bit levels (``floor(x * 255 + 0.5)``,
+            ties away from zero) on **both** SR and HR before PSNR, as the MATLAB evaluation of
+            VDSR, DRCN (both write an 8-bit PNG and re-read it), EDSR and MDSR (uint8 images)
+            does; the SRCNN template sets it too. PSNR only: SSIM and the perceptual metrics
+            read the unrounded tensors. Default ``False``: every value unchanged.
+
+        grey_plane_scoring: Score a single-channel image on its raw plane, as the MATLAB
+            evaluation of DRCN, VDSR and MDSR does (Set14's ``bridge``; the EDSR paper's row
+            scores it through RGB, so the EDSR template leaves this off), instead of promoting
+            it to RGB and scoring studio-range Y (which compresses errors by 219/255,
+            +1.3219 dB). Greyness is the **file mode**, reported per image by the eval
+            dataset's ``yield_is_grey=True`` third element -- never inferred from pixel
+            values, since an RGB file with equal channels (Set14's ``man``) is colour to
+            MATLAB. Scoring raises if this is on and the dataset yields no flag. Affects the
+            ``Y`` channel of the ``Y``/``YCbCr`` keys only. Default ``False``.
     """
 
     crop_border: int | None = 0
@@ -324,6 +455,10 @@ class SREvalConfig:
     ssim_impl: Literal["wang", "daala"] = "wang"
     perceptual_metrics: list[str] = field(default_factory=list)
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
+    self_ensemble: bool = False
+    predict_scale: int | None = None
+    round_to_uint8: bool = False
+    grey_plane_scoring: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.
@@ -332,7 +467,8 @@ class SREvalConfig:
         ``ssim_impl``, ``perceptual_metrics`` and ``lpips_net``.
 
         Raises:
-            ValueError: If ``crop_border`` is negative (``None`` and ``0`` are
+            ValueError: If ``predict_scale`` is neither ``None`` nor a positive int; if
+                ``crop_border`` is negative (``None`` and ``0`` are
                 both legitimate, and mean different things); if any entry of
                 either channel field is not a
                 supported colorspace or single-channel name (see
@@ -341,6 +477,15 @@ class SREvalConfig:
                 supported metric (see ``PERCEPTUAL_METRICS``), or if
                 ``lpips_net`` is not ``'alex'``, ``'vgg'`` or ``'squeeze'``.
         """
+        if self.predict_scale is not None and (
+            not isinstance(self.predict_scale, int)
+            or isinstance(self.predict_scale, bool)
+            or self.predict_scale < 1
+        ):
+            raise ValueError(
+                f"SREvalConfig.predict_scale must be None or a positive int; got "
+                f"{self.predict_scale!r}. Fix model.eval_config.init_args.predict_scale."
+            )
         if self.crop_border is not None and self.crop_border < 0:
             raise ValueError(
                 f"SREvalConfig.crop_border must be None or >= 0; got {self.crop_border}. "
@@ -360,6 +505,12 @@ class SREvalConfig:
                     f"SREvalConfig.{field_name} entries must be one of "
                     f"{list(valid)}; got unsupported {invalid}. Fix "
                     f"model.eval_config.init_args.{field_name} in your YAML."
+                )
+        for flag in ("round_to_uint8", "grey_plane_scoring"):
+            if not isinstance(getattr(self, flag), bool):
+                raise ValueError(
+                    f"SREvalConfig.{flag} must be a bool; got {getattr(self, flag)!r}. Fix "
+                    f"model.eval_config.init_args.{flag} in your YAML."
                 )
         if self.ssim_impl not in ("wang", "daala"):
             raise ValueError(

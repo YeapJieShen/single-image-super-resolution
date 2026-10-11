@@ -17,6 +17,11 @@ model:
         class_path: sisr.models.srresnet.SRResNet
         init_args:
           scale: &scale 4
+          # Multi-scale training (one set of weights at several scales) is for a `multi_scale`
+          # model, which SRResNet is not. Such a model takes a list here instead:
+          #   scale: &scale [2, 3, 4]
+          # and every `scale: *scale` below follows it: the train dataset draws one scale per
+          # batch, and each val/test set is scored once per scale (Set5_x2, Set5_x3, ...).
           in_out_channels: 3
           hidden_channel: 64
           kernel_sizes: [9, 3, 9]
@@ -38,7 +43,7 @@ model:
 
 data:
   train_dataset:
-    class_path: sisr.datasets.srresnet.TrainDataset
+    class_path: sisr.datasets.native_lr.TrainDataset
     init_args:
       img_dir: data/DIV2K_train_HR
       scale: *scale
@@ -47,28 +52,28 @@ data:
       use_tqdm: true
       cache_dir: .lmdb_cache/DIV2K_train_HR
   val_dataset:
-    class_path: sisr.datasets.srresnet.ValidationDataset
+    class_path: sisr.datasets.native_lr.ValidationDataset
     init_args:
       img_dir: data/DIV2K_valid_HR
       scale: *scale
   test_datasets:
     Set5:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set5_HR
         scale: *scale
     Set14:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Set14_HR
         scale: *scale
     BSD100:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/BSD100_HR
         scale: *scale
     Urban100:
-      class_path: sisr.datasets.srresnet.ValidationDataset
+      class_path: sisr.datasets.native_lr.ValidationDataset
       init_args:
         img_dir: data/Urban100_HR
         scale: *scale
@@ -142,6 +147,13 @@ trainer:
           version: baseline
         log_graph: true
         default_hp_metric: false
+    # Opt-in MLflow tracking beside TensorBoard (pip install '.[mlflow]'): scalars land in both,
+    # the benchmark strips become run artifacts at the same step, and a MLflowModelRegistrar
+    # callback with register_model: true registers the final weights. The URI is yours to set.
+    # - class_path: lightning.pytorch.loggers.MLFlowLogger
+    #   init_args:
+    #     experiment_name: sisr
+    #     tracking_uri: http://127.0.0.1:5000
     - class_path: lightning.pytorch.loggers.CSVLogger
       init_args:
         <<: *log_dest

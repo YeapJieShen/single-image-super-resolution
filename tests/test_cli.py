@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "templates" / "config.srcnn.template.yaml"
 SRRESNET_TEMPLATE = REPO_ROOT / "templates" / "config.srresnet.template.yaml"
 SRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.srgan.template.yaml"
+ESRGAN_TEMPLATE = REPO_ROOT / "templates" / "config.esrgan.template.yaml"
 
 _ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*:UserWarning")
 
@@ -29,7 +30,7 @@ _ignore_random_vgg = pytest.mark.filterwarnings("ignore:.*randomly initialised.*
 def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
     """Extra ``--config`` overlay a template needs to resolve off a training box.
 
-    Only the SRGAN template needs one; every other template resolves as shipped.
+    Only the two GAN templates (SRGAN, ESRGAN) need one; every other template resolves as shipped.
     Written as an overlay rather than ``--key=null`` because jsonargparse coerces
     a ``null`` CLI value for a ``str | None`` field to the *string* ``'None'``,
     which is exactly the silent-wrong-value class these two settings guard.
@@ -39,19 +40,35 @@ def _offline_args(template_path: Path, tmp_path: Path) -> list[str]:
     ``criterion.weights`` would otherwise download ~548 MB of VGG19 weights just
     to resolve a config; ``null`` builds a random VGG (and warns).
     """
-    if template_path.name != SRGAN_TEMPLATE.name:
+    if template_path.name == ESRGAN_TEMPLATE.name:
+        criterion: dict = {
+            "class_path": "sisr.losses.WeightedSumLoss",
+            "init_args": {
+                "terms": {
+                    "vgg": {
+                        "class_path": "sisr.losses.VGG19FeatureLoss",
+                        "init_args": {"layer": "vgg54", "before_activation": True, "weights": None},
+                    },
+                    "l1": {"class_path": "torch.nn.L1Loss"},
+                },
+                "weights": {"vgg": 1.0, "l1": 0.01},
+            },
+        }
+    elif template_path.name == SRGAN_TEMPLATE.name:
+        criterion = {
+            "class_path": "sisr.losses.VGG19FeatureLoss",
+            "init_args": {"layer": "vgg54", "weights": None},
+        }
+    else:
         return []
-    overlay = tmp_path / "srgan_offline_overlay.yaml"
+    overlay = tmp_path / "gan_offline_overlay.yaml"
     overlay.write_text(
         yaml.safe_dump(
             {
                 "model": {
                     "init_args": {
                         "training_config": {"init_args": {"init_from": None}},
-                        "criterion": {
-                            "class_path": "sisr.losses.VGG19FeatureLoss",
-                            "init_args": {"layer": "vgg54", "weights": None},
-                        },
+                        "criterion": criterion,
                     }
                 }
             },
@@ -84,13 +101,13 @@ model:
       class_path: sisr.models.srresnet.SRResNetEvalConfig
 data:
   train_dataset:
-    class_path: sisr.datasets.srresnet.TrainDataset
+    class_path: sisr.datasets.native_lr.TrainDataset
     init_args:
       img_dir: IMG_DIR
       scale: 4
       hr_crop_size: 96
   val_dataset:
-    class_path: sisr.datasets.srresnet.ValidationDataset
+    class_path: sisr.datasets.native_lr.ValidationDataset
     init_args:
       img_dir: IMG_DIR
       scale: 4
@@ -234,8 +251,8 @@ def test_srresnet_config_resolves_in_process():
     assert m.eval_config.ssim_impl == "daala"  # inherited-default check
     # Dataset specs stay plain {class_path, init_args} dicts (materialized lazily
     # in SRDataModule.setup), so assert on the resolved raw config.
-    assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.srresnet.TrainDataset"
-    assert cli.config.data.val_dataset["class_path"] == "sisr.datasets.srresnet.ValidationDataset"
+    assert cli.config.data.train_dataset["class_path"] == "sisr.datasets.native_lr.TrainDataset"
+    assert cli.config.data.val_dataset["class_path"] == "sisr.datasets.native_lr.ValidationDataset"
     assert cli.config.data.train_dataset["init_args"]["hr_crop_size"] == 96
     # The removed model_colorspace field must not reappear anywhere.
     assert not hasattr(m, "model_colorspace")
@@ -658,7 +675,7 @@ def test_dataset_whole_dict_cli_override_colliding_with_config_fails_loudly():
         _resolve(
             "--config",
             str(SRRESNET_TEMPLATE),
-            '--data.train_dataset={"class_path": "sisr.datasets.srresnet.TrainDataset", '
+            '--data.train_dataset={"class_path": "sisr.datasets.native_lr.TrainDataset", '
             '"init_args": {"img_dir": "data/DIV2K_train_HR", "scale": 4, "hr_crop_size": 96, '
             '"crops_per_image": 8, "use_tqdm": true, "cache_dir": ".lmdb_cache/DIV2K_train_HR"}}',
         )
@@ -893,7 +910,7 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
             "train_dataset": {
-                "class_path": "sisr.datasets.srcnn.TrainDataset",
+                "class_path": "sisr.datasets.pre_upsampled.TrainDataset",
                 "init_args": {
                     "img_dir": str(tiny_rgb_image_dir),
                     "subimg_size": 33,
@@ -904,7 +921,7 @@ def _build_srcnn_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tuple[P
                 },
             },
             "val_dataset": {
-                "class_path": "sisr.datasets.srcnn.ValidationDataset",
+                "class_path": "sisr.datasets.pre_upsampled.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},
@@ -980,7 +997,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
         "optimizer": {"class_path": "torch.optim.SGD", "init_args": {"lr": 1.0e-4}},
         "data": {
             "train_dataset": {
-                "class_path": "sisr.datasets.srresnet.TrainDataset",
+                "class_path": "sisr.datasets.native_lr.TrainDataset",
                 "init_args": {
                     "img_dir": str(tiny_rgb_image_dir),
                     "scale": 2,
@@ -990,7 +1007,7 @@ def _build_srresnet_checkpoint(tiny_rgb_image_dir: Path, tmp_path: Path) -> tupl
                 },
             },
             "val_dataset": {
-                "class_path": "sisr.datasets.srresnet.ValidationDataset",
+                "class_path": "sisr.datasets.native_lr.ValidationDataset",
                 "init_args": {"img_dir": str(tiny_rgb_image_dir), "scale": 2},
             },
             "train_dataloader_kwargs": {"batch_size": 2, "num_workers": 0},

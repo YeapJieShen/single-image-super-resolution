@@ -162,12 +162,14 @@ def build_metadata(
     # One resolver, shared with SRLightning's own crop-border derivation. A
     # second copy here is what let artifact provenance record a str while the
     # evaluation border recorded an int, from one config.
-    scale = module.resolved_scale(
+    scales = module.resolved_scales(
         f"Cannot describe a {type(model).__name__} artifact without a scale. A reader "
         f"cannot use the file without it -- for a pre-upsampled architecture the scale "
         f"is what they must resize the input by before feeding it"
     )
 
+    # An int for one scale (as it always was), a list for a multi-scale model.
+    scale: int | list[int] = scales[0] if len(scales) == 1 else scales
     meta = _envelope("sr_model", global_step, epoch, monitor, monitor_value, batch_step)
     meta["model"] = {
         "class_path": class_path(model),
@@ -189,6 +191,10 @@ def build_metadata(
         "output_colorspace": processor.output_colorspace,
     }
     meta["eval_config"] = _to_plain(dataclasses.asdict(module.eval_config))
+    if module.eval_config.crop_border is None:
+        # ``eval_config.crop_border: null`` means "each sample's own scale" for a multi-scale
+        # run; state the borders so a reader needs no knowledge of that rule.
+        meta["io"]["crop_border_by_scale"] = {str(s): s for s in scales}
     return meta
 
 

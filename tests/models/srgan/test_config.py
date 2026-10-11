@@ -2,15 +2,18 @@
 
 import pytest
 
+from sisr.models.base import SRModel
 from sisr.models.srgan import SRGANEvalConfig, SRGANTrainingConfig
 from sisr.models.srresnet import SRResNetEvalConfig, SRResNetTrainingConfig
+from sisr.processors import RGBProcessor
+from sisr.training import AdversarialTrainingConfig
 
 
 def test_paper_defaults():
     cfg = SRGANTrainingConfig()
     assert cfg.adversarial_weight == pytest.approx(1e-3)
     assert cfg.d_steps_per_g_step == 1  # Ledig's 1:1 alternation
-    assert cfg.scale == 4  # inherited from SRResNetTrainingConfig
+    assert cfg.scale == 4  # SRGANTrainingConfig's own default (the generator is SRResNet)
     assert cfg.init_from is None  # optional: unset trains from scratch
 
 
@@ -29,7 +32,38 @@ def test_eval_config_turns_perceptual_metrics_on():
 
 
 def test_training_config_subclass():
-    assert issubclass(SRGANTrainingConfig, SRResNetTrainingConfig)
+    assert issubclass(SRGANTrainingConfig, AdversarialTrainingConfig)
+
+
+def test_training_config_no_longer_inherits_srresnet_specific_validation():
+    """#274: SRGANTrainingConfig used to inherit SRResNetTrainingConfig, whose
+    validate_against keys on `in_out_channels` -- a hparam name specific to
+    SRResNet's architecture. A generator without that hparam name must not be
+    rejected by a check meant for a different one."""
+    assert not issubclass(SRGANTrainingConfig, SRResNetTrainingConfig)
+
+
+def test_validate_against_does_not_require_srresnet_hparam_names():
+    """#274 acceptance: SRGANTrainingConfig is validated against the generic
+    AdversarialTrainingConfig/SRTrainingConfig contract, not against
+    SRResNetTrainingConfig's `in_out_channels` correlation check -- a
+    generator lacking that hparam name must not be rejected for lacking it."""
+
+    class _OtherGenerator(SRModel):
+        input_contract = "native_lr"
+
+        def __init__(self):
+            super().__init__()
+            self._hparams = {"scale": 4}  # deliberately no in_out_channels
+
+        @property
+        def variant_tag(self):
+            return "other"
+
+        def forward(self, x):
+            return x
+
+    SRGANTrainingConfig().validate_against(_OtherGenerator(), RGBProcessor())  # must not raise
 
 
 def test_eval_config_subclass():
