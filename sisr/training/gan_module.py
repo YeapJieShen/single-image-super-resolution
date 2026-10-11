@@ -24,7 +24,7 @@ from lightning_utilities.core.rank_zero import rank_zero_info
 
 from .. import artifacts
 from ..losses import AdversarialLoss
-from ..models.base import SRModel
+from ..models.base import SRModel, unwrap_primary
 from ..models.srgan import AdversarialDiscriminator, SRGANEvalConfig, SRGANTrainingConfig
 from ..processors import SRProcessor
 from .config import AdversarialTrainingConfig, SREvalConfig
@@ -404,6 +404,10 @@ class SRGANLightning(SRLightning):
         opt_g, opt_d = self._paired_optimizers()
 
         sr, _, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=False)
+        # SRGAN's manual-optimization path does not support a record-returning
+        # generator -- unwrap once here so every use below sees a bare
+        # tensor, silently discarding any extras.
+        sr = unwrap_primary(sr)
         hr_for_loss = self.processor.extract_target(hr_cropped)
 
         self.toggle_optimizer(opt_d)

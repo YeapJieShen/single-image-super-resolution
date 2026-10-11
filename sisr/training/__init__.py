@@ -9,6 +9,7 @@ from typing import Any
 from .callbacks import (
     BenchmarkImageLogger,
     GradNormLogger,
+    LossWeightScheduler,
     SRCheckpoint,
     SRPredictionWriter,
     SRWeightsCheckpoint,
@@ -27,6 +28,7 @@ __all__ = [
     "SREvalConfig",
     "BenchmarkImageLogger",
     "GradNormLogger",
+    "LossWeightScheduler",
     "SRCheckpoint",
     "SRWeightsCheckpoint",
     "SRPredictionWriter",

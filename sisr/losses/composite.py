@@ -62,6 +62,24 @@ class WeightedSumLoss(SRLoss):
         #: rebound each call.
         self.last_terms: dict[str, torch.Tensor] = {}
 
+    def set_weight(self, name: str, value: float) -> None:
+        """Update one term's weight in place -- the seam a schedule callback uses.
+
+        Same fail-loud rule ``__init__`` already applies to ``weights``: an
+        unknown name is an error, not a silent no-op that leaves the run
+        training at whatever weight was already there.
+
+        Args:
+            name: An existing term name.
+            value: The new weight.
+
+        Raises:
+            ValueError: If ``name`` is not one of this loss's terms.
+        """
+        if name not in self.weights:
+            raise ValueError(f"no such term: {name!r}; terms are {sorted(self.weights)}")
+        self.weights[name] = float(value)
+
     def bind(self, processor: SRProcessor) -> None:
         """Forward the bind to every term that is an :class:`SRLoss`."""
         for term in self.terms.values():

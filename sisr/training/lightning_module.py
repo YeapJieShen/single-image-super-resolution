@@ -20,7 +20,7 @@ from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..losses import SRLoss
 from ..metrics.scoring import SRScorer, expected_tags, metric_tag
-from ..models.base import SRModel
+from ..models.base import SRModel, SRModelOutput, unwrap_primary
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
 from .metadata import build_metadata
@@ -407,7 +407,7 @@ class SRLightning(lightning.LightningModule):
 
         return result
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor | SRModelOutput:
         """Run the wrapped SR model on ``x`` and return its raw output.
 
         Pure inference path — no colorspace conversion, no metrics, no
@@ -444,21 +444,21 @@ class SRLightning(lightning.LightningModule):
         lr_img: torch.Tensor,
         need_sr_rgb: Literal[True] = True,
         self_ensemble: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor]: ...
 
     @overload
     def _forward_lr(
         self, lr_img: torch.Tensor, need_sr_rgb: Literal[False], self_ensemble: bool = False
-    ) -> tuple[torch.Tensor, None]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, None]: ...
 
     @overload
     def _forward_lr(
         self, lr_img: torch.Tensor, need_sr_rgb: bool, self_ensemble: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None]: ...
 
     def _forward_lr(
         self, lr_img: torch.Tensor, need_sr_rgb: bool = True, self_ensemble: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None]:
         """LR-only core of the forward pipeline: extract -> model -> (reconstruct).
 
         Shared with :meth:`predict_step` rather than forked, so the colorspace
@@ -483,21 +483,25 @@ class SRLightning(lightning.LightningModule):
                 ``eval_config.self_ensemble`` themselves — this method never reads
                 ``eval_config`` — so :meth:`training_step`/:meth:`validation_step` (via
                 :meth:`_step`) never pass it, keeping training/validation cost unchanged
-                regardless of the config.
+                regardless of the config. Only the primary is ensembled, so the result
+                is a bare tensor even for a model returning an ``SRModelOutput``.
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — raw model output in the model IO
-            colorspace, and the SR RGB clamped to ``[0, 1]``; ``sr_rgb`` is
+            colorspace (a bare tensor, or an ``SRModelOutput`` if the model returns one),
+            and the SR RGB clamped to ``[0, 1]``; ``sr_rgb`` is
             ``None`` iff ``need_sr_rgb`` is ``False``.
         """
         model_input = self.processor.extract(lr_img)
         model_fn = self._compiled if self.training and self._compiled is not None else self.model
         sr_model_out = (
-            self_ensemble_forward(model_fn, model_input) if self_ensemble else model_fn(model_input)
+            self_ensemble_forward(lambda x: unwrap_primary(model_fn(x)), model_input)
+            if self_ensemble
+            else model_fn(model_input)
         )
         if not need_sr_rgb:
             return sr_model_out, None
-        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        sr_rgb = self.processor.reconstruct(unwrap_primary(sr_model_out), lr_img)
         # Clamp display space once, here: every reconstruct() consumer reads
         # through this line, so PSNR/SSIM never diverge from what an 8-bit image
         # would score. sr_model_out (the loss target) stays unclamped -- clamping
@@ -514,7 +518,7 @@ class SRLightning(lightning.LightningModule):
         hr_img: torch.Tensor,
         need_sr_rgb: Literal[True] = True,
         self_ensemble: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
@@ -523,7 +527,7 @@ class SRLightning(lightning.LightningModule):
         hr_img: torch.Tensor,
         need_sr_rgb: Literal[False],
         self_ensemble: bool = False,
-    ) -> tuple[torch.Tensor, None, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, None, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
@@ -532,7 +536,7 @@ class SRLightning(lightning.LightningModule):
         hr_img: torch.Tensor,
         need_sr_rgb: bool,
         self_ensemble: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None, torch.Tensor]: ...
 
     def _forward_sr(
         self,
@@ -540,7 +544,7 @@ class SRLightning(lightning.LightningModule):
         hr_img: torch.Tensor,
         need_sr_rgb: bool = True,
         self_ensemble: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None, torch.Tensor]:
         """Canonical SR forward: extract -> model -> (reconstruct) -> crop HR.
 
         The single source of truth for the forward pipeline, shared by
@@ -552,15 +556,16 @@ class SRLightning(lightning.LightningModule):
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
             need_sr_rgb: Forwarded to :meth:`_forward_lr`. The HR crop uses
-                ``sr_model_out.shape[-2:]`` regardless, since every shipped
+                the primary's spatial size regardless, since every shipped
                 ``SRProcessor.reconstruct`` preserves H/W.
             self_ensemble: Forwarded to :meth:`_forward_lr` — see there.
 
         Returns:
             ``(sr_model_out, sr_rgb, hr_cropped)`` — raw (unclamped) model
-            output in the model IO colorspace, SR RGB clamped to ``[0, 1]``
-            (``None`` iff ``need_sr_rgb`` is ``False``), and HR center-cropped
-            to the SR spatial size.
+            output in the model IO colorspace (a bare tensor, or an
+            ``SRModelOutput`` if the model returns one), SR RGB clamped to
+            ``[0, 1]`` (``None`` iff ``need_sr_rgb`` is ``False``), and HR
+            center-cropped to the SR spatial size.
 
         Raises:
             ValueError: If ``hr_img`` is spatially smaller than the model
@@ -573,7 +578,7 @@ class SRLightning(lightning.LightningModule):
         sr_model_out, sr_rgb = self._forward_lr(
             lr_img, need_sr_rgb=need_sr_rgb, self_ensemble=self_ensemble
         )
-        hr_hw, sr_hw = hr_img.shape[-2:], sr_model_out.shape[-2:]
+        hr_hw, sr_hw = hr_img.shape[-2:], unwrap_primary(sr_model_out).shape[-2:]
         if hr_hw[0] < sr_hw[0] or hr_hw[1] < sr_hw[1]:
             raise ValueError(
                 f"hr_img spatial size {tuple(hr_hw)} is smaller than the model output "
@@ -655,7 +660,12 @@ class SRLightning(lightning.LightningModule):
 
         sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=need_sr_rgb)
         hr_for_loss = self.processor.extract_target(hr_cropped)
-        loss = self.criterion(sr_model_out, hr_for_loss)
+        criterion_input = (
+            sr_model_out
+            if getattr(self.criterion, "wants_model_output", False)
+            else unwrap_primary(sr_model_out)
+        )
+        loss = self.criterion(criterion_input, hr_for_loss)
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 
