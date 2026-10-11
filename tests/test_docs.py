@@ -18,56 +18,60 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
 
-def test_readme_step_axis_table_puts_checkpoint_filenames_on_batch_axis() -> None:
-    """Catches: the table listing checkpoint `{step}` under "global steps" when
-    SRCheckpoint stamps _logger_step, the batch axis, into the filename.
-    Mutation: move "the `{step}` in checkpoint filenames" back into the global-steps
-    column -> fails.
+def test_configuration_md_step_axis_table_puts_checkpoint_filenames_on_batch_axis() -> None:
+    """Catches: the step-axis table listing checkpoint filenames under "global steps" when
+    SRCheckpoint stamps _logger_step, the batch axis, into the filename. The table lives in
+    docs/configuration.md (the README links there).
+    Mutation: move "checkpoint filenames and metadata" into the global-steps column -> fails.
     """
-    content = _read("README.md")
-    start = content.index("| Counted in global steps | Counted in batches |")
-    data_row = content[start:].splitlines()[2]
-    global_col, batches_col = data_row.split("|")[1], data_row.split("|")[2]
+    content = _read("docs/configuration.md")
+    start = content.index("| In **global steps** | In **batches** |")
+    rows = []
+    for line in content[start:].splitlines()[2:]:
+        if not line.startswith("|"):
+            break
+        rows.append(line.split("|")[1:3])
+    global_col = " ".join(r[0] for r in rows)
+    batches_col = " ".join(r[1] for r in rows)
     assert "checkpoint filenames" not in global_col
     assert "checkpoint filenames" in batches_col
 
 
-def test_readme_does_not_claim_a_factor_of_two_between_curve_and_checkpoint() -> None:
+def test_docs_do_not_claim_a_factor_of_two_between_curve_and_checkpoint() -> None:
     """Catches: the stale "a curve and the checkpoint pulled off it are a factor of 2
     apart" claim, which stopped being true once checkpoint filenames moved onto the
-    batch axis (matching the curve's own axis, off by one).
-    Mutation: reinstate the literal "factor of 2 apart" sentence -> fails.
+    batch axis (matching the curve's own axis, off by one). The owner now says why
+    checkpoints are stamped with the batch counter.
+    Mutation: reinstate the literal "factor of 2 apart" sentence anywhere -> fails.
     """
-    content = _read("README.md")
-    assert "factor of 2 apart" not in content
-    assert "not a factor of 2" in content
+    for rel in ("README.md", "docs/configuration.md"):
+        assert "factor of 2 apart" not in _read(rel)
+    assert "which is why checkpoints are stamped with it" in _read("docs/configuration.md")
 
 
-def test_readme_srgan_comment_pointer_names_a_public_resource() -> None:
-    """Catches: README pointing at a resource readers cannot access (the golden config
-    is gitignored and not distributed). The public mechanics reference is in
-    docs/configuration.md.
-    Mutation: delete the docs/configuration.md link or break it to a different target
-    -> fails.
+def test_readme_links_to_the_public_configuration_reference() -> None:
+    """Catches: the README losing its pointer to docs/configuration.md (the owner of
+    step axes, SRGAN mechanics and overrides), or pointing at a resource readers cannot
+    access (the golden config is gitignored and not distributed).
+    Mutation: delete the docs/configuration.md link or break its target -> fails.
     """
     content = _read("README.md")
-    # Pin the specific link in the "mechanics in" phrase
-    m = re.search(r"mechanics in \[[^\]]+\]\(([^)]+)\)", content)
-    assert m and m.group(1) == "docs/configuration.md"
-    # Verify the link resolves from REPO_ROOT (README lives there)
-    assert (REPO_ROOT / m.group(1)).is_file()
-    # Verify the gitignored config is not referenced
+    targets = re.findall(r"\]\((docs/configuration\.md)[#)]", content)
+    assert targets
+    assert (REPO_ROOT / "docs/configuration.md").is_file()
     assert "config.srgan.golden.yaml" not in content
 
 
-def test_readme_mentions_srcnn_ram_floor() -> None:
-    """Catches: the ~16 GB SRCNN RAM floor living only in a source docstring, with no
-    mention in any public doc a reader would see before hitting the slowdown.
-    Mutation: delete the added README sentence -> fails.
+def test_srcnn_ram_floor_is_stated_in_public_docs() -> None:
+    """Catches: the SRCNN host-RAM floor living only in a source docstring, with no mention
+    in any public doc a reader would see before hitting the slowdown. The README states the
+    16 GB figure and links to docs/models.md, which explains the silent I/O-bound failure.
+    Mutation: delete the README sentence or the models.md paragraph -> fails.
     """
-    content = _read("README.md")
-    assert "16 GB" in content
-    assert "sisr/datasets/srcnn.py" in content
+    assert "16 GB" in _read("README.md")
+    models = _read("docs/models.md")
+    assert "16 GB" in models
+    assert "without any error" in models
 
 
 def test_configuration_md_artifact_filename_example_matches_naming_scheme() -> None:
@@ -84,11 +88,13 @@ def test_configuration_md_artifact_filename_example_matches_naming_scheme() -> N
 def test_configuration_md_tables_include_srprogressbar_and_ycbcrprocessor() -> None:
     """Catches: the callbacks table omitting SRProgressBar and the processor table
     omitting YCbCrProcessor, both real shipped classes.
+    Pinned to the table rows: both names also appear in prose, which would keep a bare
+    substring check green with a row deleted.
     Mutation: remove either row -> fails.
     """
     content = _read("docs/configuration.md")
-    assert "SRProgressBar" in content
-    assert "YCbCrProcessor" in content
+    assert "| `SRProgressBar` |" in content
+    assert "| `YCbCrProcessor` |" in content
 
 
 def test_reproduction_md_relative_links_resolve() -> None:
