@@ -48,9 +48,10 @@ The processor is the colorspace adapter between the data and the network:
 
 | Processor | Model sees | Used by |
 | --- | --- | --- |
-| `RGBProcessor` | RGB in `[0, 1]` | pre-2026-08-02 SRResNet runs |
-| `RGBSignedOutputProcessor` | LR `[0, 1]` in, HR/target `[-1, 1]` | SRResNet, SRGAN |
+| `RGBProcessor` | RGB in `[0, 1]` | EDSR, MDSR, ESRGAN, ESPCN |
+| `RGBSignedOutputProcessor` | LR `[0, 1]` in, HR/target `[-1, 1]` | SRResNet, SRGAN, ESRGAN |
 | `YChannelProcessor` | Full-range Y channel only | SRCNN |
+| `YCbCrProcessor` | YCbCr in `[0, 1]` | no shipped architecture; for a 3-channel non-RGB model |
 | `StudioYChannelProcessor` | MATLAB studio-range Y (16-235) only | VDSR, DRCN |
 
 `RGBSignedOutputProcessor` is the range Ledig et al. use (§3.2). **Changing the
@@ -88,6 +89,27 @@ criterion:
 Two caveats before running it: the first use downloads **~548 MB of VGG19 weights**
 to the torch hub cache, and TV's `2e-8` presumes the `[-1, 1]` output range that
 `RGBSignedOutputProcessor` provides.
+
+| Class | What it is |
+| --- | --- |
+| `torch.nn.MSELoss` | the default; both papers' baseline |
+| `torch.nn.L1Loss` | plain L1 |
+| `sisr.losses.CharbonnierLoss` | `sqrt(diff² + eps²)`: L1 with a finite gradient at zero |
+| `sisr.losses.TotalVariationLoss` | isotropic TV regulariser; ignores its target |
+| `sisr.losses.VGG19FeatureLoss` | VGG19 feature-space perceptual loss, any `φ_{i,j}` |
+| `sisr.losses.VGG16FeatureLoss` | the same on VGG16 (deepest is `vgg53`); experimentation only, no published SR recipe uses it |
+| `sisr.losses.WeightedSumLoss` | named weighted sum of any of the above |
+
+A `WeightedSumLoss` logs each term separately as `loss/train/{name}` and `loss/val/{name}`, so
+you can see which one dominates. Its `weights` may be scheduled per term with
+`sisr.training.callbacks.LossWeightScheduler`.
+
+A VGG loss normalises with RGB ImageNet statistics, so it refuses a 1-channel processor
+(`YChannelProcessor`) unless you set `grayscale_to_rgb: true`, and a 3-channel non-RGB one
+(`YCbCrProcessor`) unless you set `allow_non_rgb: true`: Y/Cb/Cr planes fed to VGG as R/G/B
+train on features that mean nothing. The frozen VGG is excluded from checkpoints, so a `.ckpt`
+trained under one criterion loads into a module configured with another. `weights: null` skips
+the download and builds a random VGG that warns; it is for tests only.
 
 **Choosing `layer` (φ<sub>i,j</sub>)**: blocks 1–2 have 2 convs at both depths
 (`vgg11`–`vgg22`); blocks 3–5 have 4 on VGG19 (up to `vgg54`) or 3 on VGG16 (up to
@@ -155,16 +177,33 @@ Other fields: `crop_border`, `psnr_channels`, `ssim_channels`, `separate_psnr`,
 own 4-pixel shave on top of `crop_border`), and `lpips_net` — a LPIPS figure is only
 comparable under the same backbone.
 
-**Paper protocols.** Three independent switches reproduce what a paper's MATLAB does; each
-paper's template sets its own. `eval_config.round_to_uint8` rounds each scored plane to 8-bit
-levels before PSNR; `eval_config.grey_plane_scoring` (with `yield_is_grey: true` on every eval
-dataset) scores a single-channel image file on its raw plane instead of studio-range Y; and
-`float_degrade: true` on a `pre_upsampled.ValidationDataset` degrades the LR input in float
-with no uint8 re-quantization, as `VDSR.m` and `DRCN.m` do. All default off, so a config that
-names none of them scores exactly as before. A figure is comparable only to one computed under
-the same switches.
+**Paper protocols.** Four independent switches reproduce what a paper's MATLAB does; each
+paper's template sets its own, and all default off, so a config that names none scores exactly as
+before:
+
+| Switch | Where | What it does |
+| --- | --- | --- |
+| `round_to_uint8` | `eval_config` | Rounds each scored plane (SR and HR) to 8-bit levels before PSNR; SSIM and perceptual metrics read the unrounded tensors. |
+| `grey_plane_scoring` | `eval_config` | Scores a single-channel image *file* on its raw plane instead of studio-range Y. Greyness is the file mode, reported per image by the eval dataset's `yield_is_grey: true`; it is never inferred from pixel values (Set14's `man` is an RGB file with equal channels and is colour to MATLAB). |
+| `float_degrade` | `pre_upsampled.ValidationDataset` | Degrades the LR input in float, with no uint8 re-quantization between the down and up passes. |
+| `clamp_input_luma` | `pre_upsampled.ValidationDataset` | Clamps a colour image's network-input luma to `[16, 235]/255`, as `VDSR.m` and `DRCN.m` do. Evaluation only; training is untouched. |
+
+A figure is comparable only to one computed under the same switches.
 
 ---
+
+### Multi-scale models and self-ensemble
+
+A multi-scale model (`VDSR`, `MDSR`, any model with `multi_scale = True`) trains one set of
+weights for several factors: set `training_config.scale: [2, 3, 4]` and a scale is drawn per patch
+or batch. Validation then runs once per scale and logs `psnr/val/Y/x2`, `psnr/val/Y/x3`, ...;
+the plain tags (`psnr/val/Y`) are the **mean over the scales**, which is a monitor for
+checkpointing and not a paper number. `eval_config.predict_scale` selects the scale `sisr predict`
+runs at, and is required when a multi-scale model has several scales.
+
+`eval_config.self_ensemble: true` averages the model's output over its eight flip/rotation
+variants at **test and predict time only**, never during training or fit-time validation. It costs
+eight forward passes and is what makes EDSR+ and MDSR+.
 
 ## The `data` block
 
@@ -177,6 +216,8 @@ own `imresize`, which is what makes these numbers comparable to published ones.
 
 `test_datasets` are surfaced through both `val_dataloader` (so they are scored during
 `fit` for monitoring) and `test_dataloader` (for `sisr test --ckpt_path`).
+
+Training scales must be odd or a power of two for the pre-upsampled train dataset (x6 raises).
 
 > A dotted CLI override cannot reach inside a dataset spec's `init_args` — the field
 > is an opaque dict to jsonargparse, so the override lands as a stray sibling key.
@@ -252,7 +293,7 @@ lands on Lightning's `_batches_that_stepped`, which counts **batches**.
 
 For `SRLightning` the two differ only by one. **For `SRGANLightning` they differ by a
 factor of two**, because it takes two optimizer steps per batch (one discriminator,
-one generator) under manual optimization. This is unchanged Lightning behaviour, not a
+one generator) under manual optimization; more exactly, with `k = d_steps_per_g_step` it reads `N + N // k` after `N` batches. This is unchanged Lightning behaviour, not a
 quirk of manual optimization — measured, manual optimization with a *single* optimizer
 still gives `global_step == batches`.
 
@@ -268,7 +309,7 @@ So the units differ, and you must read this before changing any of them:
 `_batches_that_stepped` is also the **default x-axis every logged metric is plotted
 against**, which is why checkpoints are stamped with it: a saved file exists to be
 located on a curve, and one named in optimizer steps cannot be. So
-`sr-weights-10000.safetensors` is the state at TensorBoard x=10000 under every
+`SRResNet_x4_RGB_16B64F_s10000.safetensors` is the state at TensorBoard x=10000 under every
 paradigm. The artifact's own metadata records **both** counters under distinct names —
 `global_step` keeps meaning the optimizer count, `batch_step` is the axis above — so a
 reader that only knows the older field still reads a true value.
@@ -316,8 +357,7 @@ the host's devices.
 
 ### The distributable artifact
 
-`SRWeightsCheckpoint` writes **safetensors**, and it is the only format it writes — the
-`.pt` form no longer exists. The resumable `.ckpt` is unaffected: Lightning owns that
+`SRWeightsCheckpoint` writes **safetensors**, and only that. The resumable `.ckpt` is unaffected: Lightning owns that
 file, and it carries optimizer moments, loop state and hyperparameters that a flat
 tensor map cannot represent.
 
@@ -369,16 +409,24 @@ does not (5 → still every 5).
 
 | Callback | Purpose |
 | --- | --- |
-| `BenchmarkImageLogger` | Writes benchmark-set image strips each val run. |
+| `BenchmarkImageLogger` | Scores the benchmark sets and writes per-image bicubic\|SR\|HR strips each val run, to every attached TensorBoard or MLflow logger. |
 | `SRCheckpoint` | Resumable `.ckpt`. |
-| `SRWeightsCheckpoint` | Distributable, optimizer-free `.safetensors` weights — roughly a third the size, and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
+| `SRWeightsCheckpoint` | Distributable, optimizer-free `.safetensors` weights, roughly a third the size and safe to hand out without leaking optimizer state. `attribute` picks which component is saved. |
+| `SRPredictionWriter` | Writes `sisr predict` output as PNGs. |
+| `SRProgressBar` | Progress bar showing the whole run name and only the metric families asked for. |
 | `GradNormLogger` | Logs `diag/grad_norm` every `every_n_batches`. |
+| `WeightHistogramLogger` | Weight histograms; TensorBoard only. |
+| `LossWeightScheduler` | Ramps a named `WeightedSumLoss` term's weight over the run. |
+| `MLflowModelRegistrar` | With `register_model: true`, registers the run's final weights as an MLflow model; see [MLflow tracking](#mlflow-tracking). |
 | `LearningRateMonitor` | Lightning's, logging per step. |
 
+The callbacks live in the package `sisr.training.callbacks`, one module per concern
+(`checkpoint`, `images`, `scalars`, `progress`, `registry`); every public name is importable from
+the package, and `class_path: sisr.training.callbacks.<Name>` is the stable path.
+
 Our own cadence arguments are named `every_n_batches` and `every_n_val_runs`, following
-Lightning's own `every_n_train_steps` / `every_n_epochs`: the unit is in the name. The
-old `log_every_n_steps` on a callback was a homonym of `Trainer.log_every_n_steps`, which
-means the metric *flush* cadence — the same word for two different things in one file.
+Lightning's own `every_n_train_steps` / `every_n_epochs`: the unit is in the name, and none is
+called `log_every_n_steps`, which on `Trainer` means the metric *flush* cadence.
 
 Lightning's own names cannot change, so the residual asymmetry stays: `max_steps` and
 `every_n_train_steps` count optimizer steps while everything else counts batches. An
@@ -397,7 +445,92 @@ plain tensors, and no project-side helper exists yet.
 
 ---
 
+## MLflow tracking
+
+MLflow is an optional second sink beside TensorBoard: `pip install '.[mlflow]'`, then attach
+Lightning's own logger. No shipped template enables it, and the SRResNet template carries the
+block commented out so tracking is always an explicit choice:
+
+```yaml
+trainer:
+  logger:
+    - class_path: lightning.pytorch.loggers.TensorBoardLogger
+      init_args: {save_dir: experiments, name: SRResNet}
+    - class_path: lightning.pytorch.loggers.MLFlowLogger
+      init_args: {experiment_name: sisr, tracking_uri: http://127.0.0.1:5000}
+```
+
+Scalars land in both loggers. The benchmark strips and per-image scalars reach MLflow as run
+artifacts and metrics **on the same batch-counted step** TensorBoard gets, so an artifact lines up
+against its metric curve; weight histograms stay TensorBoard-only. Without the extra installed,
+using MLflow raises an error that names it. A local backend needs a database
+(`sqlite:///mlflow.db`): MLflow 3 refuses its plain file store unless `MLFLOW_ALLOW_FILE_STORE=true`.
+
+Registration is off by default. Add `sisr.training.callbacks.MLflowModelRegistrar` with
+`register_model: true` and the **final** weights are written at the end of the fit (not a
+monitored best checkpoint), logged with their header and registered as
+`sisr-<variant_tag><name_suffix>`, tagged `origin=trained`. An already parity-scored external file
+registers under `sisr-<variant_tag>-official` with `sisr.training.callbacks.register_official_weights`,
+so the two are distinct in the registry.
+
+## Overriding config from the command line
+
+**A dotted override changes only the field it names.** `sisr validate --config my.yaml
+--model.init_args.eval_config.ssim_impl=wang` keeps `eval_config` as the subclass the YAML selected
+(`SRResNetEvalConfig`), so its other overridden defaults (`crop_border`, `psnr_channels`)
+survive; the same holds for `training_config`. The CLI enables subclass mode for
+`SREvalConfig` and `SRTrainingConfig` for this reason. Two other forms work and are useful when
+changing several fields at once: set them in YAML (the config itself or a second `--config`
+overlay), or pass the whole object as one JSON argument with its `class_path`:
+
+```bash
+sisr validate --config templates/config.srresnet.template.yaml \
+  --model.init_args.eval_config='{"class_path": "sisr.models.srresnet.SRResNetEvalConfig", "init_args": {"ssim_impl": "wang"}}'
+```
+
+`--print_config` shows which form survived: the resolved `eval_config` has a `class_path` when the
+subclass survived and a bare key/value mapping when it did not.
+
+**`--ckpt_path` preserves the subclass too.** `SRLightning` stores `eval_config` in `hparams` as a
+bare dict with no `class_path`; the CLI merges that dict, through the subcommand's own parser, onto
+the class `--config` already selected. Stored keys land as `init_args` overrides and every key the
+dict omits keeps the subclass's own default, so a checkpoint that predates a field still reloads
+with that class's default. This holds for every subcommand that takes `--ckpt_path`, `fit` resume
+included.
+
+**Exception under SRGAN.** `SRGANLightning` types `training_config` as
+`AdversarialTrainingConfig | None` and `eval_config` as the base `SREvalConfig | None`. The
+template's `class_path` pins `training_config` to `SRGANTrainingConfig`, so a dotted override of
+`adversarial_weight` or `d_steps_per_g_step` is safe. A dotted override of an `eval_config` field
+is not: it rebuilds from the base class, so `perceptual_metrics` empties (silently removing the
+metrics that track an adversarial objective) and `ssim_impl` flips from `daala` to `wang`. Use
+YAML or the whole-object JSON form for any `eval_config` field there.
+
+## Export
+
+```bash
+pip install ".[export]"
+sisr export --config my.yaml --ckpt_path best.ckpt --output_path model.onnx
+```
+
+The exported graph is the **bare model**, with no processor attached, and it accepts arbitrary
+input sizes. For RGB models it is the whole pipeline. For Y-channel models (SRCNN, VDSR, DRCN) the
+consumer extracts Y and recombines chroma itself; `sisr/processors/y_channel.py` and
+`sisr/processors/studio_y_channel.py` are the reference implementations. `sisr.export.to_onnx()`
+does the same from Python.
+
 ## SRGAN specifics
+
+`templates/config.srgan.template.yaml` reproduces **SRGAN-VGG54**, the paper's headline variant: the
+SRResNet generator, a VGG19 `φ_{5,4}` content loss, and `sisr.losses.AdversarialLoss`
+(non-saturating, over the critic's logits) weighted `1e-3`, alternating one `SRDiscriminator`
+update per generator update. `sisr.training.SRGANLightning` owns both optimizers under manual
+optimization and is selected by `class_path` on the top-level `model:` block. It needs
+`pip install '.[perceptual]'` for LPIPS. Its eval config adds `lpips` and `dists` (logged as
+`lpips/val` and `dists/val`, and per benchmark set); both are lower-is-better, so a checkpoint
+monitoring one needs `mode: min`, which `SRCheckpoint` enforces at setup. Human mean-opinion-score
+studies are not reproduced; LPIPS and DISTS correlate with human judgement better than PSNR does,
+which is the only claim made for them.
 
 ### Two optimizers
 
@@ -485,8 +618,9 @@ were for.
 
 ### Extras
 
-`export` (onnx/onnxruntime) and `perceptual` (lpips) are opt-in. DISTS needs only
-torchvision and ships in core, so the `perceptual` extra buys exactly one metric.
+Opt-in extras: `export` (onnx, onnxruntime), `perceptual` (LPIPS, pyiqa for Ma and PI, SciPy for
+NIQE; DISTS needs no extra), `mlflow` (experiment tracking and the model registry) and `dev` (tests and
+lint). The heavy ones are imported only where used.
 
 ### Test and lint settings
 

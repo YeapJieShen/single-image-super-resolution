@@ -11,6 +11,26 @@ notice.
 
 ### Added
 
+- **Seven more architectures, each with a template and, where the authors released weights, a
+  data-gated parity test**: ESPCN (#313), DRCN (#316), VDSR (#319), ESRGAN with the PSNR-stage
+  weights ported (#320), EDSR and EDSR+ (#321), MDSR and MDSR+ (#324). See
+  [`docs/models.md`](docs/models.md) for each one's parity status.
+- **Multi-scale training** (#318): one model trained at several scales
+  (`training_config.scale: [2, 3, 4]`), validated once per scale with `/x{scale}` tags.
+- **Self-ensemble at test and predict time** (#310): `eval_config.self_ensemble`, which makes
+  EDSR+ and MDSR+.
+- **No-reference perceptual metrics NIQE, Ma and PI** (#314), with a native NIQE port.
+- **A studio-range Y processor** (#325), `StudioYChannelProcessor`, for the networks the MATLAB
+  authors trained on studio luma (VDSR, DRCN); a separate class from the full-range one.
+- **Per-paper evaluation switches** (#326): `eval_config.round_to_uint8`,
+  `eval_config.grey_plane_scoring`, and `float_degrade` / `clamp_input_luma` on the pre-upsampled
+  validation dataset. Each paper template sets what its MATLAB does; all default off.
+- **A model output record and `LossWeightScheduler`** (#312), for multi-output models and
+  scheduled loss-term weights; **an opt-in LR-scaled gradient clipping** (#309).
+- **MLflow as an opt-in second sink** (#328): the `[mlflow]` extra, benchmark strips and
+  per-image scalars on the same step as TensorBoard, and an opt-in model registry.
+- **Urban100 in the benchmark sets** (#311), verified byte-exact against the MATLAB originals.
+
 - **`sisr/artifacts.py`, one owner for the distributable weights artifact** — save, load,
   metadata encoding, the compatibility check a reader runs before trusting a file, and the
   filename stem. The checkpoint callback, `sisr export` and the CLI all go through it, so
@@ -35,7 +55,7 @@ notice.
   SRGAN-VGG54. The generator initialises from an MSE-trained SRResNet's bare weights, the
   paper's recipe, and refuses any weights file whose architecture, processor, output
   range or scale disagrees with the run loading it. `trainer.global_step` counts
-  optimizer steps, so it advances twice per batch here and nowhere else — see the README.
+  optimizer steps, so it advances twice per batch here and nowhere else — see [`docs/configuration.md`](docs/configuration.md#-step-axis-two-counters-different-units).
 - **Subclass-mode CLI** — the top-level `model:` block may now name its Lightning module
   with `class_path`/`init_args`, which is how a config selects `SRGANLightning` instead
   of `SRLightning`. Existing configs that set `model:` fields directly keep resolving
@@ -77,8 +97,22 @@ notice.
 - **LR-only prediction path** — `PredictDataset`, `predict_step`, and `SRPredictionWriter`.
 - **LMDB HR caching** shared by both architectures, with an advisory build lock so
   concurrent builds do not duplicate work.
+- **`SRProgressBar`** — a progress bar showing the whole run name and only the metric
+  families asked for, instead of Lightning's truncated version string and every
+  `prog_bar=True` metric regardless of relevance.
 
 ### Changed
+
+- **Dataset modules are named by the contract they implement** (#307):
+  `sisr.datasets.pre_upsampled` and `sisr.datasets.native_lr`.
+- **`SRGANLightning` is built on a reusable adversarial interface** (#308), so another
+  adversarial model needs no new training loop.
+- **`sisr.training.callbacks` is a package** (#327), one module per concern, with the same public
+  import path; docstrings state the current contract rather than the fix history.
+- **SRCNN caches the LR plane and upsamples each training patch at load** (#317), cutting the
+  DIV2K-800 working set; training scales must be odd or a power of two.
+- **The README is a front page**; models, losses, SRGAN mechanics, overrides and weights policy
+  moved to `docs/`.
 
 Three of these break existing setups. Nothing is released yet, so they break no version
 — but they do break anyone tracking `main`, which is why they are called out.
@@ -126,8 +160,23 @@ Three of these break existing setups. Nothing is released yet, so they break no 
 - **Google-style docstrings are enforced** via ruff's pydocstyle rules.
 - **`torchmetrics>=1.9` floor** (was `>=1.4`) — the version DISTS was verified present in
   on this project. Lowering it means testing the lower version, not guessing.
+- **Every metric tag routes through one grammar's declared owner** instead of being
+  assembled ad hoc at each call site.
+- **Scale resolution is one code path, and it always returns an int** — the second
+  resolution that could disagree with it is gone.
+- **`_collect_batch`'s two guarded emissions are their own methods**, named for what
+  each does rather than sharing one body.
+- **`metadata.class_path` is public** — it already had a caller outside its module.
+- **The HR cache checksum keys on file name and size only**, not content — now stated
+  explicitly rather than left implicit.
 
 ### Fixed
+
+- **Schedulers step per optimizer step**, not per epoch (#304).
+- **`sisr predict` upsamples the input for pre-upsampled models** (#298).
+- **SRCNN rejects even kernel sizes**, which silently misaligned HR and SR (#297).
+- **The adversarial batch-count log honours `d_steps_per_g_step`** (#299).
+- **Benchmark image filenames are right on a partial last batch** (#303).
 
 - **An SRCNN artifact recorded no scale**, so a published file could not say what it
   upscales. SRCNN takes an already-upsampled input, so its scale lives on the dataset
@@ -139,9 +188,9 @@ Three of these break existing setups. Nothing is released yet, so they break no 
   monitor a different SSIM convention than a fresh run from the same YAML. The
   checkpoint's stored fields are now merged onto the class the config already selected,
   so subclass identity and subclass-only defaults both survive, including from
-  checkpoints saved before a field existed. A dotted *command-line* override of such a
-  field still reverts the object to its base class — a separate, open defect; see the
-  README.
+  checkpoints saved before a field existed. A dotted *command-line* override was a separate
+  defect, since fixed: it now changes only the field it names (see
+  [`docs/configuration.md`](docs/configuration.md#overriding-config-from-the-command-line)).
 - **The LMDB cache could delete another process's in-progress build.** Deletion is now
   restricted to proven corruption; environmental failures raise instead.
 - **A misspelled key inside a dataset spec's `init_args`** reported a bare `TypeError`
@@ -158,6 +207,22 @@ Three of these break existing setups. Nothing is released yet, so they break no 
 - **SRCNN's paper weight-init std** corrected to the published `0.001`.
 - **`example_input_shape` pointed at the wrong size**, defeating compile warm-up and
   misreporting FLOPs.
+- **A config value that silently produced an incomparable number is now rejected**
+  rather than accepted and scored against a different convention than the paper's.
+- **SRCNN's validation HR is modcropped**, matching the authors' degradation order.
+- **An unbound VGG loss now refuses to compute** instead of silently assuming a
+  `[0, 1]` input range.
+- **SRResNet's padding is honoured everywhere**, and a padding value that cannot work
+  is now rejected instead of silently misaligning HR and SR.
+- **A failed LMDB write transaction is aborted** instead of left for the garbage
+  collector to close.
+- **`test_dataloader` now raises before `setup`** instead of reporting nothing to do.
+- **Both train datasets degrade the whole image and only then extract
+  sub-images/patches**, matching the authors' released degradation order — verified
+  byte-exact against two external reference sets (357/357 of a MATLAB benchmark set,
+  800/800 of DIV2K's own distributed LR).
+- **A model rebuilds from its own artifact header** — SRCNN and SRResNet now accept
+  the list-valued sequence hparams the header records, instead of refusing them.
 
 ### Removed
 
