@@ -1,6 +1,6 @@
 """Pluggable loss functions, wired via YAML ``model.criterion``."""
 
-from .adversarial import AdversarialLoss
+from .adversarial import AdversarialLoss, RelativisticAverageLoss
 from .base import SRLoss
 from .composite import WeightedSumLoss
 from .pixel import CharbonnierLoss, TotalVariationLoss
@@ -9,6 +9,7 @@ from .vgg import VGG16FeatureLoss, VGG19FeatureLoss
 __all__ = [
     "SRLoss",
     "AdversarialLoss",
+    "RelativisticAverageLoss",
     "CharbonnierLoss",
     "TotalVariationLoss",
     "VGG16FeatureLoss",

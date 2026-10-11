@@ -9,21 +9,29 @@ itself. Optimizer / LR scheduler are wired in from top-level YAML keys by
 """
 
 import dataclasses
+import functools
+from collections.abc import Callable
 from typing import Any, Literal, overload
 
 import lightning
 import torch
 import torchvision
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch.utilities import GradClipAlgorithmType
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from ..losses import SRLoss
-from ..metrics.scoring import SRScorer, expected_tags, metric_tag
-from ..models.base import SRModel
+from ..metrics.scoring import Scores, SRScorer, expected_tags, metric_tag
+from ..models.base import SRModel, SRModelOutput, unwrap_primary
 from ..processors import SRProcessor
 from .config import SREvalConfig, SRTrainingConfig
 from .metadata import build_metadata
 from .probe import probe_pair
+from .self_ensemble import self_ensemble_forward
+
+
+def _to_float(value: torch.Tensor | float) -> float:
+    return float(value.detach()) if isinstance(value, torch.Tensor) else float(value)
 
 
 class SRLightning(lightning.LightningModule):
@@ -41,6 +49,7 @@ class SRLightning(lightning.LightningModule):
         processor: An :class:`SRProcessor` subclass (e.g.
             :class:`~sisr.processors.RGBProcessor`,
             :class:`~sisr.processors.YChannelProcessor`,
+            :class:`~sisr.processors.StudioYChannelProcessor`,
             :class:`~sisr.processors.YCbCrProcessor`). Required.
         training_config: Per-architecture training settings (layer_lrs,
             example_input_shape, init_*). Defaults to base
@@ -99,7 +108,9 @@ class SRLightning(lightning.LightningModule):
         # crop_border=None means "the field convention: the model's scale".
         # Resolved here, once, BEFORE the scorer is built -- the scorer and
         # every artifact's sisr_meta must record the number actually used.
-        if self.eval_config.crop_border is None:
+        # With several scales there is no one border: it stays None and the scorer takes
+        # each sample's own scale (see SRScorer.crop).
+        if self.eval_config.crop_border is None and len(self._scales_or_empty()) <= 1:
             self.eval_config.crop_border = self.resolved_scale(
                 "eval_config.crop_border is None (derive the border from the scale)"
             )
@@ -107,11 +118,19 @@ class SRLightning(lightning.LightningModule):
         # reductions and the tag grammar. BenchmarkImageLogger uses this
         # same object, so the two paths cannot disagree.
         self.scorer = SRScorer(self.eval_config)
+        # Multi-scale primary val only: scale -> plain tag -> [scaled tag, sum, count].
+        self._val_acc: dict[int, dict[str, list[Any]]] = {}
         self.criterion = criterion if criterion is not None else torch.nn.MSELoss()
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
         self.training_config.validate_against(self.model, self.processor)
+        if model.multi_scale and model.input_contract != "native_lr":
+            raise ValueError(
+                f"{type(model).__name__}.multi_scale=True needs input_contract='native_lr': a "
+                f"{model.input_contract!r} model sees LR already on the HR grid, so there is no "
+                f"scale to hand it (and its batches may mix scales)."
+            )
 
         if isinstance(self.criterion, SRLoss):
             self.criterion.bind(self.processor)
@@ -280,9 +299,9 @@ class SRLightning(lightning.LightningModule):
                 f"{type(self.model).__name__}.input_contract='pre_upsampled' requires "
                 f"LR and HR to share spatial size, but data.{source} ({ds_name}) served "
                 f"lr {lr_hw} != hr {hr_hw}. A native-LR dataset (e.g. "
-                f"sisr.datasets.srresnet) paired with a pre-upsampled model silently "
+                f"sisr.datasets.native_lr) paired with a pre-upsampled model silently "
                 f"zero-pads in SRLightning._forward_sr instead of raising — point "
-                f"data.{source} at a pre-upsampled dataset (e.g. sisr.datasets.srcnn), "
+                f"data.{source} at a pre-upsampled dataset (e.g. sisr.datasets.pre_upsampled), "
                 f"or switch to a native_lr model."
             )
 
@@ -293,26 +312,26 @@ class SRLightning(lightning.LightningModule):
                 f"{type(self.model).__name__}.input_contract."
             )
 
-        # Fall back to the model's own 'scale' hparam when training_config.scale
-        # is unset (e.g. a bare SRTrainingConfig()) — only skip the check when
-        # BOTH are absent. Falling back keeps this from silently no-opping for
-        # exactly the native_lr construction several existing tests use.
-        scale = self.training_config.scale
-        if scale is None:
-            scale = self.model.hparams.get("scale")
-        if scale is None:
+        # Falls back to the model's own 'scale' hparam when training_config.scale is
+        # unset (e.g. a bare SRTrainingConfig()) -- only skip the check when BOTH are
+        # absent. Falling back keeps this from silently no-opping for exactly the
+        # native_lr construction several existing tests use.
+        scales = self._scales_or_empty()
+        if not scales:
             return
-        expected_hw = (lr_hw[0] * scale, lr_hw[1] * scale)
-        if hr_hw == expected_hw:
+        expected = [(lr_hw[0] * s, lr_hw[1] * s) for s in scales]
+        if hr_hw in expected:
             return
+        listed = scales[0] if len(scales) == 1 else scales
         raise ValueError(
             f"{type(self.model).__name__}.input_contract='native_lr' requires "
-            f"hr.shape[-2:] == lr.shape[-2:] * training_config.scale ({scale}), but "
+            f"hr.shape[-2:] == lr.shape[-2:] * training_config.scale ({listed}), but "
             f"data.{source} ({ds_name}) served lr {lr_hw}, hr {hr_hw} (expected "
-            f"{expected_hw}). A pre-upsampled dataset (e.g. sisr.datasets.srcnn) "
+            f"{expected[0] if len(expected) == 1 else expected}). A pre-upsampled dataset "
+            f"(e.g. sisr.datasets.pre_upsampled) "
             f"paired with a native-LR model silently zero-pads in "
             f"SRLightning._forward_sr instead of raising — point data.{source} at a "
-            f"native-LR dataset (e.g. sisr.datasets.srresnet), or fix "
+            f"native-LR dataset (e.g. sisr.datasets.native_lr), or fix "
             f"training_config.scale."
         )
 
@@ -363,6 +382,10 @@ class SRLightning(lightning.LightningModule):
         Raises:
             ValueError: If ``example_input_shape[1:] != lr.shape[-2:]``.
         """
+        if getattr(train_dataset, "scale_per_batch", False):
+            # The LR patch is crop // scale, so it differs from batch to batch and the
+            # one sampled here is just one scale's.
+            return
         expected_hw = tuple(expected[1:])
         actual_hw = tuple(lr.shape[-2:])
         if expected_hw == actual_hw:
@@ -405,7 +428,7 @@ class SRLightning(lightning.LightningModule):
 
         return result
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor | SRModelOutput:
         """Run the wrapped SR model on ``x`` and return its raw output.
 
         Pure inference path — no colorspace conversion, no metrics, no
@@ -438,22 +461,38 @@ class SRLightning(lightning.LightningModule):
     # and predict_step use the value without each re-proving it is not None.
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+        self,
+        lr_img: torch.Tensor,
+        need_sr_rgb: Literal[True] = True,
+        self_ensemble: bool = False,
+        scale: int | None = None,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor]: ...
 
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: Literal[False]
-    ) -> tuple[torch.Tensor, None]: ...
+        self,
+        lr_img: torch.Tensor,
+        need_sr_rgb: Literal[False],
+        self_ensemble: bool = False,
+        scale: int | None = None,
+    ) -> tuple[torch.Tensor | SRModelOutput, None]: ...
 
     @overload
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: bool
-    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+        self,
+        lr_img: torch.Tensor,
+        need_sr_rgb: bool,
+        self_ensemble: bool = False,
+        scale: int | None = None,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None]: ...
 
     def _forward_lr(
-        self, lr_img: torch.Tensor, need_sr_rgb: bool = True
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        self,
+        lr_img: torch.Tensor,
+        need_sr_rgb: bool = True,
+        self_ensemble: bool = False,
+        scale: int | None = None,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None]:
         """LR-only core of the forward pipeline: extract -> model -> (reconstruct).
 
         Shared with :meth:`predict_step` rather than forked, so the colorspace
@@ -472,18 +511,45 @@ class SRLightning(lightning.LightningModule):
                 passing ``False`` — it discards ``sr_rgb``, and reconstruct
                 costs real time (~11.5% of a data-free SRCNN step for
                 ``YChannelProcessor``; ~0 for SRResNet's elementwise ones).
+            self_ensemble: When ``True``, routes the model call through
+                :func:`~sisr.training.self_ensemble.self_ensemble_forward` (8 forward passes,
+                averaged) instead of calling the model once. Callers gate this on
+                ``eval_config.self_ensemble`` themselves — this method never reads
+                ``eval_config`` — so :meth:`training_step`/:meth:`validation_step` (via
+                :meth:`_step`) never pass it, keeping training/validation cost unchanged
+                regardless of the config. Only the primary is ensembled, so the result
+                is a bare tensor even for a model returning an ``SRModelOutput``.
+            scale: The batch's upscaling factor. Handed to the model as ``scale=`` iff it is
+                :attr:`~sisr.models.base.SRModel.multi_scale`, ignored otherwise.
 
         Returns:
             ``(sr_model_out, sr_rgb)`` — raw model output in the model IO
-            colorspace, and the SR RGB clamped to ``[0, 1]``; ``sr_rgb`` is
+            colorspace (a bare tensor, or an ``SRModelOutput`` if the model returns one),
+            and the SR RGB clamped to ``[0, 1]``; ``sr_rgb`` is
             ``None`` iff ``need_sr_rgb`` is ``False``.
         """
         model_input = self.processor.extract(lr_img)
-        model_fn = self._compiled if self.training and self._compiled is not None else self.model
-        sr_model_out = model_fn(model_input)
+        compiled_or_eager = (
+            self._compiled if self.training and self._compiled is not None else self.model
+        )
+        model_fn: Callable[..., Any]
+        if self.model.multi_scale:
+            if scale is None:
+                raise ValueError(
+                    f"{type(self.model).__name__} is multi_scale and needs the batch's scale, "
+                    f"but none was given."
+                )
+            model_fn = functools.partial(compiled_or_eager, scale=scale)
+        else:
+            model_fn = compiled_or_eager
+        sr_model_out = (
+            self_ensemble_forward(lambda x: unwrap_primary(model_fn(x)), model_input)
+            if self_ensemble
+            else model_fn(model_input)
+        )
         if not need_sr_rgb:
             return sr_model_out, None
-        sr_rgb = self.processor.reconstruct(sr_model_out, lr_img)
+        sr_rgb = self.processor.reconstruct(unwrap_primary(sr_model_out), lr_img)
         # Clamp display space once, here: every reconstruct() consumer reads
         # through this line, so PSNR/SSIM never diverge from what an 8-bit image
         # would score. sr_model_out (the loss target) stays unclamped -- clamping
@@ -495,22 +561,38 @@ class SRLightning(lightning.LightningModule):
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[True] = True
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: Literal[True] = True,
+        self_ensemble: bool = False,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: Literal[False]
-    ) -> tuple[torch.Tensor, None, torch.Tensor]: ...
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: Literal[False],
+        self_ensemble: bool = False,
+    ) -> tuple[torch.Tensor | SRModelOutput, None, torch.Tensor]: ...
 
     @overload
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: bool,
+        self_ensemble: bool = False,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None, torch.Tensor]: ...
 
     def _forward_sr(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor, need_sr_rgb: bool = True
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        self,
+        lr_img: torch.Tensor,
+        hr_img: torch.Tensor,
+        need_sr_rgb: bool = True,
+        self_ensemble: bool = False,
+    ) -> tuple[torch.Tensor | SRModelOutput, torch.Tensor | None, torch.Tensor]:
         """Canonical SR forward: extract -> model -> (reconstruct) -> crop HR.
 
         The single source of truth for the forward pipeline, shared by
@@ -522,14 +604,16 @@ class SRLightning(lightning.LightningModule):
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
             need_sr_rgb: Forwarded to :meth:`_forward_lr`. The HR crop uses
-                ``sr_model_out.shape[-2:]`` regardless, since every shipped
+                the primary's spatial size regardless, since every shipped
                 ``SRProcessor.reconstruct`` preserves H/W.
+            self_ensemble: Forwarded to :meth:`_forward_lr` — see there.
 
         Returns:
             ``(sr_model_out, sr_rgb, hr_cropped)`` — raw (unclamped) model
-            output in the model IO colorspace, SR RGB clamped to ``[0, 1]``
-            (``None`` iff ``need_sr_rgb`` is ``False``), and HR center-cropped
-            to the SR spatial size.
+            output in the model IO colorspace (a bare tensor, or an
+            ``SRModelOutput`` if the model returns one), SR RGB clamped to
+            ``[0, 1]`` (``None`` iff ``need_sr_rgb`` is ``False``), and HR
+            center-cropped to the SR spatial size.
 
         Raises:
             ValueError: If ``hr_img`` is spatially smaller than the model
@@ -539,8 +623,13 @@ class SRLightning(lightning.LightningModule):
                 mismatch) earlier and louder; this guards callers that bypass
                 it, such as direct ``_forward_sr``/``_step`` calls in tests.
         """
-        sr_model_out, sr_rgb = self._forward_lr(lr_img, need_sr_rgb=need_sr_rgb)
-        hr_hw, sr_hw = hr_img.shape[-2:], sr_model_out.shape[-2:]
+        sr_model_out, sr_rgb = self._forward_lr(
+            lr_img,
+            need_sr_rgb=need_sr_rgb,
+            self_ensemble=self_ensemble,
+            scale=self._batch_scale(lr_img, hr_img) if self.model.multi_scale else None,
+        )
+        hr_hw, sr_hw = hr_img.shape[-2:], unwrap_primary(sr_model_out).shape[-2:]
         if hr_hw[0] < sr_hw[0] or hr_hw[1] < sr_hw[1]:
             raise ValueError(
                 f"hr_img spatial size {tuple(hr_hw)} is smaller than the model output "
@@ -554,8 +643,24 @@ class SRLightning(lightning.LightningModule):
         hr_cropped = torchvision.transforms.functional.center_crop(hr_img, sr_hw)
         return sr_model_out, sr_rgb, hr_cropped
 
+    @staticmethod
+    def _batch_scale(lr_img: torch.Tensor, hr_img: torch.Tensor) -> int:
+        """The upscaling factor a native-LR batch was made at: HR size over LR size.
+
+        Raises:
+            ValueError: If HR is not a whole multiple of LR on both axes, which means the
+                pair is not a native-LR pair of one scale at all.
+        """
+        (lh, lw), (hh, hw) = lr_img.shape[-2:], hr_img.shape[-2:]
+        if hh % lh or hw % lw or hh // lh != hw // lw:
+            raise ValueError(
+                f"Cannot read a scale off lr {(lh, lw)} / hr {(hh, hw)}: HR must be the same "
+                f"whole multiple of LR on both axes."
+            )
+        return hh // lh
+
     def predict_rgb(
-        self, lr_img: torch.Tensor, hr_img: torch.Tensor
+        self, lr_img: torch.Tensor, hr_img: torch.Tensor, self_ensemble: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the SR forward and return spatially-aligned SR / HR RGB tensors.
 
@@ -570,12 +675,16 @@ class SRLightning(lightning.LightningModule):
             lr_img: LR batch, RGB ``float32`` in ``[0, 1]``, shape
                 ``(B, 3, H, W)``.
             hr_img: HR batch, RGB ``float32`` in ``[0, 1]``.
+            self_ensemble: Forwarded to :meth:`_forward_sr` — see there. Callers decide this
+                explicitly: :class:`~sisr.training.callbacks.BenchmarkImageLogger` passes
+                ``eval_config.self_ensemble`` only from its *test*-stage hook, always ``False``
+                from its validation-stage one.
 
         Returns:
             ``(sr_rgb, hr_cropped)`` — SR RGB clamped to ``[0, 1]`` and HR
             center-cropped to the SR spatial size, both RGB ``float32``.
         """
-        _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img)
+        _, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, self_ensemble=self_ensemble)
         return sr_rgb, hr_cropped
 
     @overload
@@ -614,11 +723,16 @@ class SRLightning(lightning.LightningModule):
             ``False``) and ``hr_cropped`` are RGB tensors with matching
             spatial size.
         """
-        lr_img, hr_img = batch
+        lr_img, hr_img = batch[0], batch[1]  # an eval batch may carry a third is_grey element
 
         sr_model_out, sr_rgb, hr_cropped = self._forward_sr(lr_img, hr_img, need_sr_rgb=need_sr_rgb)
         hr_for_loss = self.processor.extract_target(hr_cropped)
-        loss = self.criterion(sr_model_out, hr_for_loss)
+        criterion_input = (
+            sr_model_out
+            if getattr(self.criterion, "wants_model_output", False)
+            else unwrap_primary(sr_model_out)
+        )
+        loss = self.criterion(criterion_input, hr_for_loss)
 
         return loss, lr_img, hr_img, sr_rgb, hr_cropped
 
@@ -677,24 +791,39 @@ class SRLightning(lightning.LightningModule):
     def validation_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> None:
-        """Compute and log validation metrics for the *primary* val loader (idx 0).
+        """Compute and log validation metrics for the *primary* val loaders.
 
-        Benchmark / test loaders (idx >= 1) are handled by
+        A single-scale run has one primary loader (idx 0). A multi-scale run has one per
+        scale (idx ``0..n_primary-1``, see
+        :attr:`~sisr.training.SRDataModule.n_primary`): each scale's metrics are logged
+        under a ``/x{scale}`` tag (``psnr/val/Y/x2``), and the plain tags
+        (``loss/val``, ``psnr/val/Y``, ...) are the **mean over the scales**, so
+        checkpoint monitors and the progress bar keep working. That mean is a monitor,
+        not a paper number -- the per-scale tags are the ones to compare against a paper.
+        Benchmark / test loaders (idx >= ``n_primary``) are handled by
         :class:`~sisr.training.callbacks.BenchmarkImageLogger`.
 
         Args:
             batch: ``(lr_img, hr_img)`` tuple from the val loader.
             batch_idx: Index of the batch within the current val epoch.
             dataloader_idx: Index of the loader within the list returned
-                by :meth:`SRDataModule.val_dataloader`. ``0`` is the
-                primary val set; anything else is skipped.
+                by :meth:`SRDataModule.val_dataloader`.
         """
-        if dataloader_idx != 0:
+        n_primary = self._n_primary()
+        if dataloader_idx >= n_primary:
             return
 
         loss, lr_img, hr_img, sr, hr_cropped = self._step(batch)
 
-        scores = self.scorer.score(sr, hr_cropped)
+        scale = self._primary_val_scale(dataloader_idx)
+        scores = self.scorer.score(
+            sr, hr_cropped, scale=scale, is_grey=batch[2] if len(batch) > 2 else None
+        )
+
+        if n_primary > 1:
+            assert scale is not None, "a multi-scale primary val loader must state its scale"
+            self._accumulate_val(scale, loss, scores, n=hr_img.size(0))
+            return
 
         # add_dataloader_idx=False keeps metric names clean — needed because the
         # primary val loader is at idx 0 of a list that also contains test loaders.
@@ -709,16 +838,93 @@ class SRLightning(lightning.LightningModule):
         self._log_loss_terms("val")
         # prog_bar is a display choice, so it stays with the caller rather than
         # moving into the scorer — the scorer decides values, not presentation.
-        prog_bar_tags = {
-            metric_tag("psnr", "val", self.eval_config.psnr_channels[0]),
-            metric_tag("ssim", "val", self.eval_config.ssim_channels[0]),
-        }
         for tag, value in scores.tagged("val").items():
             self.log(
                 tag,
                 value,
-                prog_bar=(tag in prog_bar_tags),
+                prog_bar=(tag in self._prog_bar_val_tags()),
                 on_step=False,
+                add_dataloader_idx=False,
+                sync_dist=True,
+            )
+
+    def _prog_bar_val_tags(self) -> set[str]:
+        return {
+            metric_tag(family, "val", channels[0])
+            for family, channels in (
+                ("psnr", self.eval_config.psnr_channels),
+                ("ssim", self.eval_config.ssim_channels),
+            )
+            if channels
+        }
+
+    def _datamodule(self) -> Any:
+        return getattr(self._trainer, "datamodule", None) if self._trainer is not None else None
+
+    def _n_primary(self) -> int:
+        """How many leading val loaders are the primary set (one per scale; 1 w/o a datamodule)."""
+        return int(getattr(self._datamodule(), "n_primary", 1))
+
+    def _primary_val_scale(self, dataloader_idx: int) -> int | None:
+        """The scale of primary val loader ``dataloader_idx``, or ``None`` when not stated."""
+        scales = getattr(self._datamodule(), "primary_val_scales", None) or []
+        return scales[dataloader_idx] if dataloader_idx < len(scales) else None
+
+    def _accumulate_val(self, scale: int, loss: torch.Tensor, scores: Scores, n: int) -> None:
+        """Add one primary-val batch of a multi-scale run to that scale's running sums.
+
+        Lightning would pool every batch of every loader under one tag, so the per-scale
+        means this run needs are kept here and logged together at epoch end
+        (:meth:`on_validation_epoch_end`). Sums are weighted by the batch size, as
+        Lightning's own epoch mean is.
+
+        Args:
+            scale: The loader's scale.
+            loss: The batch loss.
+            scores: The batch's metric values.
+            n: Batch size.
+        """
+        # plain tag -> [tag at this scale or None (mean-only), weighted sum, count]
+        acc = self._val_acc.setdefault(scale, {})
+        plain = scores.tagged("val")
+        rows: dict[str, tuple[str | None, float]] = {
+            "loss/val": (f"loss/val/x{scale}", _to_float(loss))
+        }
+        for name, value in (getattr(self.criterion, "last_terms", None) or {}).items():
+            rows[f"loss/val/{name}"] = (None, _to_float(value))
+        for (tag, value), tag_at_scale in zip(
+            plain.items(), scores.tagged("val", scale), strict=True
+        ):
+            rows[tag] = (tag_at_scale, _to_float(value))
+        for tag, (scaled_tag, value) in rows.items():
+            row = acc.setdefault(tag, [scaled_tag, 0.0, 0])
+            row[1] += value * n
+            row[2] += n
+
+    def on_validation_epoch_end(self) -> None:
+        """Log a multi-scale run's primary-val metrics: per scale, and their mean over scales.
+
+        Nothing to do for a single-scale run, whose metrics :meth:`validation_step` logs
+        itself. The mean is taken over the per-scale means (each scale counts once however
+        many batches it had), and it carries the plain tag, so ``psnr/val/Y`` means "mean
+        over scales" for such a run.
+        """
+        acc, self._val_acc = self._val_acc, {}
+        if not acc:
+            return
+        means: dict[str, list[float]] = {}
+        for scale in sorted(acc):
+            for tag, (scaled_tag, total, count) in acc[scale].items():
+                mean = total / count
+                means.setdefault(tag, []).append(mean)
+                if scaled_tag is not None:
+                    self.log(scaled_tag, mean, add_dataloader_idx=False, sync_dist=True)
+        prog_bar = self._prog_bar_val_tags() | {"loss/val"}
+        for tag, values in means.items():
+            self.log(
+                tag,
+                sum(values) / len(values),
+                prog_bar=(tag in prog_bar),
                 add_dataloader_idx=False,
                 sync_dist=True,
             )
@@ -821,7 +1027,7 @@ class SRLightning(lightning.LightningModule):
         metric uses, and therefore the one that locates this file on a curve —
         ``global_step`` beside it is the optimizer count, which an adversarial
         run advances twice per batch. See
-        :meth:`~sisr.training.callbacks._SRCheckpointBase._monitor_candidates`
+        :meth:`~sisr.training.callbacks.checkpoint._SRCheckpointBase._monitor_candidates`
         for the matching correction to the *filename*.
 
         Args:
@@ -861,6 +1067,10 @@ class SRLightning(lightning.LightningModule):
     ) -> torch.Tensor:
         """Run the HR-free inference pipeline: extract → model → reconstruct.
 
+        Self-ensembles (8 forward passes, averaged) when ``eval_config.self_ensemble`` is
+        ``True`` — see :meth:`_forward_lr`. A multi-scale model predicts at
+        ``eval_config.predict_scale`` (see :meth:`_predict_scale`).
+
         Shares :meth:`_forward_lr` with :meth:`_forward_sr` (the pipeline
         backing :meth:`_step` / :meth:`predict_rgb`) — the same colorspace
         pipeline minus the HR-dependent center-crop and scoring, neither of
@@ -884,30 +1094,45 @@ class SRLightning(lightning.LightningModule):
             explicit int) shrinks H/W per conv layer (see
             :meth:`~sisr.models.srcnn.model.SRCNN.forward`).
         """
-        _, sr_rgb = self._forward_lr(batch)
+        _, sr_rgb = self._forward_lr(
+            batch,
+            self_ensemble=self.eval_config.self_ensemble,
+            scale=self._predict_scale() if self.model.multi_scale else None,
+        )
         return sr_rgb
 
-    def resolved_scale(self, why: str) -> int:
-        """The run's upscaling factor, from the training config or the model.
+    def _predict_scale(self) -> int:
+        """The scale a multi-scale model predicts at: ``predict_scale``, else its only scale.
 
-        The single implementation of the three-step resolution --
-        ``training_config.scale``, else the model's ``scale`` hparam, else
-        raise. :func:`~sisr.training.metadata.build_metadata` carried its own
-        copy and the two had already diverged: this one coerces to ``int``, that
-        one did not, so one config could write a ``str`` into artifact
-        provenance and an ``int`` into the evaluation crop border.
+        Raises:
+            ValueError: If the run has several scales and ``predict_scale`` is unset --
+                prediction has no HR to read the scale off, and guessing one would
+                silently return the wrong size.
+        """
+        if self.eval_config.predict_scale is not None:
+            return self.eval_config.predict_scale
+        scales = self.resolved_scales()
+        if len(scales) > 1:
+            raise ValueError(
+                f"{type(self.model).__name__} is multi_scale and was configured for scales "
+                f"{scales}; predict has no HR to read the scale from, so set "
+                f"model.eval_config.init_args.predict_scale to one of them."
+            )
+        return scales[0]
 
-        Public rather than underscored precisely because it has a second module
-        as a caller. A private helper with an outside caller is how a helper
-        quietly becomes unchangeable: the underscore says "free to change" and
-        the second caller says otherwise.
+    def resolved_scales(self, why: str = "a scale is needed") -> list[int]:
+        """The run's upscaling factors, from the training config or the model.
+
+        The single implementation of the resolution -- ``training_config.scale``, else the
+        model's ``scale`` hparam, else raise -- shared by the crop border, the input-contract
+        check and artifact provenance, so all of them see the same ``int`` factors.
 
         Args:
             why: What needed the scale, for the error message.
 
         Returns:
-            The factor, always an ``int`` -- a model hparam is free-form and is
-            not otherwise type-checked.
+            The factors in the order configured: one for a single-scale run, always
+            ``int`` -- a model hparam is free-form and is not otherwise type-checked.
 
         Raises:
             ValueError: If neither ``training_config.scale`` nor the model's own
@@ -921,7 +1146,38 @@ class SRLightning(lightning.LightningModule):
                 f"{why}, but no scale is available: set training_config.scale, or use a "
                 f"model that declares a 'scale' hparam, or set the value explicitly."
             )
-        return int(scale)
+        return [int(s) for s in scale] if isinstance(scale, list | tuple) else [int(scale)]
+
+    def _scales_or_empty(self) -> list[int]:
+        """:meth:`resolved_scales`, or ``[]`` when the run states none (some checks then skip)."""
+        try:
+            return self.resolved_scales()
+        except ValueError:
+            return []
+
+    def resolved_scale(self, why: str) -> int:
+        """The run's one upscaling factor -- :meth:`resolved_scales` for a single-scale run.
+
+        Public because other modules call it (a private helper with an outside caller
+        is one nobody dares change).
+
+        Args:
+            why: What needed the scale, for the error message.
+
+        Returns:
+            The factor, always an ``int``.
+
+        Raises:
+            ValueError: If no scale is available, or the run has several: what needs *one*
+                scale (an artifact filename, a crop border) cannot be answered.
+        """
+        scales = self.resolved_scales(why)
+        if len(scales) > 1:
+            raise ValueError(
+                f"{why}, but this run trains at several scales {scales} and has no single "
+                f"one. Pick a scale explicitly."
+            )
+        return scales[0]
 
     @staticmethod
     def _param_groups_from_layer_lrs(
@@ -981,8 +1237,12 @@ class SRLightning(lightning.LightningModule):
         BatchNorm / PReLU); the validation below makes that explicit.
 
         Returns:
-            The constructed optimizer, or a ``([optimizer], [scheduler])``
-            tuple if ``self.lr_scheduler`` is set. Lightning accepts both.
+            The constructed optimizer, or — if ``self.lr_scheduler`` is set — a
+            dict of ``{"optimizer": ..., "lr_scheduler": {"scheduler": ...,
+            "interval": "step"}}``. ``interval: "step"`` is explicit: Lightning's
+            own default is once per *epoch*, and this steps once per optimizer
+            step instead, matching ``SRGANLightning``'s hand-stepped cadence
+            (once per batch, under manual optimization).
 
         Raises:
             ValueError: If ``training_config.layer_lrs`` length does not
@@ -1018,4 +1278,58 @@ class SRLightning(lightning.LightningModule):
         if self.lr_scheduler is None:
             return optimizer
         scheduler = self.lr_scheduler(optimizer)
-        return [optimizer], [scheduler]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: int | float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """Clip gradients, optionally scaling the threshold by the optimizer's current LR.
+
+        ``Trainer(gradient_clip_val=..., gradient_clip_algorithm=...)`` stays the one place
+        the clip threshold θ itself is set. When ``training_config.scale_clip_with_lr`` is
+        ``False`` (the default), this is a pure passthrough to
+        :meth:`~lightning.pytorch.core.LightningModule.clip_gradients` — identical to
+        Lightning's own unoverridden behavior. When it is ``True``, clips to
+        ``θ / current_lr`` instead, where ``current_lr`` is this optimizer's first param
+        group's LR.
+
+        The scaled path calls ``self.trainer.precision_plugin.clip_gradients`` directly
+        rather than ``self.clip_gradients`` — the latter raises
+        ``MisconfigurationException`` whenever the value passed differs from
+        ``self.trainer.gradient_clip_val``, which a scaled value always does. That guard
+        exists to catch a human passing conflicting config by hand; it is not applicable
+        to a deliberate, documented scaling.
+
+        Args:
+            optimizer: The optimizer whose gradients are being clipped (Lightning passes
+                this in; with one optimizer, as everywhere in this codebase's automatic-
+                optimization path, it is always ``self.optimizers()``).
+            gradient_clip_val: θ, forwarded from ``Trainer.gradient_clip_val``. ``None``
+                means clipping is off.
+            gradient_clip_algorithm: ``"value"`` or ``"norm"``, forwarded from
+                ``Trainer.gradient_clip_algorithm``.
+        """
+        if not self.training_config.scale_clip_with_lr:
+            self.clip_gradients(
+                optimizer,
+                gradient_clip_val=gradient_clip_val,
+                gradient_clip_algorithm=gradient_clip_algorithm,
+            )
+            return
+        theta = gradient_clip_val
+        if theta is None:
+            theta = self.trainer.gradient_clip_val
+        if theta is None or theta <= 0:
+            return
+        current_lr = optimizer.param_groups[0]["lr"]
+        scaled = theta / current_lr
+        algo_name = gradient_clip_algorithm or self.trainer.gradient_clip_algorithm or "norm"
+        self.trainer.precision_plugin.clip_gradients(
+            optimizer, scaled, GradClipAlgorithmType(algo_name.lower())
+        )

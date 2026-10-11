@@ -1,4 +1,4 @@
-"""LPIPS / DISTS perceptual metrics — the two conventions, in one place.
+"""Perceptual metrics: LPIPS / DISTS (paired) and NIQE / Ma / PI (no-reference).
 
 Both are *scoring* metrics, never losses: LPIPS postdates Ledig et al. by a
 year, so an LPIPS-supervised generator is a different method, not SRGAN.
@@ -23,11 +23,22 @@ minutes of pure construction per cycle, paid again at step 0 through
 on the Lightning module for the same reason the VGG19 criterion is held outside
 the module tree: an ``nn.Module`` attribute would put ~230 MB of AlexNet (or
 ~528 MB of VGG16) into every ``state_dict`` this project writes.
+
+**NIQE, Ma and PI need no reference image** -- PI is the PIRM 2018 challenge's
+perceptual index, ``0.5 * ((10 - Ma) + NIQE)``, which ESRGAN reports. NIQE is the
+native port in :mod:`sisr.metrics.niqe` (pyiqa's NIQE disagrees with the authors'
+MATLAB release). Ma comes from pyiqa, the only dependency added for it, with every
+convention kwarg pinned below rather than left at pyiqa's defaults. PI follows PIRM's
+own evaluation script: both terms score the Y of MATLAB ``rgb2ycbcr`` with a 4-pixel
+shave, applied to whatever image PI is handed (so a crop_border before it adds to
+that shave).
 """
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import torch
+
+from .niqe import niqe
 
 
 @runtime_checkable
@@ -45,7 +56,26 @@ class _ResettableMetric(Protocol):
 #: Metric name -> is-lower-better. Consumed by the checkpoint-monitor direction
 #: check: PSNR/SSIM are higher-better and SRCheckpoint defaults to mode='max',
 #: so monitoring one of these at the default would keep the *worst* model.
-PERCEPTUAL_METRICS: dict[str, bool] = {"lpips": True, "dists": True}
+PERCEPTUAL_METRICS: dict[str, bool] = {
+    "lpips": True,
+    "dists": True,
+    "niqe": True,
+    "ma": False,
+    "pi": True,
+}
+
+#: The entries of :data:`PERCEPTUAL_METRICS` scored from the reconstruction alone.
+NO_REFERENCE_METRICS: frozenset[str] = frozenset({"niqe", "ma", "pi"})
+
+#: pyiqa's Ma (``nrqm``) under each convention it is scored in: Ma's own (MATLAB
+#: ``rgb2gray`` luma, which pyiqa calls ``'yiq'``, no crop) and PIRM's inside PI (Y of
+#: ``rgb2ycbcr``, 4-pixel shave). Every kwarg is explicit; none is left to pyiqa.
+_MA_KWARGS: dict[str, dict[str, Any]] = {
+    "ma": {"test_y_channel": True, "color_space": "yiq", "crop_border": 0},
+    "pi": {"test_y_channel": True, "color_space": "ycbcr", "crop_border": 4},
+}
+#: PI's NIQE term, matching :data:`_MA_KWARGS` ``["pi"]``.
+_PI_NIQE_KWARGS: dict[str, Any] = {"luma": "ycbcr", "shave": 4}
 
 #: Memoised backbones, keyed by ``(name, lpips_net, device, dtype)``. Populated by
 #: :func:`_cached_net`; never read directly.
@@ -75,6 +105,72 @@ def _lpips_metric_cls() -> type:
     from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
     return LearnedPerceptualImagePatchSimilarity
+
+
+def _pyiqa_metric(name: str, **kwargs: Any) -> torch.nn.Module:
+    """Build a pyiqa metric on demand, turning a missing extra into an actionable error.
+
+    Lazy for the same reason as :func:`_lpips_metric_cls`: importing pyiqa is slow and
+    this module is reachable from spawned DataLoader workers.
+    """
+    try:
+        import pyiqa
+    except ImportError as err:
+        raise ImportError(
+            "perceptual_metrics includes 'ma' or 'pi', which need the `pyiqa` package. "
+            "Install the extra: pip install '.[perceptual]'. 'niqe' needs only SciPy."
+        ) from err
+    return pyiqa.create_metric(name, **kwargs)
+
+
+def _cached_ma(convention: str) -> torch.nn.Module:
+    """Ma (pyiqa's ``nrqm``) under one convention of :data:`_MA_KWARGS`, built once, on CPU.
+
+    CPU always: its random-forest regressor runs there whatever the input device.
+    Construction is forced out of ``inference_mode`` for the reason given in
+    :func:`_cached_net`.
+    """
+    key = (f"ma-{convention}", "", torch.device("cpu"), torch.float32)
+    net = _NET_CACHE.get(key)
+    if net is None:
+        with torch.inference_mode(False):
+            net = _pyiqa_metric("nrqm", device=torch.device("cpu"), **_MA_KWARGS[convention])
+        _NET_CACHE[key] = net
+    return net
+
+
+def _ma(sr: torch.Tensor, convention: str) -> torch.Tensor:
+    """Per-image Ma, ``(B,)`` float64 on the CPU."""
+    return _cached_ma(convention)(sr.detach().cpu().float()).reshape(-1).to(torch.float64)
+
+
+def no_reference_score(name: str, sr: torch.Tensor) -> torch.Tensor:
+    """Score one no-reference metric over a batch, reduced to a 0-dim tensor.
+
+    Args:
+        name: ``'niqe'``, ``'ma'`` or ``'pi'``.
+        sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``. NIQE needs at
+            least one 96x96 block (after PI's 4-pixel shave, for PI).
+
+    Returns:
+        0-dim tensor on ``sr``'s device and dtype, batch-meaned.
+
+    Raises:
+        ValueError: If ``name`` is not a no-reference metric.
+        ImportError: If ``name`` is ``'ma'`` or ``'pi'`` and pyiqa is not installed.
+    """
+    if name not in NO_REFERENCE_METRICS:
+        raise ValueError(
+            f"no-reference metric must be one of {sorted(NO_REFERENCE_METRICS)}; got {name!r}"
+        )
+    with torch.no_grad():
+        if name == "niqe":
+            per_image = niqe(sr).cpu()
+        elif name == "ma":
+            per_image = _ma(sr, "ma")
+        else:
+            per_image = 0.5 * ((10.0 - _ma(sr, "pi")) + niqe(sr, **_PI_NIQE_KWARGS).cpu())
+    return per_image.mean().to(device=sr.device, dtype=sr.dtype)
 
 
 def _dists_net_cls() -> type:
@@ -130,14 +226,15 @@ def _cached_net(
 
 
 def perceptual_score(
-    name: str, sr: torch.Tensor, hr: torch.Tensor, lpips_net: str = "alex"
+    name: str, sr: torch.Tensor, hr: torch.Tensor | None = None, lpips_net: str = "alex"
 ) -> torch.Tensor:
     """Score one perceptual metric over a batch, reduced to a 0-dim tensor.
 
     Args:
-        name: ``'lpips'`` or ``'dists'``.
+        name: Any key of :data:`PERCEPTUAL_METRICS`.
         sr: Reconstruction, ``(B, 3, H, W)`` RGB float in ``[0, 1]``.
-        hr: Reference, same shape and range.
+        hr: Reference, same shape and range. Required by ``'lpips'`` and
+            ``'dists'``; ignored by the no-reference metrics.
         lpips_net: LPIPS backbone — ``'alex'``, ``'vgg'`` or ``'squeeze'``.
             Ignored by DISTS. A LPIPS figure is comparable only to one computed
             under the same backbone, the same way an SSIM figure is comparable
@@ -147,13 +244,18 @@ def perceptual_score(
         0-dim tensor, batch-meaned.
 
     Raises:
-        ValueError: If ``name`` is not a supported metric.
-        ImportError: If ``name`` is ``'lpips'`` and the extra is not installed.
+        ValueError: If ``name`` is not a supported metric, or is a paired metric
+            given no ``hr``.
+        ImportError: If the metric's extra is not installed.
     """
     if name not in PERCEPTUAL_METRICS:
         raise ValueError(
             f"perceptual metric must be one of {sorted(PERCEPTUAL_METRICS)}; got {name!r}"
         )
+    if name in NO_REFERENCE_METRICS:
+        return no_reference_score(name, sr)
+    if hr is None:
+        raise ValueError(f"perceptual metric {name!r} compares against a reference; got hr=None")
     net = _cached_net(name, lpips_net, sr.device, sr.dtype)
     with torch.no_grad():
         if name == "lpips":

@@ -6,8 +6,11 @@
   space every :class:`~sisr.processors.SRProcessor` feeds the model. Frozen:
   changing it renumbers a trained model's inputs and invalidates checkpoints.
 * **Studio-range** (:func:`rgb_to_ycbcr_studio`) is the *metric* space MATLAB's
-  ``rgb2ycbcr``, BasicSR and every published SR benchmark score against. Scoring
-  only -- never a processor's colorspace.
+  ``rgb2ycbcr``, BasicSR and every published SR benchmark score against. The three-channel
+  conversion is scoring only. A *separate* processor,
+  :class:`~sisr.processors.StudioYChannelProcessor`, feeds a MATLAB-trained net (VDSR, DRCN)
+  the studio **Y plane** via :func:`rgb_to_y_studio` / :func:`studio_y_to_full_y`; the frozen
+  full-range processors are unchanged.
 
 Pure tensor functions, so callers convert without importing Lightning or models.
 """
@@ -77,7 +80,8 @@ def rgb_to_ycbcr_studio(img: torch.Tensor) -> torch.Tensor:
     Rescales :func:`rgb_to_ycbcr`'s output onto the range MATLAB's
     ``rgb2ycbcr`` and the SR literature report PSNR/SSIM against. One-way:
     nothing reconstructs an image from it, so there is no studio inverse.
-    **Never feed this to a model** -- every processor trains full-range.
+    **Never feed this to a model** -- every full-range processor trains full-range; the
+    one model-facing use is the Y plane via :func:`rgb_to_y_studio`.
 
     Args:
         img: RGB ``(B, 3, H, W)`` in ``[0, 1]``.
@@ -92,3 +96,27 @@ def rgb_to_ycbcr_studio(img: torch.Tensor) -> torch.Tensor:
     cb = _STUDIO_C_OFFSET + _STUDIO_C_SCALE * (cb - 0.5)
     cr = _STUDIO_C_OFFSET + _STUDIO_C_SCALE * (cr - 0.5)
     return torch.cat([y, cb, cr], dim=1)
+
+
+def rgb_to_y_studio(img: torch.Tensor) -> torch.Tensor:
+    """Studio-range luma plane (MATLAB ``rgb2ycbcr`` Y) of a normalised RGB tensor.
+
+    Args:
+        img: RGB ``(B, 3, H, W)`` in ``[0, 1]``.
+
+    Returns:
+        ``(B, 1, H, W)``, black 16/255 and white 235/255.
+    """
+    return _STUDIO_Y_OFFSET + _STUDIO_Y_SCALE * rgb_to_ycbcr(img)[:, 0:1]
+
+
+def studio_y_to_full_y(y: torch.Tensor) -> torch.Tensor:
+    """Exact inverse of the luma rescale: studio Y -> the full-range Y :func:`ycbcr_to_rgb` takes.
+
+    Args:
+        y: Studio-range luma, any shape.
+
+    Returns:
+        Full-range luma, same shape (outside ``[0, 1]`` if ``y`` left 16/255-235/255).
+    """
+    return (y - _STUDIO_Y_OFFSET) / _STUDIO_Y_SCALE
