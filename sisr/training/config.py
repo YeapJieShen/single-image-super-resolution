@@ -390,6 +390,16 @@ class SREvalConfig:
             exactly as an SSIM figure is comparable only within one
             ``ssim_impl``. Recorded in ``hparams`` and in every artifact's
             ``sisr_meta``, so any number can be traced back. Ignored by DISTS.
+
+        self_ensemble: Test-time "x8" self-ensemble — average the model's output over its 8
+            dihedral (flip/rotation) transforms of the input, each inverse-transformed back
+            before averaging (see :mod:`sisr.training.self_ensemble`). Applied only at test
+            and predict time — :meth:`~sisr.training.lightning_module.SRLightning.predict_step`,
+            and the *test*-stage hook of
+            :class:`~sisr.training.callbacks.BenchmarkImageLogger` — never during training or
+            validation-during-fit, so a run's per-step cost is unchanged regardless of this
+            setting. Costs 8x the forward-pass compute wherever it does apply. Default
+            ``False``: byte-identical to today's single pass.
     """
 
     crop_border: int | None = 0
@@ -399,6 +409,7 @@ class SREvalConfig:
     ssim_impl: Literal["wang", "daala"] = "wang"
     perceptual_metrics: list[str] = field(default_factory=list)
     lpips_net: Literal["alex", "vgg", "squeeze"] = "alex"
+    self_ensemble: bool = False
 
     def __post_init__(self) -> None:
         """Validate all channel/metric fields at construction.

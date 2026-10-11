@@ -211,7 +211,7 @@ def test_collect_batch_partial_last_batch_does_not_reuse_earlier_filename():
     # Identity, not the fixture's fixed 1x3x8x8 return: this test calls
     # _collect_batch with batches of size 2 and 1, so predict_rgb's output
     # shape must track its input shape.
-    pl_module.predict_rgb = lambda lr, hr: (lr, hr)
+    pl_module.predict_rgb = lambda lr, hr, self_ensemble=False: (lr, hr)
 
     ds = _stub_dataset_with_img_paths(n=3, name="Set5")
     # batch_size=2 is the LOADER's configured size -- distinct from either
@@ -2328,6 +2328,79 @@ def test_benchmark_collect_batch_routes_through_predict_rgb():
     torch.testing.assert_close(call_args[0], batch[0])
     torch.testing.assert_close(call_args[1], batch[1])
     assert len(cb._buffer["Set5"]) == 2
+
+
+def test_benchmark_validation_batch_end_never_self_ensembles():
+    """Acceptance (#284): self-ensemble must not apply during validation-during-fit (nor a
+    bare cli validate), regardless of eval_config.self_ensemble -- the validation-stage hook
+    must always pass self_ensemble=False to predict_rgb."""
+    pl_module = _make_real_pl_module()
+    pl_module.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"], every_n_val_runs=1)
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="fit")
+    cb.on_validation_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(val_dataloaders=[_stub_dataloader(None), _stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_validation_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=1,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is False
+
+
+def test_benchmark_test_batch_end_reads_eval_config_self_ensemble():
+    """cli test must pass eval_config.self_ensemble through to predict_rgb -- the only place
+    this callback turns self-ensembling on."""
+    pl_module = _make_real_pl_module()
+    pl_module.eval_config.self_ensemble = True
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"])
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
+    cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(test_dataloaders=[_stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_test_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is True
+
+
+def test_benchmark_test_batch_end_off_when_eval_config_leaves_it_default():
+    pl_module = _make_real_pl_module()  # eval_config.self_ensemble defaults False
+    spy = MagicMock(wraps=pl_module.predict_rgb)
+    pl_module.predict_rgb = spy
+
+    cb = BenchmarkImageLogger(dataset_names=["Set5"])
+    cb.setup(SimpleNamespace(datamodule=None), pl_module=None, stage="test")
+    cb.on_test_epoch_start(trainer=SimpleNamespace(), pl_module=pl_module)
+    ds = _stub_dataset_with_img_paths(n=1, name="Set5")
+    trainer = SimpleNamespace(test_dataloaders=[_stub_dataloader(ds)])
+    batch = (torch.rand(1, 3, 16, 16), torch.rand(1, 3, 16, 16))
+    cb.on_test_batch_end(
+        trainer=trainer,
+        pl_module=pl_module,
+        outputs=None,
+        batch=batch,
+        batch_idx=0,
+        dataloader_idx=0,
+    )
+    assert spy.call_args.kwargs["self_ensemble"] is False
 
 
 def test_prediction_writer_creates_output_dir(tmp_path: Path):
