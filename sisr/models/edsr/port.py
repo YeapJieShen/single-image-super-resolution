@@ -10,6 +10,7 @@ model in its constructor.
 
 import re
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -47,6 +48,31 @@ def rename_key(key: str, num_blocks: int) -> str:
     raise ValueError(f"unexpected EDSR parameter name {key!r}.")
 
 
+def drop_mean_shift(state: dict[str, torch.Tensor], model: EDSR | Any, path: str | Path) -> None:
+    """Remove ``sub_mean``/``add_mean`` from ``state`` after checking they are ``model``'s.
+
+    Shared by every released network of this family (EDSR, MDSR): both fold the dataset mean
+    into the model as buffers.
+
+    Raises:
+        ValueError: If the checkpoint's mean shift is not the identity shifted by
+            ``-+ rgb_mean * rgb_range`` (a different dataset mean or range).
+    """
+    rng = model.rgb_range
+    mean = model.mean.flatten() * rng
+    eye = torch.eye(3).view(3, 3, 1, 1)
+    for name, sign in (("sub_mean", -1.0), ("add_mean", 1.0)):
+        if not (
+            torch.allclose(state.pop(f"{name}.weight"), eye, atol=1e-6)
+            and torch.allclose(state.pop(f"{name}.bias"), sign * mean, atol=1e-3)
+        ):
+            raise ValueError(
+                f"{Path(path).name}: its {name} is not the identity shifted by "
+                f"{sign:+g} * rgb_mean * rgb_range for this model (rgb_mean="
+                f"{model.hparams['rgb_mean']}, rgb_range={rng})."
+            )
+
+
 def load_official(path: str | Path, model: EDSR) -> dict[str, torch.Tensor]:
     """Read an official ``.pt`` into a state dict for ``model``.
 
@@ -64,17 +90,5 @@ def load_official(path: str | Path, model: EDSR) -> dict[str, torch.Tensor]:
             mean or range), or it holds a parameter the network does not have.
     """
     state = torch.load(path, map_location="cpu", weights_only=True)
-    rng = model.rgb_range
-    mean = model.mean.flatten() * rng
-    eye = torch.eye(3).view(3, 3, 1, 1)
-    for name, sign in (("sub_mean", -1.0), ("add_mean", 1.0)):
-        if not (
-            torch.allclose(state.pop(f"{name}.weight"), eye, atol=1e-6)
-            and torch.allclose(state.pop(f"{name}.bias"), sign * mean, atol=1e-3)
-        ):
-            raise ValueError(
-                f"{Path(path).name}: its {name} is not the identity shifted by "
-                f"{sign:+g} * rgb_mean * rgb_range for this model (rgb_mean="
-                f"{model.hparams['rgb_mean']}, rgb_range={rng})."
-            )
+    drop_mean_shift(state, model, path)
     return {rename_key(k, model.hparams["num_blocks"]): v for k, v in state.items()}

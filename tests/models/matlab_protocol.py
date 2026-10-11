@@ -1,6 +1,8 @@
 """The authors' MATLAB evaluation protocol (VDSR.m, DRCN.m, compute_diff.m), test-side only.
 
-Shared by the DRCN and VDSR parity tests. Both releases evaluate the same way: ``modcrop``;
+Shared by the DRCN, VDSR, EDSR and MDSR parity tests (the last two use ``psnr_matlab``, scoring
+a float pipeline output the way the paper's MATLAB evaluation would).
+DRCN and VDSR evaluate: ``modcrop``;
 ``rgb2ycbcr`` for a colour image but the **raw plane for a single-channel one** (Set14's
 ``bridge``: scored through RGB it gains 20*log10(255/219) = 1.3219 dB); bicubic down and up
 on ``single`` 0-1 planes with no uint8 in between; the network input's Y clamped to
@@ -10,8 +12,10 @@ feature: nothing here is imported by ``sisr``.
 """
 
 import numpy as np
+import torch
 from PIL import Image
 
+from sisr.colorspace import rgb_to_ycbcr_studio
 from sisr.utils.imresize import _contributions
 
 
@@ -93,3 +97,42 @@ def score_image(path, sf, predict):
         return psnr(gt, u8(pred), sf)
     png = ycbcr2rgb(u8(np.stack([pred, cb, cr], -1)))
     return psnr(gt, rgb2ycbcr(png)[..., 0], sf)
+
+
+# --- scoring a float pipeline output (EDSR / MDSR) ---------------------------------------
+
+
+def psnr_float_y(sr, hr, scale):
+    """This pipeline's own metric: studio Y of the float RGB, border = scale."""
+    a, b = (rgb_to_ycbcr_studio(t)[:, :1, scale:-scale, scale:-scale] * 255 for t in (sr, hr))
+    return float(10 * torch.log10(255.0**2 / ((a - b) ** 2).mean()))
+
+
+def psnr_matlab(sr, hr, scale):
+    """The paper's protocol (sec 4.5: "We used MATLAB functions for evaluation").
+
+    SR is clamped and rounded to 8-bit RGB, MATLAB's ``rgb2ycbcr`` on uint8 returns uint8 Y (so
+    both luma planes are rounded), ``scale`` pixels are shaved, and PSNR is taken on doubles.
+    """
+
+    def luma(t):
+        rgb = (t[0].clamp(0, 1) * 255).round().byte().permute(1, 2, 0).cpu().numpy()
+        return rgb2ycbcr(rgb)[..., 0]
+
+    return psnr(luma(hr), luma(sr), scale)
+
+
+def psnr_matlab_eval(sr, hr, scale, grey):
+    """NTIRE2017 ``demo/evaluation.m``: a single-channel target is scored on its raw plane.
+
+    Colour targets go through ``psnr_matlab``. For a grey one (Set14's ``bridge``) the raw 8-bit
+    plane is compared with channel 1 of the 8-bit output, with no ``rgb2ycbcr`` on either side,
+    so the 1.3219 dB studio-range gain of the RGB route does not apply.
+    """
+    if not grey:
+        return psnr_matlab(sr, hr, scale)
+
+    def plane(t):
+        return (t[0, 0].clamp(0, 1) * 255).round().byte().cpu().numpy()
+
+    return psnr(plane(hr), plane(sr), scale)

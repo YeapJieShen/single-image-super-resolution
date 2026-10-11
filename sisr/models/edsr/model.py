@@ -15,16 +15,22 @@ from sisr.models.base import SRModel
 DIV2K_RGB_MEAN = (0.4488, 0.4371, 0.4040)
 
 
-class _ResBlock(torch.nn.Module):
-    """``x + residual_scale * conv(relu(conv(x)))`` -- no BatchNorm."""
+class ResBlock(torch.nn.Module):
+    """``x + residual_scale * conv(relu(conv(x)))`` -- no BatchNorm.
 
-    def __init__(self, features: int, residual_scale: float):
+    Shared with :class:`~sisr.models.mdsr.MDSR`, whose per-scale pre-processing blocks use 5x5
+    convs (``kernel_size``).
+    """
+
+    def __init__(self, features: int, residual_scale: float, kernel_size: int = 3):
         super().__init__()
         self.residual_scale = residual_scale
-        self.conv1 = torch.nn.Conv2d(features, features, 3, padding=1)
-        self.conv2 = torch.nn.Conv2d(features, features, 3, padding=1)
+        pad = kernel_size // 2
+        self.conv1 = torch.nn.Conv2d(features, features, kernel_size, padding=pad)
+        self.conv2 = torch.nn.Conv2d(features, features, kernel_size, padding=pad)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add the scaled residual to the input."""
         return x + self.residual_scale * self.conv2(torch.relu(self.conv1(x)))
 
 
@@ -110,7 +116,7 @@ class EDSR(SRModel):
         )
         self.head = torch.nn.Conv2d(in_out_channels, features, 3, padding=1)
         self.blocks = torch.nn.Sequential(
-            *[_ResBlock(features, residual_scale) for _ in range(num_blocks)]
+            *[ResBlock(features, residual_scale) for _ in range(num_blocks)]
         )
         self.body_conv = torch.nn.Conv2d(features, features, 3, padding=1)
         factors = [3] if scale == 3 else [2] * int(math.log2(scale))
