@@ -39,7 +39,7 @@ Datasets are not distributed here. Put HR images where the templates expect them
 ```
 data/
   DIV2K_train_HR/    DIV2K_valid_HR/                 # DIV2K, from its authors
-  Set5_HR/  Set14_HR/  BSD100_HR/                    # benchmark sets
+  Set5_HR/  Set14_HR/  BSD100_HR/  Urban100_HR/      # benchmark sets
 ```
 
 The benchmark archive and its pinned checksum are described under
